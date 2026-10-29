@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import {
   LayoutDashboard, Users, FileText, Boxes, Factory, CalendarCheck,
   Truck, Menu, X, LogOut, Search, Bell, Layers,
-  ClipboardList, Banknote, Wrench, Wallet, ShoppingCart, ChevronDown, Building2, Settings as Cog, Calculator, LockKeyhole,
+  ClipboardList, Banknote, Wrench, Wallet, ShoppingCart, ChevronDown, Building2, Settings as Cog, ClipboardCheck, LockKeyhole,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -35,7 +35,7 @@ const NAV_GROUPS = [
     { to: "/fleet", label: "Fleet", icon: Wrench, section: "fleet" },
   ] },
   { label: "Finance & team", items: [
-    { to: "/costs", label: "Costs", icon: Calculator, section: "costs" },
+    { to: "/grv", label: "GRV", icon: ClipboardCheck, section: "grv" },
     { to: "/expenses", label: "Expenses", icon: Banknote, section: "expenses" },
     { to: "/daily-report", label: "Daily Report", icon: FileText, section: "daily-report" },
     { to: "/attendance", label: "Attendance", icon: CalendarCheck, section: "attendance" },
@@ -167,7 +167,9 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
           <div key={group.label} className="mb-2">
             <p className="px-3 pt-3 pb-1 text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-100/40">{group.label}</p>
             {group.items.map((n) => (
-              user?.is_worker && !user.allowed_sections?.includes(n.section)
+              user?.is_worker
+              && !user.allowed_sections?.includes(n.section)
+              && !(n.section === "grv" && user.allowed_sections?.includes("costs"))
                 ? <div key={n.to} aria-disabled="true" title="Your administrator has not granted access to this section" data-testid={`nav-locked-${n.label.toLowerCase()}`}
                   className="flex min-h-9 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium leading-tight text-emerald-50/35">
                   <n.icon size={18} />

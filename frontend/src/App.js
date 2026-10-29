@@ -25,6 +25,7 @@ const Deliveries = lazy(pageLoaders["/deliveries"]);
 const Fleet = lazy(pageLoaders["/fleet"]);
 const Expenses = lazy(pageLoaders["/expenses"]);
 const Costs = lazy(pageLoaders["/costs"]);
+const GRV = lazy(pageLoaders["/grv"]);
 const DailyReport = lazy(pageLoaders["/daily-report"]);
 const Settings = lazy(pageLoaders["/settings"]);
 
@@ -45,13 +46,14 @@ function Protected({ children }) {
                     : location.pathname.startsWith("/deliveries") ? "deliveries"
                       : location.pathname.startsWith("/fleet") ? "fleet"
                         : location.pathname.startsWith("/expenses") ? "expenses"
+                          : location.pathname.startsWith("/grv") ? "grv"
                           : location.pathname.startsWith("/costs") ? "costs"
                             : location.pathname.startsWith("/daily-report") ? "daily-report"
                               : location.pathname.startsWith("/client-payments") ? "client-payments"
                                 : location.pathname.startsWith("/settings") ? "settings"
                                   : null;
     const allowedSections = user.allowed_sections || [];
-    if (!section || !allowedSections.includes(section)) {
+    if (!section || (!allowedSections.includes(section) && !(section === "grv" && allowedSections.includes("costs")))) {
       const landingPath = [
         ["invoices", "/invoices"],
         ["customers", "/customers"],
@@ -64,7 +66,8 @@ function Protected({ children }) {
         ["deliveries", "/deliveries"],
         ["fleet", "/fleet"],
         ["expenses", "/expenses"],
-        ["costs", "/costs"],
+        ["grv", "/grv"],
+        ["costs", "/grv"],
         ["daily-report", "/daily-report"],
         ["client-payments", "/client-payments"],
         ["settings", "/settings"],
@@ -271,6 +274,7 @@ function AppRouter() {
             <Route path="/fleet" element={<Fleet />} />
             <Route path="/expenses" element={<Expenses />} />
             <Route path="/costs" element={<Costs />} />
+            <Route path="/grv" element={<GRV />} />
             <Route path="/daily-report" element={<DailyReport />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/" replace />} />

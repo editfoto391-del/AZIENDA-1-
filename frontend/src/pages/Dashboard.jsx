@@ -28,7 +28,7 @@ const WORKER_SECTION_OPTIONS = [
   ["customers", "Customers"], ["suppliers", "Suppliers"], ["buyings", "Buyings"],
   ["invoices", "Invoice"], ["orders", "Orders"], ["stock", "Stock"],
   ["production", "Production"], ["attendance", "Attendance"], ["deliveries", "Deliveries"],
-  ["fleet", "Fleet"], ["expenses", "Expenses"], ["costs", "Costs"],
+  ["fleet", "Fleet"], ["expenses", "Expenses"], ["grv", "GRV"],
   ["daily-report", "Daily Report"], ["client-payments", "Clients payment and balances"],
   ["settings", "Settings"],
 ];
@@ -260,7 +260,7 @@ export default function Dashboard() {
       worker_role: worker.worker_role,
       password: "",
       company_id: worker.company_id,
-      allowed_sections: worker.allowed_sections || [],
+      allowed_sections: [...new Set((worker.allowed_sections || []).map((section) => section === "costs" ? "grv" : section))],
     });
     setWorkerModalOpen(true);
   };

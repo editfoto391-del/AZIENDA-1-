@@ -24,6 +24,11 @@ import seed_data
 from costs_math import calculate_production_cost
 from piecework_math import calculate_piecework
 from salary_math import calculate_salary_hours
+from grv_math import (
+    aggregate_accepted_stock_lines,
+    grv_confirmation_status,
+    validate_grv_line_quantities,
+)
 from tenancy import DEFAULT_COMPANY_ID, GLOBAL_COLLECTIONS, ScopedDatabase, active_company_id, tenant_database, uses_unified_price_list
 from backup_service import (
     backup_configuration,
@@ -147,6 +152,36 @@ class StockLock:
             await db.stock.update_many({"id": {"$in": self.held}}, {"$unset": {"lock": ""}})
         self.held = []
 
+class PurchaseOrderReceiptLock:
+    def __init__(self, order_id, grv_id):
+        self.order_id = order_id
+        self.grv_id = grv_id
+
+    async def __aenter__(self):
+        if not self.order_id:
+            return None
+        order = await db.purchase_orders.find_one_and_update(
+            {
+                "id": self.order_id,
+                "$or": [
+                    {"receiving_grv_id": {"$exists": False}},
+                    {"receiving_grv_id": self.grv_id},
+                ],
+            },
+            {"$set": {"receiving_grv_id": self.grv_id}},
+            projection={"_id": 0}, return_document=ReturnDocument.AFTER,
+        )
+        if not order:
+            raise HTTPException(409, "Another GRV is currently receiving this purchase order")
+        return order
+
+    async def __aexit__(self, *args):
+        if self.order_id:
+            await db.purchase_orders.update_one(
+                {"id": self.order_id, "receiving_grv_id": self.grv_id},
+                {"$unset": {"receiving_grv_id": ""}},
+            )
+
 async def log_audit(entity, eid, action, user, before=None, after=None, reason=""):
     strip = lambda d: {k: v for k, v in (d or {}).items() if k not in ("_id", "password_hash", "audit")} if isinstance(d, dict) else d
     await db.audit_log.insert_one({"id": new_id(), "entity": entity, "entity_id": eid, "action": action,
@@ -169,7 +204,7 @@ OWNER_EMAIL_ALIASES = {"2j2skp87z8@privaterelay.appleid.com"}
 WORKER_SECTIONS = {
     "customers", "suppliers", "buyings", "invoices", "orders", "stock",
     "production", "attendance", "deliveries", "fleet", "expenses",
-    "costs", "daily-report", "client-payments", "settings",
+    "costs", "grv", "daily-report", "client-payments", "settings",
 }
 
 def canonical_email(email):
@@ -245,6 +280,10 @@ def enforce_worker_api_access(request, user):
 
     support_rules = {
         "buyings": [("suppliers", "GET"), ("stock", "GET")],
+        "grv": [
+            ("suppliers", "GET"), ("stock", "GET"),
+            ("purchase-orders", "GET"), ("settings", "GET"),
+        ],
         "suppliers": [("buyings", "GET")],
         "production": [("stock", "GET"), ("piece-production", "GET"), ("piece-production", "POST")],
         "attendance": [("piece-production", "GET"), ("piece-production", "POST")],
@@ -294,6 +333,8 @@ def enforce_worker_api_access(request, user):
         "cost-records": "costs",
         "reports/costs": "costs",
         "costs": "costs",
+        "grvs": "grv",
+        "grv": "grv",
         "daily-report": "daily-report",
         "prices": "settings",
         "settings": "settings",
@@ -305,7 +346,9 @@ def enforce_worker_api_access(request, user):
          if path == prefix or path.startswith(f"{prefix}/")),
         None,
     )
-    if section and section in allowed:
+    if section and (
+        section in allowed or (section == "grv" and "costs" in allowed)
+    ):
         return
     raise HTTPException(403, "This worker account cannot access this section")
 
@@ -3624,8 +3667,32 @@ class PurchaseOrderIn(BaseModel):
     notes: Optional[str] = ""
     items: List[PurchaseOrderLineIn]
 
-class PurchaseReceiptIn(BaseModel):
-    quantities: List[float]
+class GRVLineIn(BaseModel):
+    stock_id: Optional[str] = ""
+    product_code: Optional[str] = ""
+    product: str = ""
+    size: Optional[str] = ""
+    purchase_order_item_index: Optional[int] = None
+    ordered_quantity: float = 0
+    previously_received_quantity: float = 0
+    remaining_quantity: float = 0
+    actual_received_quantity: float = 0
+    accepted_quantity: float = 0
+    rejected_quantity: float = 0
+    damaged_quantity: float = 0
+    unit_cost: float = 0
+    total_value: float = 0
+
+class GRVIn(BaseModel):
+    supplier_id: Optional[str] = ""
+    supplier_name: Optional[str] = ""
+    purchase_order_id: Optional[str] = ""
+    delivery_note_number: Optional[str] = ""
+    received_date: str = Field(default_factory=today_str)
+    received_by: Optional[str] = ""
+    warehouse: Optional[str] = ""
+    notes: Optional[str] = ""
+    items: List[GRVLineIn] = Field(default_factory=list)
 
 class MonthlyBusinessPurchaseIn(BaseModel):
     name: str
@@ -3885,6 +3952,630 @@ async def update_monthly_business_purchase_actual(
 async def get_purchase_orders(user=Depends(get_current_user)):
     return await listall("purchase_orders", sort=("created_at", -1))
 
+@api.get("/grvs/purchase-orders")
+async def get_grv_purchase_orders(user=Depends(get_current_user)):
+    orders = await listall("purchase_orders", sort=("created_at", -1))
+    return [{
+        **order,
+        "items": [
+            {
+                **item,
+                "remaining_quantity": max(
+                    0, float(item["quantity"]) - float(item.get("received_quantity", 0))
+                ),
+            }
+            for item in order.get("items", [])
+        ],
+    } for order in orders if order.get("status") in ("ordered", "partially_received")]
+
+async def _grv_items_from_request(requested_items, purchase_order=None):
+    if purchase_order and not requested_items:
+        requested_items = [
+            GRVLineIn(
+                stock_id=item.get("stock_id", ""),
+                purchase_order_item_index=index,
+                actual_received_quantity=0,
+            )
+            for index, item in enumerate(purchase_order.get("items", []))
+            if float(item["quantity"]) > float(item.get("received_quantity", 0))
+        ]
+    if not requested_items:
+        raise HTTPException(400, "Add at least one product to the GRV")
+
+    result = []
+    for line in requested_items:
+        data = line.model_dump() if isinstance(line, GRVLineIn) else dict(line)
+        po_index = data.get("purchase_order_item_index")
+        po_item = None
+        if purchase_order:
+            if po_index is None or not 0 <= po_index < len(purchase_order.get("items", [])):
+                raise HTTPException(400, "Each GRV line must identify its purchase-order line")
+            po_item = purchase_order["items"][po_index]
+            remaining = max(
+                0, float(po_item["quantity"]) - float(po_item.get("received_quantity", 0))
+            )
+            if remaining <= 0:
+                raise HTTPException(409, "The selected purchase-order line is already fully received")
+            stock_id = po_item.get("stock_id")
+            product = po_item.get("product", "")
+            size = po_item.get("size", "")
+            unit_cost = po_item.get("unit_price", 0)
+            ordered_quantity = po_item["quantity"]
+            previously_received = po_item.get("received_quantity", 0)
+        else:
+            stock_id = (data.get("stock_id") or "").strip()
+            stock = await db.stock.find_one({"id": stock_id}, {"_id": 0}) if stock_id else None
+            if not stock and (data.get("product") or "").strip() and (data.get("size") or "").strip():
+                stock = await db.stock.find_one({
+                    "product": {"$regex": f"^{re.escape(data['product'].strip())}$", "$options": "i"},
+                    "size": {"$regex": f"^{re.escape(data['size'].strip())}$", "$options": "i"},
+                }, {"_id": 0})
+            if not stock:
+                raise HTTPException(400, "Select a valid stock product for every GRV line")
+            stock_id = stock["id"]
+            product = stock["product"]
+            size = stock.get("size", "")
+            unit_cost = data.get("unit_cost", 0)
+            ordered_quantity = data.get("ordered_quantity", 0)
+            previously_received = data.get("previously_received_quantity", 0)
+            remaining = data.get("remaining_quantity", 0)
+
+        stock = await db.stock.find_one({"id": stock_id}, {"_id": 0}) if stock_id else None
+        if not stock:
+            raise HTTPException(409, f"Stock item is missing for {product} {size}")
+        quantity_values = {
+            "actual_received_quantity": data.get("actual_received_quantity", 0),
+            "accepted_quantity": data.get("accepted_quantity", 0),
+            "rejected_quantity": data.get("rejected_quantity", 0),
+            "damaged_quantity": data.get("damaged_quantity", 0),
+            "unit_cost": unit_cost,
+        }
+        try:
+            calculated = validate_grv_line_quantities(
+                quantity_values, remaining=remaining if purchase_order else None,
+            )
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, str(error))
+        result.append({
+            "stock_id": stock_id,
+            "product_code": data.get("product_code") or stock.get("code") or stock_id,
+            "product": product,
+            "size": size,
+            "purchase_order_item_index": po_index,
+            "ordered_quantity": float(ordered_quantity or 0),
+            "previously_received_quantity": float(previously_received or 0),
+            "remaining_quantity": float(remaining or 0),
+            **calculated,
+        })
+    return result
+
+def _validate_grv_date(value):
+    try:
+        parsed = date.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Received date must use YYYY-MM-DD format")
+    if parsed.isoformat() != value:
+        raise HTTPException(400, "Received date must use YYYY-MM-DD format")
+
+def _grv_status_filter(query_params, user):
+    filters = {}
+    profile_id = query_params.get("company_profile_id")
+    if profile_id and profile_id != user["_active_company_id"]:
+        raise HTTPException(403, "GRVs are only available for the active company profile")
+    supplier_id = query_params.get("supplier_id")
+    if supplier_id:
+        filters["supplier_id"] = supplier_id
+    status = query_params.get("status")
+    if status:
+        if status not in ("draft", "pending_inspection", "partially_received", "completed", "discrepancy", "cancelled"):
+            raise HTTPException(400, "Invalid GRV status filter")
+        filters["status"] = status
+    received_from = query_params.get("date_from")
+    received_to = query_params.get("date_to")
+    if received_from:
+        _validate_grv_date(received_from)
+    if received_to:
+        _validate_grv_date(received_to)
+    if received_from and received_to and received_from > received_to:
+        raise HTTPException(400, "Start date must not be after end date")
+    if received_from or received_to:
+        filters["received_date"] = {
+            **({"$gte": received_from} if received_from else {}),
+            **({"$lte": received_to} if received_to else {}),
+        }
+    return filters
+
+@api.get("/grvs/dashboard")
+async def get_grv_dashboard(
+    date_from: str = "", date_to: str = "", supplier_id: str = "",
+    company_profile_id: str = "", status: str = "", user=Depends(get_current_user),
+):
+    filters = _grv_status_filter({
+        "date_from": date_from, "date_to": date_to,
+        "supplier_id": supplier_id, "company_profile_id": company_profile_id,
+        "status": status,
+    }, user)
+    records = await listall("grvs", filters, sort=("created_at", -1))
+    profile = next(
+        (item for item in COMPANY_PROFILES if item["id"] == user["_active_company_id"]), None,
+    )
+    return {
+        "company_profile_id": user["_active_company_id"],
+        "company_profile_name": profile["name"] if profile else user["_active_company_id"],
+        "total_grvs": len(records),
+        "pending_grvs": sum(
+            item.get("status") in ("draft", "pending_inspection", "confirming")
+            for item in records
+        ),
+        "completed_grvs": sum(item.get("status") == "completed" for item in records),
+        "partially_received_grvs": sum(item.get("status") == "partially_received" for item in records),
+        "discrepancy_grvs": sum(item.get("status") == "discrepancy" for item in records),
+        "rejected_items": sum(
+            float(line.get("rejected_quantity", 0)) > 0
+            for item in records for line in item.get("items", [])
+        ),
+        "rejected_quantity": sum(
+            float(line.get("rejected_quantity", 0))
+            for item in records for line in item.get("items", [])
+        ),
+        "recent_grvs": records[:10],
+    }
+
+@api.get("/grvs")
+async def get_grvs(
+    date_from: str = "", date_to: str = "", supplier_id: str = "",
+    company_profile_id: str = "", status: str = "", user=Depends(get_current_user),
+):
+    filters = _grv_status_filter({
+        "date_from": date_from, "date_to": date_to,
+        "supplier_id": supplier_id, "company_profile_id": company_profile_id,
+        "status": status,
+    }, user)
+    return await listall("grvs", filters, sort=("created_at", -1))
+
+@api.post("/grvs")
+async def create_grv(body: GRVIn, user=Depends(get_current_user)):
+    _validate_grv_date(body.received_date)
+    purchase_order_id = (body.purchase_order_id or "").strip()
+    purchase_order = None
+    if purchase_order_id:
+        purchase_order = await db.purchase_orders.find_one({"id": purchase_order_id}, {"_id": 0})
+        if not purchase_order:
+            raise HTTPException(404, "Purchase order not found in the active company")
+        if purchase_order.get("status") not in ("ordered", "partially_received"):
+            raise HTTPException(409, "Only open purchase orders can be linked to a new GRV")
+    supplier_id = (body.supplier_id or "").strip()
+    supplier_name = (body.supplier_name or "").strip()
+    if purchase_order:
+        supplier_id = purchase_order.get("supplier_id", "")
+        supplier_name = purchase_order.get("supplier_name", "")
+    elif supplier_id:
+        supplier = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+        if not supplier:
+            raise HTTPException(400, "Supplier not found in the active company")
+        supplier_name = supplier["name"]
+    if not supplier_name:
+        raise HTTPException(400, "Select a supplier")
+    items = await _grv_items_from_request(body.items, purchase_order)
+    reference = await next_ref("grv", "GRV")
+    record = {
+        "grv_number": reference,
+        "supplier_id": supplier_id,
+        "supplier_name": supplier_name,
+        "purchase_order_id": purchase_order_id,
+        "purchase_order_reference": purchase_order.get("reference", "") if purchase_order else "",
+        "delivery_note_number": (body.delivery_note_number or "").strip(),
+        "received_date": body.received_date,
+        "received_by": (body.received_by or user.get("name") or user["email"]).strip(),
+        "warehouse": (body.warehouse or "").strip(),
+        "notes": (body.notes or "").strip(),
+        "items": items,
+        "status": "draft",
+        "created_by": user["email"],
+        "edited_by": user["email"],
+        "audit": [{"action": "created", "by": user["email"], "at": now_iso()}],
+    }
+    created = await insert("grvs", record)
+    await log_audit("grv", created["id"], "created", user, after=created)
+    return created
+
+@api.put("/grvs/{grv_id}")
+async def edit_grv(grv_id: str, body: GRVIn, user=Depends(get_current_user)):
+    before = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
+    if not before:
+        raise HTTPException(404, "GRV not found")
+    if before.get("status") != "draft":
+        raise HTTPException(409, "Only draft GRVs can be edited; confirmed GRVs require a traceable reversal")
+    _validate_grv_date(body.received_date)
+    purchase_order_id = (body.purchase_order_id or "").strip()
+    purchase_order = await db.purchase_orders.find_one({"id": purchase_order_id}, {"_id": 0}) if purchase_order_id else None
+    if purchase_order_id and not purchase_order:
+        raise HTTPException(404, "Purchase order not found in the active company")
+    supplier_id = purchase_order.get("supplier_id", "") if purchase_order else (body.supplier_id or "").strip()
+    supplier_name = purchase_order.get("supplier_name", "") if purchase_order else (body.supplier_name or "").strip()
+    if not purchase_order and supplier_id:
+        supplier = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+        if not supplier:
+            raise HTTPException(400, "Supplier not found in the active company")
+        supplier_name = supplier["name"]
+    if not supplier_name:
+        raise HTTPException(400, "Select a supplier")
+    items = await _grv_items_from_request(body.items, purchase_order)
+    audit = before.get("audit", []) + [{"action": "edited", "by": user["email"], "at": now_iso()}]
+    updates = {
+        "supplier_id": supplier_id,
+        "supplier_name": supplier_name,
+        "purchase_order_id": purchase_order_id,
+        "purchase_order_reference": purchase_order.get("reference", "") if purchase_order else "",
+        "delivery_note_number": (body.delivery_note_number or "").strip(),
+        "received_date": body.received_date,
+        "received_by": (body.received_by or user.get("name") or user["email"]).strip(),
+        "warehouse": (body.warehouse or "").strip(),
+        "notes": (body.notes or "").strip(),
+        "items": items,
+        "edited_by": user["email"],
+        "audit": audit,
+    }
+    changed = await db.grvs.update_one(
+        {"id": grv_id, "status": "draft"},
+        {"$set": {**updates, "updated_at": now_iso()}},
+    )
+    if not changed.matched_count:
+        raise HTTPException(409, "Only draft GRVs can be edited; reload and try again")
+    updated = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
+    await log_audit("grv", grv_id, "edited", user, before=before, after=updated)
+    return updated
+
+@api.post("/grvs/{grv_id}/inspect")
+async def mark_grv_pending_inspection(grv_id: str, user=Depends(get_current_user)):
+    before = await db.grvs.find_one_and_update(
+        {"id": grv_id, "status": "draft"},
+        {"$set": {
+            "status": "pending_inspection",
+            "edited_by": user["email"],
+            "updated_at": now_iso(),
+        }, "$push": {
+            "audit": {"action": "pending_inspection", "by": user["email"], "at": now_iso()},
+        }},
+        projection={"_id": 0}, return_document=ReturnDocument.AFTER,
+    )
+    if not before:
+        if not await db.grvs.find_one({"id": grv_id}, {"_id": 1}):
+            raise HTTPException(404, "GRV not found")
+        raise HTTPException(409, "Only draft GRVs can enter inspection")
+    updated = before
+    await log_audit("grv", grv_id, "pending_inspection", user, before=before, after=updated)
+    return updated
+
+@api.post("/grvs/{grv_id}/confirm")
+async def confirm_grv(grv_id: str, user=Depends(get_current_user)):
+    grv = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
+    if not grv:
+        raise HTTPException(404, "GRV not found")
+    if grv.get("status") in ("completed", "partially_received", "discrepancy", "cancelled"):
+        raise HTTPException(409, "This GRV has already been confirmed or cancelled")
+    if grv.get("status") in ("draft", "pending_inspection"):
+        grv = await db.grvs.find_one_and_update(
+            {"id": grv_id, "status": {"$in": ["draft", "pending_inspection"]}},
+            {"$set": {"status": "confirming"}},
+            projection={"_id": 0}, return_document=ReturnDocument.AFTER,
+        )
+        if not grv:
+            raise HTTPException(409, "GRV confirmation is already in progress")
+
+    _validate_grv_date(grv["received_date"])
+    try:
+        normalized_items = []
+        po = None
+        if grv.get("purchase_order_id"):
+            po = await db.purchase_orders.find_one({"id": grv["purchase_order_id"]}, {"_id": 0})
+            if not po:
+                raise HTTPException(409, "Linked purchase order is no longer available")
+        for line in grv.get("items", []):
+            try:
+                calculated = validate_grv_line_quantities(
+                    line,
+                    remaining=line.get("remaining_quantity") if po else None,
+                )
+            except (TypeError, ValueError) as error:
+                raise HTTPException(400, str(error))
+            normalized_items.append({**line, **calculated})
+        if not normalized_items:
+            raise HTTPException(400, "GRV has no product lines")
+        if not any(line["actual_received_quantity"] > 0 for line in normalized_items):
+            raise HTTPException(400, "Enter an actual received quantity before confirming the GRV")
+        accepted = aggregate_accepted_stock_lines(normalized_items)
+        stock_ids = [item["stock_id"] for item in accepted]
+        async with StockLock(stock_ids):
+            po_lock_acquired = False
+            if po:
+                locked = await db.purchase_orders.find_one_and_update(
+                    {
+                        "id": po["id"],
+                        "$or": [
+                            {"receiving_grv_id": {"$exists": False}},
+                            {"receiving_grv_id": grv_id},
+                        ],
+                    },
+                    {"$set": {"receiving_grv_id": grv_id}},
+                    projection={"_id": 0}, return_document=ReturnDocument.AFTER,
+                )
+                if not locked:
+                    raise HTTPException(409, "Another GRV is currently receiving this purchase order")
+                po_lock_acquired = True
+                po = locked
+                received_by_index = {}
+                for line in normalized_items:
+                    index = line.get("purchase_order_item_index")
+                    if index is None or not 0 <= index < len(po.get("items", [])):
+                        raise HTTPException(409, "GRV purchase-order line mapping is invalid")
+                    po_item = po["items"][index]
+                    if po_item.get("stock_id") != line["stock_id"]:
+                        raise HTTPException(409, "GRV product no longer matches its purchase-order line")
+                    received_by_index[index] = (
+                        received_by_index.get(index, 0)
+                        + line["actual_received_quantity"]
+                    )
+                for index, quantity in received_by_index.items():
+                    po_item = po["items"][index]
+                    remaining = max(
+                        0, float(po_item["quantity"]) - float(po_item.get("received_quantity", 0))
+                    )
+                    if grv_id not in po.get("grv_receipts", []) and quantity > remaining:
+                        raise HTTPException(
+                            409,
+                            f"Only {remaining:g} remain for {po_item['product']} {po_item.get('size', '')}",
+                        )
+
+            movement_ids = []
+            try:
+                for item in accepted:
+                    stock = await db.stock.find_one({"id": item["stock_id"]}, {"_id": 0})
+                    if not stock:
+                        raise HTTPException(409, f"Stock item no longer exists: {item['product']} {item['size']}")
+                    if stock["product"] != item["product"] or stock.get("size", "") != item["size"]:
+                        raise HTTPException(409, "GRV product no longer matches its stock record")
+                    dedupe_key = f"grv:{grv_id}:{item['stock_id']}"
+                    movement = await db.stock_movements.find_one({"dedupe_key": dedupe_key}, {"_id": 0})
+                    if movement:
+                        if (
+                            movement.get("grv_id") != grv_id
+                            or float(movement.get("quantity", 0)) != item["quantity"]
+                            or movement.get("direction", 1) != 1
+                        ):
+                            raise HTTPException(409, "A conflicting stock movement already uses this GRV")
+                    else:
+                        movement = await post_movement(
+                            stock, "purchase", item["quantity"], user,
+                            reason=f"Goods received {grv['grv_number']}",
+                            reference=grv["grv_number"],
+                            dedupe_key=dedupe_key, direction=1,
+                            extra={
+                                "grv_id": grv_id,
+                                "grv_number": grv["grv_number"],
+                                "purchase_order_id": grv.get("purchase_order_id", ""),
+                                "receiving_date": grv["received_date"],
+                                "date": grv["received_date"],
+                                "warehouse": grv.get("warehouse", ""),
+                                "unit_cost": item["unit_cost"],
+                                "total_value": item["total_value"],
+                            },
+                        )
+                        await log_audit("stock_movement", movement["id"], "posted", user, after=movement)
+                    movement_ids.append(movement["id"])
+
+                po_complete = True
+                if po:
+                    increments = {}
+                    next_received = []
+                    for index, item in enumerate(po["items"]):
+                        quantity = received_by_index.get(index, 0)
+                        if quantity:
+                            increments[f"items.{index}.received_quantity"] = quantity
+                        current_received = float(item.get("received_quantity", 0)) + quantity
+                        next_received.append(current_received)
+                        if current_received + 1e-8 < float(item["quantity"]):
+                            po_complete = False
+                    update = {
+                        "$addToSet": {"grv_receipts": grv_id},
+                        "$set": {
+                            "status": "received" if po_complete else "partially_received",
+                            **({"received_at": now_iso()} if po_complete else {}),
+                        },
+                    }
+                    if increments:
+                        update["$inc"] = increments
+                    changed = await db.purchase_orders.update_one(
+                        {"id": po["id"], "grv_receipts": {"$ne": grv_id}}, update,
+                    )
+                    if changed.matched_count == 0:
+                        latest = await db.purchase_orders.find_one({"id": po["id"]}, {"_id": 0})
+                        if grv_id not in latest.get("grv_receipts", []):
+                            raise HTTPException(409, "Purchase order receipt could not be recorded")
+                        next_received = [
+                            float(item.get("received_quantity", 0))
+                            for item in latest.get("items", [])
+                        ]
+                        po_complete = all(
+                            received + 1e-8 >= float(item["quantity"])
+                            for received, item in zip(next_received, latest.get("items", []))
+                        )
+                status = grv_confirmation_status(
+                    normalized_items, po_complete if po else True,
+                )
+                audit = grv.get("audit", []) + [{
+                    "action": "confirmed", "by": user["email"], "at": now_iso(),
+                }]
+                updated = await update_doc("grvs", grv_id, {
+                    "items": normalized_items,
+                    "status": status,
+                    "movement_ids": movement_ids,
+                    "confirmed_by": user["email"],
+                    "confirmed_at": now_iso(),
+                    "edited_by": user["email"],
+                    "audit": audit,
+                })
+            finally:
+                if po_lock_acquired:
+                    await db.purchase_orders.update_one(
+                        {"id": po["id"], "receiving_grv_id": grv_id},
+                        {"$unset": {"receiving_grv_id": ""}},
+                    )
+        await log_audit("grv", grv_id, "confirmed", user, before=grv, after=updated)
+        return updated
+    except HTTPException:
+        raise
+    except Exception:
+        logging.exception("GRV confirmation failed; retry is safe because stock movement keys are idempotent")
+        raise HTTPException(502, "GRV confirmation failed. Retry the confirmation or ask an administrator to inspect the GRV.")
+
+@api.post("/grvs/{grv_id}/cancel")
+async def cancel_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user)):
+    if not body.reason.strip():
+        raise HTTPException(400, "A cancellation reason is required")
+    audit_entry = {
+        "action": "cancelled", "by": user["email"], "at": now_iso(),
+        "reason": body.reason.strip(),
+    }
+    original = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
+    if not original:
+        raise HTTPException(404, "GRV not found")
+    before = await db.grvs.find_one_and_update(
+        {"id": grv_id, "status": {"$in": ["draft", "pending_inspection"]}},
+        {"$set": {"status": "cancelled", "cancel_reason": body.reason.strip(),
+                  "cancelled_by": user["email"], "cancelled_at": now_iso(),
+                  "updated_at": now_iso()},
+         "$push": {"audit": audit_entry},
+        },
+        projection={"_id": 0}, return_document=ReturnDocument.AFTER,
+    )
+    if not before:
+        raise HTTPException(409, "Only unconfirmed GRVs can be cancelled")
+    await log_audit("grv", grv_id, "cancelled", user, before=original, after=before,
+                    reason=body.reason.strip())
+    return before
+
+@api.post("/grvs/{grv_id}/reverse")
+async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user)):
+    require_admin(user)
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required to reverse a confirmed GRV")
+    grv = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
+    if not grv:
+        raise HTTPException(404, "GRV not found")
+    if grv.get("status") == "cancelled":
+        raise HTTPException(409, "This GRV has already been reversed or cancelled")
+    if grv.get("status") not in ("completed", "partially_received", "discrepancy", "reversing"):
+        raise HTTPException(409, "Only a confirmed GRV can be reversed")
+    if grv.get("status") != "reversing":
+        grv = await db.grvs.find_one_and_update(
+            {"id": grv_id, "status": {"$in": ["completed", "partially_received", "discrepancy"]}},
+            {"$set": {
+                "status": "reversing",
+                "reversal_reason": reason,
+                "reversal_started_by": user["email"],
+                "reversal_started_at": now_iso(),
+            }},
+            projection={"_id": 0}, return_document=ReturnDocument.AFTER,
+        )
+        if not grv:
+            raise HTTPException(409, "GRV reversal is already in progress")
+
+    accepted = aggregate_accepted_stock_lines(grv.get("items", []))
+    po = None
+    if grv.get("purchase_order_id"):
+        po = await db.purchase_orders.find_one({"id": grv["purchase_order_id"]}, {"_id": 0})
+        if not po:
+            raise HTTPException(409, "Linked purchase order is no longer available")
+
+    async with StockLock([item["stock_id"] for item in accepted]), PurchaseOrderReceiptLock(
+        po["id"] if po else "", grv_id,
+    ):
+        reverse_ids = []
+        for item in accepted:
+            stock = await db.stock.find_one({"id": item["stock_id"]}, {"_id": 0})
+            if not stock:
+                raise HTTPException(409, f"Stock item no longer exists: {item['product']} {item['size']}")
+            key = f"grv-reversal:{grv_id}:{item['stock_id']}"
+            movement = await db.stock_movements.find_one({"dedupe_key": key}, {"_id": 0})
+            if not movement:
+                await stock_current(stock)
+                if D(item["quantity"]) > D(stock["current"]):
+                    raise HTTPException(
+                        409,
+                        f"Cannot reverse {item['product']} {item['size']}: only {stock['current']} remain in stock",
+                    )
+                movement = await post_movement(
+                    stock, "reversal", item["quantity"], user,
+                    reason=f"Reversal of {grv['grv_number']}",
+                    reference=grv["grv_number"], dedupe_key=key,
+                    direction=-1, extra={
+                        "grv_id": grv_id,
+                        "grv_number": grv["grv_number"],
+                        "reverses_grv": True,
+                        "reversal_reason": reason,
+                        "warehouse": grv.get("warehouse", ""),
+                    },
+                )
+                await log_audit("stock_movement", movement["id"], "posted", user, after=movement,
+                                reason=reason)
+            reverse_ids.append(movement["id"])
+
+        if po:
+            increments = {}
+            if grv_id not in po.get("grv_reversals", []):
+                for line in grv.get("items", []):
+                    index = line.get("purchase_order_item_index")
+                    quantity = float(line.get("actual_received_quantity", 0))
+                    if index is None or not quantity:
+                        continue
+                    if not 0 <= index < len(po.get("items", [])):
+                        raise HTTPException(409, "GRV purchase-order line mapping is invalid")
+                    if float(po["items"][index].get("received_quantity", 0)) < quantity:
+                        raise HTTPException(409, "Purchase-order quantities no longer match this GRV")
+                    increments[f"items.{index}.received_quantity"] = (
+                        increments.get(f"items.{index}.received_quantity", 0) - quantity
+                    )
+                update = {
+                    "$addToSet": {"grv_reversals": grv_id},
+                    "$set": {"status": "ordered"},
+                }
+                if increments:
+                    update["$inc"] = increments
+                changed = await db.purchase_orders.update_one(
+                    {"id": po["id"], "grv_reversals": {"$ne": grv_id}}, update,
+                )
+                if changed.matched_count == 0:
+                    latest = await db.purchase_orders.find_one({"id": po["id"]}, {"_id": 0})
+                    if grv_id not in latest.get("grv_reversals", []):
+                        raise HTTPException(409, "Purchase-order receipt could not be reversed")
+            latest = await db.purchase_orders.find_one({"id": po["id"]}, {"_id": 0})
+            complete = all(
+                float(item.get("received_quantity", 0)) >= float(item["quantity"])
+                for item in latest.get("items", [])
+            )
+            any_received = any(float(item.get("received_quantity", 0)) > 0 for item in latest.get("items", []))
+            po_status = "received" if complete else ("partially_received" if any_received else "ordered")
+            await db.purchase_orders.update_one(
+                {"id": po["id"]}, {"$set": {"status": po_status}},
+            )
+
+    audit = grv.get("audit", []) + [{
+        "action": "reversed", "by": user["email"], "at": now_iso(), "reason": reason,
+    }]
+    updated = await update_doc("grvs", grv_id, {
+        "status": "cancelled",
+        "reversed_by": user["email"],
+        "reversed_at": now_iso(),
+        "reversal_reason": reason,
+        "reversal_movement_ids": reverse_ids,
+        "edited_by": user["email"],
+        "audit": audit,
+    })
+    await log_audit("grv", grv_id, "reversed", user, before=grv, after=updated, reason=reason)
+    return updated
+
 @api.post("/purchase-orders")
 async def add_purchase_order(body: PurchaseOrderIn, user=Depends(get_current_user)):
     _check_purchase_order(body)
@@ -3920,87 +4611,11 @@ async def place_purchase_order(order_id: str, user=Depends(get_current_user)):
     return rec
 
 @api.post("/purchase-orders/{order_id}/receive")
-async def receive_purchase_order(order_id: str, body: PurchaseReceiptIn, user=Depends(get_current_user)):
-    order = await db.purchase_orders.find_one({"id": order_id}, {"_id": 0})
-    if not order:
-        raise HTTPException(404, "Purchase order not found")
-    if order.get("status") not in ("ordered", "partially_received", "receiving"):
-        raise HTTPException(409, "Only placed purchase orders with outstanding quantities can be received")
-    if len(body.quantities) != len(order["items"]):
-        raise HTTPException(400, "Provide one received quantity for every purchase-order line")
-    for index, received in enumerate(body.quantities):
-        remaining = max(0, order["items"][index]["quantity"] - order["items"][index].get("received_quantity", 0))
-        if not math.isfinite(received) or received < 0 or received > remaining:
-            raise HTTPException(400, f"Received quantity must be between 0 and {remaining:g} for {order['items'][index]['product']} {order['items'][index]['size']}")
-    if not any(quantity > 0 for quantity in body.quantities):
-        raise HTTPException(400, "Enter at least one received quantity")
-    async with StockLock([item["stock_id"] for item in order["items"]]):
-        current = await db.purchase_orders.find_one_and_update(
-            {"id": order_id, "status": {"$in": ["ordered", "partially_received", "receiving"]}},
-            {"$set": {"status": "receiving"}},
-            projection={"_id": 0}, return_document=ReturnDocument.AFTER,
-        )
-        if not current:
-            raise HTTPException(409, "Purchase order is already received")
-        try:
-            order = await db.purchase_orders.find_one({"id": order_id}, {"_id": 0})
-            for index, received in enumerate(body.quantities):
-                remaining = max(0, order["items"][index]["quantity"] - order["items"][index].get("received_quantity", 0))
-                if received > remaining:
-                    raise HTTPException(409, f"Only {remaining:g} remain for {order['items'][index]['product']} {order['items'][index]['size']}")
-            movements = []
-            for index, item in enumerate(order["items"]):
-                quantity = body.quantities[index]
-                if quantity == 0:
-                    continue
-                received_before = item.get("received_quantity", 0)
-                received_after = r2(received_before + quantity)
-                stock = await db.stock.find_one({"id": item["stock_id"]}, {"_id": 0})
-                if not stock:
-                    raise HTTPException(409, f"Stock item {item['product']} {item['size']} no longer exists")
-                key = f"purchase-order:{order_id}:{index}:{received_after:g}"
-                movement = await db.stock_movements.find_one({"dedupe_key": key}, {"_id": 0})
-                if not movement:
-                    movement = await post_movement(
-                        stock, "purchase", quantity, user,
-                        reason=f"Received {order['reference']}", reference=order["reference"],
-                        dedupe_key=key, direction=1,
-                        extra={"purchase_order_id": order_id, "unit_price": item["unit_price"]},
-                    )
-                movements.append(movement)
-                buying_key = f"{order_id}:{index}:{received_after:g}"
-                if not await db.buyings.find_one({"purchase_order_line": buying_key}):
-                    buying = {
-                        "product": item["product"], "source": order["supplier_name"],
-                        "quantity": quantity, "unit_price": item["unit_price"],
-                        "date": today_str(), "notes": f"Received on {order['reference']}",
-                        "purchase_order_line": buying_key, "purchase_order_id": order_id,
-                        "amount": buying_amount(quantity, item["unit_price"]),
-                    }
-                    set_buying_quantity_unit(buying)
-                    await insert("buyings", buying)
-                await db.purchase_orders.update_one(
-                    {"id": order_id},
-                    {"$set": {f"items.{index}.received_quantity": received_after}},
-                )
-                item["received_quantity"] = received_after
-            status = "received" if all(
-                item.get("received_quantity", 0) >= item["quantity"] for item in order["items"]
-            ) else "partially_received"
-            rec = await update_doc("purchase_orders", order_id, {
-                "status": status,
-                "received_at": now_iso() if status == "received" else order.get("received_at"),
-                "movement_ids": list(dict.fromkeys(
-                    (order.get("movement_ids") or []) + [movement["id"] for movement in movements]
-                )),
-            })
-        except Exception:
-            latest = await db.purchase_orders.find_one({"id": order_id}, {"_id": 0})
-            prior_status = "partially_received" if any(item.get("received_quantity", 0) for item in latest["items"]) else "ordered"
-            await update_doc("purchase_orders", order_id, {"status": prior_status})
-            raise
-    await log_audit("purchase_order", order_id, "received", user, before=order, after=rec)
-    return rec
+async def receive_purchase_order(order_id: str, user=Depends(get_current_user)):
+    raise HTTPException(
+        409,
+        "Direct purchase-order receiving is disabled. Create and confirm a GRV instead.",
+    )
 
 class ExpenseIn(BaseModel):
     description: str
@@ -5555,6 +6170,11 @@ async def ensure_performance_indexes(database):
         "vehicles": [[("name", 1)]],
         "vehicle_records": [[("date", -1)], [("vehicle_id", 1), ("date", -1)]],
         "buyings": [[("date", -1)]],
+        "grvs": [
+            [("created_at", -1)],
+            [("received_date", -1)],
+            [("supplier_id", 1), ("received_date", -1)],
+        ],
         "suppliers": [[("name", 1)]],
         "spareparts": [[("status", 1), ("created_at", -1)]],
         "monthly_business_purchases": [[("name", 1)]],
@@ -5566,6 +6186,10 @@ async def ensure_performance_indexes(database):
         async with semaphore:
             await database[collection_name].create_indexes([
                 IndexModel([("company_id", 1), ("id", 1)]),
+                *(
+                    [IndexModel([("company_id", 1), ("grv_number", 1)], unique=True)]
+                    if collection_name == "grvs" else []
+                ),
                 *(
                     IndexModel([("company_id", 1), *definition])
                     for definition in definitions

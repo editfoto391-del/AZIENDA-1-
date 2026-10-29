@@ -18,6 +18,7 @@ export const pageLoaders = {
   "/fleet": () => import("@/pages/Fleet"),
   "/expenses": () => import("@/pages/Expenses"),
   "/costs": () => import("@/pages/Costs"),
+  "/grv": () => import("@/pages/GRV"),
   "/daily-report": () => import("@/pages/DailyReport"),
   "/settings": () => import("@/pages/Settings"),
 };
@@ -38,6 +39,7 @@ const pageData = {
   "/fleet": ["/vehicles", "/vehicles/records/all", "/spareparts"],
   "/expenses": ["/expenses", "/reports/profit", "/reports/costs", "/vehicles"],
   "/costs": ["/reports/costs"],
+  "/grv": ["/grvs", "/grvs/dashboard", "/grvs/purchase-orders", "/suppliers", "/stock", "/settings"],
   "/settings": ["/settings", "/prices", "/drivers"],
 };
 
