@@ -9,6 +9,7 @@ import { useAuth } from "@/context/AuthContext";
 import {
   Receipt, Wallet, AlertTriangle, Boxes, Plus, UserPlus, CreditCard,
   PackagePlus, Factory, CalendarCheck, Truck, TrendingUp, ArrowRight, Banknote, ClipboardList, LockKeyhole,
+  Pencil, Trash2,
 } from "lucide-react";
 
 const QUICK = [
@@ -212,14 +213,23 @@ export default function Dashboard() {
     if (workerSaving) return;
     setWorkerSaving(true);
     try {
-      const created = await api.post("/access/workers", workerDraft);
-      if (created.company_id === workerDraft.company_id) setWorkers((current) => [...current, created]);
+      if (workerDraft.id) {
+        const updated = await api.put(`/access/workers/${workerDraft.id}?company_id=${encodeURIComponent(workerDraft.company_id)}`, {
+          worker_role: workerDraft.worker_role,
+          allowed_sections: workerDraft.allowed_sections,
+        });
+        setWorkers((current) => current.map((worker) => worker.id === updated.id ? updated : worker));
+        toast.success("Worker access updated");
+      } else {
+        const created = await api.post("/access/workers", workerDraft);
+        if (created.company_id === workerDraft.company_id) setWorkers((current) => [...current, created]);
+        toast.success("Worker added");
+      }
       setWorkerDraft({
         name: "", username: "", email: "", worker_role: "", password: "",
         company_id: user?.company_id || "", allowed_sections: ["invoices"],
       });
       setWorkerModalOpen(false);
-      toast.success("Worker added");
     } catch (error) {
       toast.error(apiError(error));
     } finally {
@@ -241,6 +251,29 @@ export default function Dashboard() {
       toast.error(apiError(error));
     }
   };
+  const editWorker = (worker) => {
+    setWorkerDraft({
+      id: worker.id,
+      name: worker.name,
+      username: worker.username,
+      email: "",
+      worker_role: worker.worker_role,
+      password: "",
+      company_id: worker.company_id,
+      allowed_sections: worker.allowed_sections || [],
+    });
+    setWorkerModalOpen(true);
+  };
+  const deleteWorker = async (worker) => {
+    if (!window.confirm(`Permanently remove worker "${worker.name}" and revoke all their sessions? This cannot be undone.`)) return;
+    try {
+      await api.del(`/access/workers/${worker.id}?company_id=${encodeURIComponent(worker.company_id)}`);
+      setWorkers((current) => current.filter((item) => item.id !== worker.id));
+      toast.success("Worker permanently removed");
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
 
   return (
     <div className="dashboard-stagger space-y-6">
@@ -250,7 +283,7 @@ export default function Dashboard() {
         <h1 className="text-3xl sm:text-4xl font-normal text-slate-900 font-display mt-1">Business overview</h1>
         <p className="text-sm text-slate-500 mt-1">Performance, cash flow and daily operations</p>
         </div>
-        {user?.is_admin && <Btn onClick={() => setWorkerModalOpen(true)} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
+        {user?.is_admin && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"] }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
 
       {user?.is_admin && <Section title="Workers" icon={UserPlus} action={<span className="text-xs text-slate-400">{workers.length} workers</span>}>
@@ -258,7 +291,7 @@ export default function Dashboard() {
           <div className="overflow-x-auto">
             <table className="w-full min-w-[560px] text-sm">
               <thead><tr className="border-b border-border text-left text-xs text-slate-400">
-                <th className="py-2 font-semibold">Worker</th><th className="py-2 font-semibold">Role</th><th className="py-2 font-semibold">Company</th><th className="py-2 font-semibold">Sections</th>
+                <th className="py-2 font-semibold">Worker</th><th className="py-2 font-semibold">Role</th><th className="py-2 font-semibold">Company</th><th className="py-2 font-semibold">Sections</th><th className="py-2 text-right font-semibold">Actions</th>
               </tr></thead>
               <tbody>{workers.map((worker) => (
                 <tr key={worker.id} className="border-b border-border/60" data-testid={`worker-row-${worker.id}`}>
@@ -266,6 +299,10 @@ export default function Dashboard() {
                   <td className="py-3 text-slate-600">{worker.worker_role}</td>
                   <td className="py-3 text-slate-600">{companies.find((company) => company.id === worker.company_id)?.name || worker.company_id}</td>
                   <td className="py-3 text-slate-600">{(worker.allowed_sections || []).map((section) => WORKER_SECTION_OPTIONS.find(([key]) => key === section)?.[1] || section).join(", ")}</td>
+                  <td className="py-3 text-right whitespace-nowrap">
+                    <button type="button" onClick={() => editWorker(worker)} aria-label={`Edit access for ${worker.name}`} className="rounded p-1.5 text-slate-400 hover:text-primary" data-testid={`edit-worker-${worker.id}`}><Pencil size={15} /></button>
+                    <button type="button" onClick={() => deleteWorker(worker)} aria-label={`Remove ${worker.name}`} className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" data-testid={`delete-worker-${worker.id}`}><Trash2 size={15} /></button>
+                  </td>
                 </tr>
               ))}</tbody>
             </table>
@@ -273,17 +310,24 @@ export default function Dashboard() {
         )}
       </Section>}
 
-      <Modal open={workerModalOpen} onClose={() => !workerSaving && setWorkerModalOpen(false)} title="Add Worker" wide>
+      <Modal open={workerModalOpen} onClose={() => !workerSaving && setWorkerModalOpen(false)} title={workerDraft.id ? "Edit Worker Access" : "Add Worker"} wide>
         <form onSubmit={saveWorker} className="space-y-4" data-testid="add-worker-form">
           <div className="grid gap-3 sm:grid-cols-2">
-            <Input label="Worker name *" value={workerDraft.name} onChange={(event) => setWorkerDraft({ ...workerDraft, name: event.target.value })} required data-testid="worker-name" />
-            <Input label="Username *" value={workerDraft.username} onChange={(event) => setWorkerDraft({ ...workerDraft, username: event.target.value })} required data-testid="worker-username" />
+            {workerDraft.id ? <>
+              <Input label="Worker name" value={workerDraft.name} disabled data-testid="worker-name" />
+              <Input label="Username" value={workerDraft.username} disabled data-testid="worker-username" />
+            </> : <>
+              <Input label="Worker name *" value={workerDraft.name} onChange={(event) => setWorkerDraft({ ...workerDraft, name: event.target.value })} required data-testid="worker-name" />
+              <Input label="Username *" value={workerDraft.username} onChange={(event) => setWorkerDraft({ ...workerDraft, username: event.target.value })} required data-testid="worker-username" />
+            </>}
             <Input label="Role *" placeholder="e.g. Invoice Clerk" value={workerDraft.worker_role} onChange={(event) => setWorkerDraft({ ...workerDraft, worker_role: event.target.value })} required data-testid="worker-role" />
-            <Input label="Email (optional)" type="email" value={workerDraft.email} onChange={(event) => setWorkerDraft({ ...workerDraft, email: event.target.value })} data-testid="worker-email" />
-            <Input label="Initial password *" type="password" minLength={8} value={workerDraft.password} onChange={(event) => setWorkerDraft({ ...workerDraft, password: event.target.value })} required data-testid="worker-password" />
-            <Select label="Company" value={workerDraft.company_id || user?.company_id || ""} onChange={(event) => changeWorkerCompany(event.target.value)} data-testid="worker-company">
-              {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
-            </Select>
+            {!workerDraft.id && <>
+              <Input label="Email (optional)" type="email" value={workerDraft.email} onChange={(event) => setWorkerDraft({ ...workerDraft, email: event.target.value })} data-testid="worker-email" />
+              <Input label="Initial password *" type="password" minLength={8} value={workerDraft.password} onChange={(event) => setWorkerDraft({ ...workerDraft, password: event.target.value })} required data-testid="worker-password" />
+              <Select label="Company" value={workerDraft.company_id || user?.company_id || ""} onChange={(event) => changeWorkerCompany(event.target.value)} data-testid="worker-company">
+                {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+              </Select>
+            </>}
           </div>
           <fieldset className="space-y-2">
             <legend className="mb-2 text-sm font-semibold text-slate-700">Sections this worker can access</legend>
@@ -299,7 +343,7 @@ export default function Dashboard() {
           <p className="flex items-center gap-2 rounded-md bg-slate-50 p-3 text-xs text-slate-500"><LockKeyhole size={14} /> Other sections stay visible in the menu but remain locked. The worker starts with Invoice access selected.</p>
           <div className="flex justify-end gap-2">
             <Btn type="button" variant="outline" onClick={() => setWorkerModalOpen(false)} disabled={workerSaving}>Cancel</Btn>
-            <Btn type="submit" disabled={workerSaving || workerDraft.allowed_sections.length === 0} data-testid="worker-save">{workerSaving ? "Adding..." : "Add Worker"}</Btn>
+            <Btn type="submit" disabled={workerSaving || workerDraft.allowed_sections.length === 0} data-testid="worker-save">{workerSaving ? "Saving..." : workerDraft.id ? "Save Access" : "Add Worker"}</Btn>
           </div>
         </form>
       </Modal>

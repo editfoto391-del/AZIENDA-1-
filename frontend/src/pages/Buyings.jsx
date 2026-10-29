@@ -27,6 +27,9 @@ export default function Buyings() {
   const [suppliers, setSuppliers] = useState(null);
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
+  const [editCandidate, setEditCandidate] = useState(null);
+  const [supervisorPassword, setSupervisorPassword] = useState("");
+  const [authorizingEdit, setAuthorizingEdit] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const load = () => {
@@ -58,14 +61,10 @@ export default function Buyings() {
   const total = filtered.reduce((sum, buying) => sum + Number(buying.amount || 0), 0);
   const formTotal = (Number(modal?.quantity) || 0) * (Number(modal?.unit_price) || 0);
   const quantityUnit = (product) => product?.trim().toLowerCase() === "chemical" ? "L" : "";
-  const stockCategories = [...new Set((stock || []).map((item) => item.product).filter(Boolean))].sort();
+  const stockOptions = [...(stock || [])].sort((a, b) =>
+    a.size.localeCompare(b.size, undefined, { numeric: true }) || a.product.localeCompare(b.product),
+  );
   const selectedStockProduct = stock?.find((item) => item.id === modal?.stock_id);
-  const selectedStockCategory = modal?.stock_category || selectedStockProduct?.product || "";
-  const stockSizes = (stock || [])
-    .filter((item) => item.product === selectedStockCategory)
-    .map((item) => item.size)
-    .filter((size, index, sizes) => size && sizes.indexOf(size) === index)
-    .sort();
   const formatBuyingProduct = (buying) => [buying.product, buying.size].filter(Boolean).join(" ");
 
   const save = async () => {
@@ -97,6 +96,31 @@ export default function Buyings() {
       toast.error(apiError(error));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const authorizeBuyingEdit = async (event) => {
+    event.preventDefault();
+    if (!editCandidate || !supervisorPassword || authorizingEdit) return;
+    setAuthorizingEdit(true);
+    try {
+      const approval = await api.post(`/buyings/${editCandidate.id}/authorize-edit`, { password: supervisorPassword });
+      setModal({
+        ...editCandidate,
+        product_mode: editCandidate.stock_id ? "stock" : "manual",
+        stock_category: editCandidate.product,
+        supplier_id: editCandidate.supplier_id || "",
+        quantity: String(editCandidate.quantity),
+        unit_price: String(editCandidate.unit_price),
+        item_type: editCandidate.item_type || "raw_material",
+        supervisor_authorization: approval.authorization_id,
+      });
+      setEditCandidate(null);
+      setSupervisorPassword("");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setAuthorizingEdit(false);
     }
   };
 
@@ -170,7 +194,7 @@ export default function Buyings() {
                     <td className="px-4 py-3 text-right">
                       <button
                         type="button"
-                        onClick={() => setModal({ ...buying, product_mode: buying.stock_id ? "stock" : "manual", stock_category: buying.product, supplier_id: buying.supplier_id || "", quantity: String(buying.quantity), unit_price: String(buying.unit_price), item_type: buying.item_type || "raw_material" })}
+                        onClick={() => { setEditCandidate(buying); setSupervisorPassword(""); }}
                         aria-label={`Edit ${formatBuyingProduct(buying)}`}
                         data-testid={`edit-buying-${buying.id}`}
                         className="rounded p-1.5 text-slate-400 hover:text-primary"
@@ -204,31 +228,29 @@ export default function Buyings() {
               <option value="manual">Enter manually</option>
             </Select>
             {modal.product_mode === "stock" ? (
-              <div className="grid grid-cols-2 gap-3">
+              <div>
                 <Select
-                  label="Category / product"
-                  value={selectedStockCategory}
-                  onChange={(event) => setModal({ ...modal, stock_category: event.target.value, stock_id: "", size: "", product: event.target.value })}
-                  data-testid="buying-stock-category"
-                >
-                  <option value="">Select product...</option>
-                  {stockCategories.map((product) => <option key={product} value={product}>{product}</option>)}
-                </Select>
-                <Select
-                  label="Size"
-                  value={modal.size || ""}
-                  disabled={!selectedStockCategory}
+                  label="Size / stock product"
+                  value={modal.stock_id || ""}
+                  disabled={stock === null}
                   onChange={(event) => {
-                    const item = (stock || []).find((candidate) => candidate.product === selectedStockCategory && candidate.size === event.target.value);
-                    setModal({ ...modal, stock_id: item?.id || "", stock_category: selectedStockCategory, product: item?.product || selectedStockCategory, size: item?.size || "" });
+                    const item = (stock || []).find((candidate) => candidate.id === event.target.value);
+                    setModal({
+                      ...modal,
+                      stock_id: item?.id || "",
+                      stock_category: item?.product || "",
+                      product: item?.product || "",
+                      size: item?.size || "",
+                    });
                   }}
                   data-testid="buying-stock-size"
                 >
-                  <option value="">Select size...</option>
-                  {stockSizes.map((size) => {
-                    const item = (stock || []).find((candidate) => candidate.product === selectedStockCategory && candidate.size === size);
-                    return <option key={size} value={size}>{size} · Current stock: {item?.current ?? 0}</option>;
-                  })}
+                  <option value="">{stock === null ? "Loading stock..." : stockOptions.length ? "Select a size..." : "No stock items available"}</option>
+                  {stockOptions.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.size} · {item.product} · Current stock: {item.current ?? 0}
+                    </option>
+                  ))}
                 </Select>
               </div>
             ) : (
@@ -308,6 +330,16 @@ export default function Buyings() {
             </div>
           </div>
         )}
+      </Modal>
+      <Modal open={!!editCandidate} onClose={() => { if (!authorizingEdit) { setEditCandidate(null); setSupervisorPassword(""); } }} title="Supervisor approval required">
+        {editCandidate && <form onSubmit={authorizeBuyingEdit} className="space-y-4" data-testid="buying-edit-authorization-form">
+          <p className="text-sm text-slate-600">Enter the supervisor password to edit this buying. This approval is required for every user role.</p>
+          <Input label="Supervisor password" type="password" autoComplete="current-password" autoFocus required value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} data-testid="buying-supervisor-password-input" />
+          <div className="flex justify-end gap-2">
+            <Btn type="button" variant="outline" onClick={() => { setEditCandidate(null); setSupervisorPassword(""); }} disabled={authorizingEdit}>Cancel</Btn>
+            <Btn type="submit" disabled={authorizingEdit} data-testid="authorize-buying-edit-btn">{authorizingEdit ? "Checking..." : "Continue to edit"}</Btn>
+          </div>
+        </form>}
       </Modal>
     </div>
   );

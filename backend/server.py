@@ -79,7 +79,7 @@ def allowed_company_ids(user):
     if user.get("role") == "owner":
         return [profile["id"] for profile in COMPANY_PROFILES]
     return [company_id for company_id, role in (user.get("company_roles") or {}).items()
-            if role in ("user", "admin")]
+            if role in ("user", "admin", "owner")]
 
 def diesel_price_is_current(effective_date):
     try:
@@ -371,6 +371,10 @@ class CreateWorkerIn(BaseModel):
     allowed_sections: List[str]
     email: Optional[str] = ""
 
+class WorkerAccessUpdateIn(BaseModel):
+    worker_role: str
+    allowed_sections: List[str]
+
 class UserStatusIn(BaseModel):
     active: bool
 
@@ -379,6 +383,13 @@ class ProfileCredentialsIn(BaseModel):
     password: Optional[str] = None
 
 class ProfilePasswordIn(BaseModel):
+    password: str
+
+class OwnerPromotionIn(BaseModel):
+    owner_password: str
+    company_id: str
+
+class SupervisorPasswordIn(BaseModel):
     password: str
 
 class SwitchCompanyIn(BaseModel):
@@ -390,18 +401,24 @@ def public_user(u):
     return {"id": u["id"], "email": u.get("email", ""), "username": u.get("username", ""),
             "name": u.get("name") or u.get("username") or "User", "role": role,
             "is_owner": u.get("role") == "owner", "is_admin": role in ("owner", "admin"),
+            "is_company_owner": role == "owner",
+            "is_primary_owner": canonical_email(u.get("email")) == canonical_email(os.environ["ADMIN_EMAIL"]),
             "is_worker": u.get("is_worker", False),
             "worker_role": u.get("worker_role", ""),
             "allowed_sections": u.get("worker_allowed_sections", []),
             "admin_company_ids": allowed_company_ids(u) if u.get("role") == "owner" else [
                 company_id for company_id, company_role_value in (u.get("company_roles") or {}).items()
-                if company_role_value == "admin"
+                if company_role_value in ("admin", "owner")
             ],
             "company_id": company_id, "company_ids": allowed_company_ids(u), "picture": u.get("picture", "")}
 
 def require_owner(user):
     if user.get("role") != "owner":
         raise HTTPException(403, "Owner access required")
+
+def require_profile_owner(user):
+    if user.get("role") != "owner" and user.get("_active_role") != "owner":
+        raise HTTPException(403, "Company owner access required")
 
 def is_company_admin(user):
     return user.get("role") in ("owner", "admin") or user.get("_active_role") in ("owner", "admin")
@@ -477,84 +494,74 @@ async def access_profiles(user=Depends(get_current_user)):
     require_owner(user)
     result = []
     for profile in COMPANY_PROFILES:
-        if profile["id"] == "superiqfoam":
-            owner_account = await base_db.users.find_one({"role": "owner"}, {"_id": 0})
-            user_account = await base_db.users.find_one(
-                {"profile_id": "superiqfoam", "profile_login": "user"}, {"_id": 0},
-            )
-            result.append({
-                "id": profile["id"],
-                "name": profile["name"],
-                "username": profile["username"],
-                "configured": owner_account is not None,
-                "owner_configured": owner_account is not None,
-                "user_configured": user_account is not None,
-            })
-            continue
-        else:
-            account = await base_db.users.find_one({"profile_id": profile["id"]}, {"_id": 0})
-            if not account:
-                account = await base_db.users.find_one({"username": profile["username"]}, {"_id": 0})
-            if not account and profile["id"] == "iqfoam-whole-sallers":
-                account = await base_db.users.find_one({"username": "IQFOAM WHOLE SALLERS"}, {"_id": 0})
+        profile_id = profile["id"]
+        owner_account = await base_db.users.find_one({
+            "profile_id": profile_id, "profile_login": "owner",
+        }, {"_id": 0, "id": 1})
+        user_account = await base_db.users.find_one({
+            "profile_id": profile_id, "profile_login": "user",
+        }, {"_id": 0, "id": 1})
+        if not user_account:
+            user_account = await base_db.users.find_one({
+                "profile_id": profile_id,
+                "is_worker": {"$ne": True},
+                "role": {"$ne": "owner"},
+            }, {"_id": 0, "id": 1})
         result.append({
-            "id": profile["id"],
+            "id": profile_id,
             "name": profile["name"],
-            "username": (account or {}).get("username", profile["username"]),
-            "configured": account is not None,
+            "username": profile["username"],
+            "configured": owner_account is not None or user_account is not None,
+            "owner_configured": owner_account is not None,
+            "user_configured": user_account is not None,
         })
     return result
 
-@api.put("/access/profiles/superiqfoam/password/{account_type}")
-async def update_superiqfoam_profile_password(
-    account_type: str, body: ProfilePasswordIn, user=Depends(get_current_user),
+@api.put("/access/profiles/{profile_id}/password/{account_type}")
+async def update_profile_password(
+    profile_id: str, account_type: str, body: ProfilePasswordIn,
+    user=Depends(get_current_user),
 ):
     require_owner(user)
+    profile = next((item for item in COMPANY_PROFILES if item["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found")
     if account_type not in ("user", "owner"):
         raise HTTPException(404, "Profile account type not found")
     if len(body.password) < 8:
         raise HTTPException(400, "Password must contain at least 8 characters")
 
-    if account_type == "owner":
-        account = await base_db.users.find_one({"role": "owner"}, {"_id": 0})
-        if not account:
-            raise HTTPException(404, "Owner account is not configured")
-        account_id = account["id"]
+    account = await base_db.users.find_one({
+        "profile_id": profile_id, "profile_login": account_type,
+    }, {"_id": 0})
+    if not account and account_type == "user":
+        account = await base_db.users.find_one({
+            "profile_id": profile_id,
+            "is_worker": {"$ne": True},
+            "role": {"$ne": "owner"},
+        }, {"_id": 0})
+    account_id = account["id"] if account else new_id()
+    company_role_value = "owner" if account_type == "owner" else "user"
+    updates = {
+        "username": profile["username"],
+        "name": (account or {}).get("name") or profile["name"],
+        "email": (account or {}).get("email") or "",
+        "password_hash": hash_pw(body.password),
+        "role": "user",
+        "company_roles": {profile_id: company_role_value},
+        "company_ids": [profile_id],
+        "active": (account or {}).get("active", True),
+        "auth_provider": "password",
+        "profile_id": profile_id,
+        "profile_login": account_type,
+    }
+    if account:
+        await base_db.users.update_one({"id": account_id}, {"$set": updates})
     else:
-        account = await base_db.users.find_one(
-            {"profile_id": "superiqfoam", "profile_login": "user"}, {"_id": 0},
-        )
-        if not account:
-            account_id = new_id()
-            username = COMPANY_PROFILES[0]["username"]
-            await base_db.users.insert_one({
-                "id": account_id,
-                "username": username,
-                "name": username,
-                "email": "",
-                "password_hash": hash_pw(body.password),
-                "role": "user",
-                "company_roles": {"superiqfoam": "user"},
-                "company_ids": ["superiqfoam"],
-                "active": True,
-                "auth_provider": "password",
-                "profile_id": "superiqfoam",
-                "profile_login": "user",
-                "created_at": now_iso(),
-            })
-        else:
-            account_id = account["id"]
-            await base_db.users.update_one(
-                {"id": account_id}, {"$set": {"password_hash": hash_pw(body.password)}},
-            )
-
-    if account_type == "owner":
-        await base_db.users.update_one(
-            {"id": account_id}, {"$set": {"password_hash": hash_pw(body.password)}},
-        )
+        await base_db.users.insert_one({"id": account_id, "created_at": now_iso(), **updates})
     await log_audit("user", account_id, "profile_password_updated", user,
-                    after={"profile_id": "superiqfoam", "account_type": account_type})
-    return {"profile_id": "superiqfoam", "account_type": account_type, "configured": True}
+                    after={"profile_id": profile_id, "account_type": account_type})
+    return {"profile_id": profile_id, "account_type": account_type, "configured": True}
 
 @api.put("/access/profiles/{profile_id}")
 async def update_access_profile(profile_id: str, body: ProfileCredentialsIn, user=Depends(get_current_user)):
@@ -572,14 +579,15 @@ async def update_access_profile(profile_id: str, body: ProfileCredentialsIn, use
     if not username and not password:
         raise HTTPException(400, "Enter a username or a new password")
 
-    if profile_id == "superiqfoam":
-        account = await base_db.users.find_one({"role": "owner"}, {"_id": 0})
-    else:
-        account = await base_db.users.find_one({"profile_id": profile_id}, {"_id": 0})
-        if not account:
-            account = await base_db.users.find_one({"username": profile["username"]}, {"_id": 0})
-        if not account and profile_id == "iqfoam-whole-sallers":
-            account = await base_db.users.find_one({"username": "IQFOAM WHOLE SALLERS"}, {"_id": 0})
+    account = await base_db.users.find_one({
+        "profile_id": profile_id, "profile_login": "user",
+    }, {"_id": 0})
+    if not account:
+        account = await base_db.users.find_one({
+            "profile_id": profile_id, "is_worker": {"$ne": True}, "role": {"$ne": "owner"},
+        }, {"_id": 0})
+    if account and account.get("role") == "owner":
+        raise HTTPException(409, "Global owner credentials must be changed through the owner account")
 
     if not account and (not username or not password):
         raise HTTPException(404, "Profile account is not configured; provide a username and password to create it")
@@ -593,17 +601,18 @@ async def update_access_profile(profile_id: str, body: ProfileCredentialsIn, use
             duplicate_query["id"] = {"$ne": account["id"]}
         duplicate = await base_db.users.find_one(duplicate_query, {"_id": 0})
         if duplicate:
-            allowed_profile_pair = profile_id == "superiqfoam" and (
-                (account and account.get("role") == "owner" and duplicate.get("profile_login") == "user") or
-                (account and account.get("profile_login") == "user" and duplicate.get("role") == "owner")
+            allowed_profile_pair = (
+                duplicate.get("profile_id") == profile_id and
+                duplicate.get("profile_login") in ("owner", "user") and
+                duplicate.get("profile_login") != (account or {}).get("profile_login")
             )
             if not allowed_profile_pair:
                 raise HTTPException(409, "Username already exists")
         updates["username"] = username
     if password:
         updates["password_hash"] = hash_pw(password)
-    if profile_id != "superiqfoam":
-        updates["profile_id"] = profile_id
+    updates["profile_id"] = profile_id
+    updates["profile_login"] = "user"
     if account:
         await base_db.users.update_one({"id": account["id"]}, {"$set": updates})
         account_id = account["id"]
@@ -662,7 +671,7 @@ async def get_workers(company_id: str = "", user=Depends(get_current_user)):
     if company_role(user, company_id) not in ("owner", "admin"):
         raise HTTPException(403, "Administrator access required for this company")
     workers = await base_db.users.find(
-        {"is_worker": True, f"company_roles.{company_id}": {"$in": ["user", "admin"]}},
+        {"is_worker": True, f"company_roles.{company_id}": {"$in": ["user", "admin", "owner"]}},
         {"_id": 0, "password_hash": 0},
     ).to_list(1000)
     return [{
@@ -738,9 +747,64 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "active": True,
     }
 
+@api.put("/access/workers/{worker_id}")
+async def update_worker_access(
+    worker_id: str, body: WorkerAccessUpdateIn, company_id: str,
+    user=Depends(get_current_user),
+):
+    require_admin(user)
+    if company_role(user, company_id) not in ("owner", "admin"):
+        raise HTTPException(403, "You can only manage workers in a company you administer")
+    worker = await base_db.users.find_one({
+        "id": worker_id, "is_worker": True, f"company_roles.{company_id}": {"$in": ["user", "admin"]},
+    }, {"_id": 0})
+    if not worker:
+        raise HTTPException(404, "Worker not found in this company")
+    worker_role = body.worker_role.strip()
+    sections = list(dict.fromkeys(body.allowed_sections))
+    if not worker_role:
+        raise HTTPException(400, "Worker role is required")
+    if not sections or any(section not in WORKER_SECTIONS for section in sections):
+        raise HTTPException(400, "Choose at least one valid section")
+    before = {"worker_role": worker.get("worker_role", ""), "allowed_sections": worker.get("worker_allowed_sections", [])}
+    await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": {
+        "worker_role": worker_role, "worker_allowed_sections": sections,
+    }})
+    await log_audit("user", worker_id, "worker_access_updated", user, before=before,
+                    after={"worker_role": worker_role, "allowed_sections": sections})
+    return {
+        "id": worker_id,
+        "name": worker.get("name", ""),
+        "username": worker.get("username", ""),
+        "worker_role": worker_role,
+        "company_id": company_id,
+        "allowed_sections": sections,
+        "active": worker.get("active", True),
+    }
+
+@api.delete("/access/workers/{worker_id}")
+async def remove_worker(worker_id: str, company_id: str, user=Depends(get_current_user)):
+    require_admin(user)
+    if company_role(user, company_id) not in ("owner", "admin"):
+        raise HTTPException(403, "You can only manage workers in a company you administer")
+    worker = await base_db.users.find_one({
+        "id": worker_id, "is_worker": True, f"company_roles.{company_id}": {"$in": ["user", "admin"]},
+    }, {"_id": 0})
+    if not worker:
+        raise HTTPException(404, "Worker not found in this company")
+    await log_audit("user", worker_id, "worker_permanently_deleted", user,
+                    before={"username": worker.get("username"), "name": worker.get("name"),
+                            "company_id": company_id})
+    await base_db.user_sessions.delete_many({"user_id": worker_id})
+    await base_db.user_devices.delete_many({"user_id": worker_id})
+    await base_db.assistant_sessions.delete_many({"user_id": worker_id})
+    await base_db.users.delete_one({"id": worker_id, "is_worker": True})
+    return {"ok": True, "deleted": True}
+
 @api.get("/access/users")
 async def access_users(user=Depends(get_current_user)):
     require_owner(user)
+    primary_owner_email = canonical_email(os.environ["ADMIN_EMAIL"])
     users = await listall("users", sort=("created_at", 1))
     devices = await listall("user_devices", sort=("last_seen", -1))
     sessions = await base_db.user_sessions.find({}, {"_id": 0, "user_id": 1, "company_id": 1, "created_at": 1, "last_seen": 1, "expires_at": 1}).to_list(10000)
@@ -781,6 +845,7 @@ async def access_users(user=Depends(get_current_user)):
         result.append({"id": account["id"], "name": account.get("name", ""), "email": account.get("email", ""),
             "username": account.get("username", ""), "role": account.get("role", "user"),
             "is_owner": account.get("role") == "owner", "active": account.get("active", True),
+            "is_primary_owner": canonical_email(account.get("email")) == primary_owner_email,
             "company_roles": memberships, "company_ids": list(memberships), "online": bool(active_sessions),
             "current_company_id": current_session.get("company_id", ""), "last_login": last_login,
             "created_at": account.get("created_at", ""), "devices": device_map.get(account["id"], [])})
@@ -873,6 +938,53 @@ async def update_user_role(uid: str, body: UserRoleIn, user=Depends(get_current_
                     before={"company_id": body.company_id, "role": previous},
                     after={"company_id": body.company_id, "role": body.role})
     return {"id": uid, "company_id": body.company_id, "role": body.role}
+
+@api.put("/access/users/{uid}/owner")
+async def promote_access_user_to_owner(
+    uid: str, body: OwnerPromotionIn, user=Depends(get_current_user),
+):
+    require_owner(user)
+    primary_owner = await base_db.users.find_one({
+        "email": canonical_email(os.environ["ADMIN_EMAIL"]), "role": "owner",
+    }, {"_id": 0, "id": 1, "password_hash": 1})
+    if not primary_owner or user["id"] != primary_owner["id"]:
+        raise HTTPException(403, "Only the primary owner can assign owner access")
+    if not verify_pw(body.owner_password, primary_owner.get("password_hash", "")):
+        raise HTTPException(403, "Owner password is incorrect")
+    if body.company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
+        raise HTTPException(400, "Unknown company")
+
+    target = await base_db.users.find_one({"id": uid}, {"_id": 0})
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target.get("role") == "owner" or (target.get("company_roles") or {}).get(body.company_id) == "owner":
+        raise HTTPException(409, "This account is already an owner for this company")
+    if target.get("active") is False or target.get("disabled") is True:
+        raise HTTPException(400, "Enable the account before assigning owner access")
+
+    company_roles = dict(target.get("company_roles") or {})
+    previous_role = company_roles.get(body.company_id)
+    company_roles[body.company_id] = "owner"
+    company_ids = list(dict.fromkeys([*target.get("company_ids", []), body.company_id]))
+    changed = await base_db.users.update_one(
+        {"id": uid, "role": {"$ne": "owner"}},
+        {"$set": {
+            "company_roles": company_roles,
+            "company_ids": company_ids,
+            "is_worker": False,
+            "worker_role": "",
+            "worker_allowed_sections": [],
+        }},
+    )
+    if changed.matched_count != 1:
+        raise HTTPException(409, "Account role changed; reload and try again")
+    if previous_role == "admin":
+        await release_company_admin(body.company_id)
+    await log_audit("user", uid, "company_owner_assigned", user,
+                    before={"company_id": body.company_id, "role": previous_role},
+                    after={"company_id": body.company_id, "role": "owner"})
+    return {"id": uid, "role": "owner", "is_owner": False, "is_company_owner": True,
+            "company_id": body.company_id, "company_ids": company_ids, "company_roles": company_roles}
 
 @api.put("/access/users/{uid}/companies")
 async def update_user_companies(uid: str, body: UserCompaniesIn, user=Depends(get_current_user)):
@@ -1285,6 +1397,9 @@ class InvoiceIn(BaseModel):
 class InvoiceEditAuthorizationIn(BaseModel):
     password: str
 
+class BuyingEditAuthorizationIn(BaseModel):
+    password: str
+
 class InvoiceIssueIn(BaseModel):
     deduct_stock: bool = False
 
@@ -1362,6 +1477,33 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
     inv["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
     return inv
 
+async def authenticate_supervisor(password, user):
+    company_id = user["_active_company_id"]
+    company_settings = await db.settings.find_one({"id": "singleton"}, {"_id": 0})
+    supervisor_hash = (company_settings or {}).get("supervisor_password_hash")
+    if supervisor_hash:
+        if not verify_pw(password, supervisor_hash):
+            raise HTTPException(403, "Supervisor password is incorrect")
+        return (
+            (company_settings or {}).get("supervisor_password_updated_by", "supervisor"),
+            "configured supervisor",
+        )
+
+    company_admin_field = f"company_roles.{company_id}"
+    supervisors = await base_db.users.find({
+        "active": {"$ne": False},
+        "disabled": {"$ne": True},
+        "$or": [{"role": "owner"}, {company_admin_field: {"$in": ["admin", "owner"]}}],
+    }, {"_id": 0, "id": 1, "email": 1, "password_hash": 1}).to_list(1000)
+    supervisor = next(
+        (account for account in supervisors
+         if verify_pw(password, account.get("password_hash", ""))),
+        None,
+    )
+    if not supervisor:
+        raise HTTPException(403, "Supervisor password is incorrect")
+    return supervisor["id"], supervisor.get("email") or supervisor["id"]
+
 @api.post("/invoices/{iid}/authorize-edit")
 async def authorize_invoice_edit(iid: str, body: InvoiceEditAuthorizationIn, user=Depends(get_current_user)):
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0, "id": 1, "status": 1, "archived": 1})
@@ -1371,19 +1513,7 @@ async def authorize_invoice_edit(iid: str, body: InvoiceEditAuthorizationIn, use
         raise HTTPException(400, "This invoice cannot be edited")
 
     company_id = user["_active_company_id"]
-    company_admin_field = f"company_roles.{company_id}"
-    supervisors = await base_db.users.find({
-        "active": {"$ne": False},
-        "disabled": {"$ne": True},
-        "$or": [{"role": "owner"}, {company_admin_field: "admin"}],
-    }, {"_id": 0, "id": 1, "email": 1, "password_hash": 1}).to_list(1000)
-    supervisor = next(
-        (account for account in supervisors
-         if verify_pw(body.password, account.get("password_hash", ""))),
-        None,
-    )
-    if not supervisor:
-        raise HTTPException(403, "Supervisor password is incorrect")
+    supervisor_id, supervisor_email = await authenticate_supervisor(body.password, user)
 
     await db.invoice_edit_authorizations.delete_many({
         "user_id": user["id"],
@@ -1396,11 +1526,11 @@ async def authorize_invoice_edit(iid: str, body: InvoiceEditAuthorizationIn, use
         "invoice_id": iid,
         "user_id": user["id"],
         "company_id": company_id,
-        "supervisor_id": supervisor["id"],
+        "supervisor_id": supervisor_id,
         "expires_at": expires_at,
     })
     await log_audit("invoice", iid, "edit_authorized", user,
-                    reason=f"Supervisor approval by {supervisor.get('email') or supervisor['id']}")
+                    reason=f"Supervisor approval by {supervisor_email}")
     return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
 
 async def restore_invoice_stock(inv, user):
@@ -1618,6 +1748,7 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
                         after={"items": rec.get("items"), "total": rec.get("total")}, reason=reason)
     rec["status"] = derive_status(rec)
     rec["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
+    await db.invoice_edit_authorizations.delete_one({"id": authorization["id"]})
     return rec
 
 @api.post("/invoices/{iid}/issue")
@@ -2972,16 +3103,54 @@ async def recommend_driver(size: str = "small", user=Depends(get_current_user)):
 @api.get("/settings")
 async def get_settings(user=Depends(get_current_user)):
     s = await db.settings.find_one({"id": "singleton"}, {"_id": 0})
+    for key in ("supervisor_password_hash", "supervisor_password_updated_by", "supervisor_password_updated_at"):
+        if s:
+            s.pop(key, None)
     extra = {"city_distances": seed_data.CITY_DISTANCES_KM, "diesel_price": None, "diesel_price_date": "", "diesel_updated_at": "",
              "avg_speed_kmh": 60, "offload_minutes_per_stop": 45, "piece_weights_kg": {},
              "unified_price_list": uses_unified_price_list(active_company_id.get())}
     return {**seed_data.DEFAULT_SETTINGS, **extra, **(s or {})}
 
+@api.get("/settings/supervisor-password")
+async def get_supervisor_password_status(user=Depends(get_current_user)):
+    require_profile_owner(user)
+    settings = await db.settings.find_one({"id": "singleton"}, {"_id": 0, "supervisor_password_hash": 1})
+    return {"configured": bool((settings or {}).get("supervisor_password_hash"))}
+
+@api.put("/settings/supervisor-password")
+async def update_supervisor_password(body: SupervisorPasswordIn, user=Depends(get_current_user)):
+    require_profile_owner(user)
+    if len(body.password) < 8:
+        raise HTTPException(400, "Password must contain at least 8 characters")
+    current_company_id = user["_active_company_id"]
+    for profile in COMPANY_PROFILES:
+        if profile["id"] == current_company_id:
+            continue
+        profile_db = tenant_database(client, base_db, profile["id"])
+        profile_settings = await profile_db.settings.find_one(
+            {"id": "singleton"}, {"_id": 0, "supervisor_password_hash": 1},
+        )
+        existing_hash = (profile_settings or {}).get("supervisor_password_hash")
+        if existing_hash and verify_pw(body.password, existing_hash):
+            raise HTTPException(400, "Supervisor passwords must be different for each company profile")
+    password_hash = hash_pw(body.password)
+    await db.settings.update_one({"id": "singleton"}, {"$set": {
+        "supervisor_password_hash": password_hash,
+        "supervisor_password_updated_by": user["id"],
+        "supervisor_password_updated_at": now_iso(),
+    }}, upsert=True)
+    await log_audit("settings", "singleton", "supervisor_password_updated", user)
+    return {"configured": True}
+
 @api.put("/settings")
 async def update_settings(body: dict, user=Depends(get_current_user)):
     body.pop("_id", None)
     body.pop("unified_price_list", None)
-    for key in ("diesel_price", "diesel_price_date", "diesel_updated_at", "diesel_sources", "diesel_checked_date", "diesel_lookup_attempt_date"):
+    for key in (
+        "diesel_price", "diesel_price_date", "diesel_updated_at", "diesel_sources",
+        "diesel_checked_date", "diesel_lookup_attempt_date", "supervisor_password_hash",
+        "supervisor_password_updated_by", "supervisor_password_updated_at",
+    ):
         body.pop(key, None)
     body["id"] = "singleton"
     before = await db.settings.find_one({"id": "singleton"}, {"_id": 0})
@@ -3122,6 +3291,7 @@ class BuyingIn(BaseModel):
     unit_price: float
     date: str = Field(default_factory=today_str)
     notes: Optional[str] = ""
+    supervisor_authorization: Optional[str] = None
 
 async def _check_buying(body):
     if not body.source.strip():
@@ -3170,6 +3340,7 @@ async def get_buyings(include_archived: bool = False, user=Depends(get_current_u
 async def add_buying(body: BuyingIn, user=Depends(get_current_user)):
     source, product, size = await _check_buying(body)
     data = body.model_dump()
+    data.pop("supervisor_authorization", None)
     data["product"] = product
     data["size"] = size
     data["source"] = source
@@ -3183,11 +3354,21 @@ async def add_buying(body: BuyingIn, user=Depends(get_current_user)):
 
 @api.put("/buyings/{bid}")
 async def edit_buying(bid: str, body: BuyingIn, user=Depends(get_current_user)):
+    authorization = await db.buying_edit_authorizations.find_one({
+        "id": body.supervisor_authorization,
+        "buying_id": bid,
+        "user_id": user["id"],
+        "company_id": user["_active_company_id"],
+        "expires_at": {"$gt": datetime.now(timezone.utc)},
+    })
+    if not authorization:
+        raise HTTPException(403, "Supervisor approval is required to edit this buying")
     source, product, size = await _check_buying(body)
     before = await db.buyings.find_one({"id": bid, "voided": {"$ne": True}}, {"_id": 0})
     if not before:
         raise HTTPException(404, "Buying not found")
     data = body.model_dump()
+    data.pop("supervisor_authorization", None)
     data["product"] = product
     data["size"] = size
     data["source"] = source
@@ -3197,7 +3378,34 @@ async def edit_buying(bid: str, body: BuyingIn, user=Depends(get_current_user)):
     data["amount"] = buying_amount(data["quantity"], data["unit_price"])
     rec = await update_doc("buyings", bid, data)
     await log_audit("buying", bid, "updated", user, before=before, after=rec)
+    await db.buying_edit_authorizations.delete_one({"id": authorization["id"]})
     return rec
+
+@api.post("/buyings/{bid}/authorize-edit")
+async def authorize_buying_edit(
+    bid: str, body: BuyingEditAuthorizationIn, user=Depends(get_current_user),
+):
+    buying = await db.buyings.find_one({"id": bid, "voided": {"$ne": True}}, {"_id": 0, "id": 1})
+    if not buying:
+        raise HTTPException(404, "Buying not found")
+    supervisor_id, supervisor_name = await authenticate_supervisor(body.password, user)
+    await db.buying_edit_authorizations.delete_many({
+        "user_id": user["id"],
+        "expires_at": {"$lte": datetime.now(timezone.utc)},
+    })
+    authorization_id = new_id()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    await db.buying_edit_authorizations.insert_one({
+        "id": authorization_id,
+        "buying_id": bid,
+        "user_id": user["id"],
+        "company_id": user["_active_company_id"],
+        "supervisor_id": supervisor_id,
+        "expires_at": expires_at,
+    })
+    await log_audit("buying", bid, "edit_authorized", user,
+                    reason=f"Supervisor approval by {supervisor_name}")
+    return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
 
 @api.post("/buyings/{bid}/void")
 async def void_buying(bid: str, body: ReasonIn, user=Depends(get_current_user)):
@@ -4999,7 +5207,9 @@ async def initialize_multi_company():
         "company_ids": [profile["id"] for profile in COMPANY_PROFILES], "active": True,
     }})
 
-    users = await base_db.users.find({"id": {"$ne": owner["id"]}}, {"_id": 0}).to_list(5000)
+    users = await base_db.users.find({
+        "id": {"$ne": owner["id"]}, "role": {"$ne": "owner"},
+    }, {"_id": 0}).to_list(5000)
     for account in users:
         roles = account.get("company_roles") or {
             DEFAULT_COMPANY_ID: "admin" if account.get("role") == "admin" else "user"

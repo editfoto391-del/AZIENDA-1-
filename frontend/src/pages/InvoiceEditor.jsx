@@ -760,7 +760,7 @@ export default function InvoiceEditor() {
       </Modal>
       <Modal open={editAuthOpen} onClose={() => { setEditAuthOpen(false); setSupervisorPassword(""); }} title="Supervisor approval required">
         <form onSubmit={authorizeEdit} className="space-y-4" data-testid="invoice-edit-authorization-form">
-          <p className="text-sm text-slate-600">Enter the password of an active Admin or Owner for this company to edit this invoice.</p>
+          <p className="text-sm text-slate-600">Enter the supervisor password to edit this invoice. This approval is required for every user role.</p>
           <Input label="Supervisor password" type="password" autoComplete="current-password" autoFocus required value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} data-testid="supervisor-password-input" />
           <div className="flex justify-end gap-2">
             <Btn type="button" variant="outline" onClick={() => { setEditAuthOpen(false); setSupervisorPassword(""); }}>Cancel</Btn>

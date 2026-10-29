@@ -14,13 +14,17 @@ const TABS = [
   { k: "drivers", l: "Drivers", icon: Truck },
   { k: "diesel", l: "Diesel", icon: Fuel },
   { k: "access", l: "Access", icon: ShieldCheck },
-  { k: "profiles", l: "Profile Credentials", icon: KeyRound },
+  { k: "profiles", l: "Password and Credentials", icon: KeyRound },
 ];
 
-function AccessTab({ users, companies, loading, currentUserId, onRoleChange, onStatusChange, onRemove, onCreate }) {
+function AccessTab({ users, companies, loading, currentUserId, isPrimaryOwner, onRoleChange, onStatusChange, onRemove, onCreate, onMakeOwner }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState({ username: "", name: "", email: "", password: "", company_ids: [] });
+  const [ownerTarget, setOwnerTarget] = useState(null);
+  const [ownerPassword, setOwnerPassword] = useState("");
+  const [ownerCompanyId, setOwnerCompanyId] = useState("");
+  const [assigningOwner, setAssigningOwner] = useState(false);
   const adminCounts = Object.fromEntries(companies.map((company) => [company.id,
     users.filter((account) => !account.is_owner && account.active !== false && account.company_roles?.[company.id] === "admin").length]));
   const companyName = (id) => companies.find((company) => company.id === id)?.name || id;
@@ -34,6 +38,21 @@ function AccessTab({ users, companies, loading, currentUserId, onRoleChange, onS
       setCreateOpen(false);
     } catch { /* Parent displays the API error. */ }
     finally { setCreating(false); }
+  };
+
+  const submitOwner = async (event) => {
+    event.preventDefault();
+    if (!ownerTarget || !ownerPassword || assigningOwner) return;
+    setAssigningOwner(true);
+    try {
+      if (await onMakeOwner(ownerTarget, ownerPassword, ownerCompanyId)) {
+        setOwnerTarget(null);
+        setOwnerPassword("");
+        setOwnerCompanyId("");
+      }
+    } finally {
+      setAssigningOwner(false);
+    }
   };
 
   return (
@@ -59,7 +78,7 @@ function AccessTab({ users, companies, loading, currentUserId, onRoleChange, onS
                   const role = account.is_owner ? "owner" : account.company_roles?.[company.id] || "none";
                   const count = adminCounts[company.id] || 0;
                   return <td key={company.id} className="py-3 pr-3">
-                    {account.is_owner ? <Badge cls="bg-amber-50 text-amber-800 border-amber-200">Owner</Badge> :
+                    {role === "owner" ? <Badge cls="bg-amber-50 text-amber-800 border-amber-200">Owner</Badge> :
                       <>
                         <select aria-label={`${company.name} role for ${account.username}`} value={role}
                           onChange={(event) => onRoleChange(account, company.id, event.target.value)}
@@ -82,7 +101,10 @@ function AccessTab({ users, companies, loading, currentUserId, onRoleChange, onS
                   </button>}
                 </td>
                 <td className="py-3 text-xs text-slate-600">{account.current_company_id ? companyName(account.current_company_id) : "-"}<p className="mt-1 text-slate-400">{account.last_login ? fmtDateTime(account.last_login) : "No login yet"}</p></td>
-                <td className="py-3 text-right">{!account.is_owner && account.id !== currentUserId && <button type="button" onClick={() => onRemove(account)} title={`Remove ${account.username}`} aria-label={`Remove ${account.username}`} className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" data-testid={`remove-user-${account.id}`}><Trash2 size={16} /></button>}</td>
+                <td className="py-3 text-right whitespace-nowrap">
+                  {isPrimaryOwner && !account.is_owner && account.active !== false && <button type="button" onClick={() => { setOwnerTarget(account); setOwnerPassword(""); setOwnerCompanyId(account.company_ids?.[0] || companies[0]?.id || ""); }} title={`Make ${account.username} a company owner`} aria-label={`Make ${account.username} a company owner`} className="rounded p-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-50" data-testid={`make-owner-${account.id}`}>Make company owner</button>}
+                  {!account.is_owner && account.id !== currentUserId && <button type="button" onClick={() => onRemove(account)} title={`Remove ${account.username}`} aria-label={`Remove ${account.username}`} className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" data-testid={`remove-user-${account.id}`}><Trash2 size={16} /></button>}
+                </td>
               </tr>))}</tbody>
           </table>
         </div>
@@ -104,6 +126,19 @@ function AccessTab({ users, companies, loading, currentUserId, onRoleChange, onS
           <div className="flex justify-end gap-2"><Btn type="button" variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>Cancel</Btn><Btn type="submit" disabled={creating || draft.company_ids.length === 0} data-testid="save-company-user">{creating ? "Creating..." : "Create user"}</Btn></div>
         </form>
       </Modal>
+      <Modal open={!!ownerTarget} onClose={() => !assigningOwner && setOwnerTarget(null)} title="Assign company owner">
+        {ownerTarget && <form onSubmit={submitOwner} className="space-y-4">
+          <p className="text-sm text-slate-600">Give <b>{ownerTarget.name || ownerTarget.username}</b> owner access to one company only.</p>
+          <Select label="Company" value={ownerCompanyId} onChange={(event) => setOwnerCompanyId(event.target.value)} required data-testid="owner-company-select">
+            {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+          </Select>
+          <Input label="Primary owner password" type="password" autoComplete="current-password" minLength={8} required value={ownerPassword} onChange={(event) => setOwnerPassword(event.target.value)} data-testid="assign-owner-password" />
+          <div className="flex justify-end gap-2">
+            <Btn type="button" variant="outline" onClick={() => { setOwnerTarget(null); setOwnerCompanyId(""); }} disabled={assigningOwner}>Cancel</Btn>
+            <Btn type="submit" disabled={assigningOwner} data-testid="confirm-make-owner">{assigningOwner ? "Checking..." : "Confirm owner access"}</Btn>
+          </div>
+        </form>}
+      </Modal>
     </Card>
   );
 }
@@ -124,6 +159,10 @@ export default function Settings() {
   const [profileDrafts, setProfileDrafts] = useState({});
   const [profilesLoading, setProfilesLoading] = useState(false);
   const [profileSavingId, setProfileSavingId] = useState("");
+  const [supervisorPassword, setSupervisorPassword] = useState("");
+  const [supervisorConfigured, setSupervisorConfigured] = useState(false);
+  const [supervisorStatusLoading, setSupervisorStatusLoading] = useState(false);
+  const [supervisorSaving, setSupervisorSaving] = useState(false);
   const [removeUser, setRemoveUser] = useState(null);
   const [removingUser, setRemovingUser] = useState(false);
   const [pModal, setPModal] = useState(null);
@@ -144,46 +183,74 @@ export default function Settings() {
       .catch((e) => toast.error(apiError(e))).finally(() => setAccessLoading(false));
   }, [tab, user?.is_owner]);
   useEffect(() => {
-    if (tab !== "profiles" || !user?.is_owner) return;
-    setProfilesLoading(true);
-    api.get("/access/profiles")
-      .then((profiles) => {
+    if (tab !== "profiles") return;
+    if (user?.is_owner) {
+      setProfilesLoading(true);
+      api.get("/access/profiles")
+        .then((profiles) => {
         setProfileAccounts(profiles);
         setProfileDrafts(Object.fromEntries(profiles.map((profile) => [
-          profile.id, { username: profile.username, password: "", userPassword: "", ownerPassword: "" },
+          profile.id, { userPassword: "", ownerPassword: "" },
         ])));
-      })
-      .catch((e) => toast.error(apiError(e)))
-      .finally(() => setProfilesLoading(false));
-  }, [tab, user?.is_owner]);
+        })
+        .catch((e) => toast.error(apiError(e)))
+        .finally(() => setProfilesLoading(false));
+    }
+    if (user?.is_owner || user?.is_company_owner) {
+      setSupervisorStatusLoading(true);
+      api.get("/settings/supervisor-password")
+        .then((status) => setSupervisorConfigured(status.configured))
+        .catch((e) => toast.error(apiError(e)))
+        .finally(() => setSupervisorStatusLoading(false));
+    }
+  }, [tab, user?.is_owner, user?.is_company_owner]);
 
-  const saveProfileCredentials = async (profile, accountType = "") => {
+  const saveSupervisorPassword = async () => {
+    if (supervisorPassword.length < 8 || supervisorSaving) return;
+    setSupervisorSaving(true);
+    try {
+      const result = await api.put("/settings/supervisor-password", { password: supervisorPassword });
+      setSupervisorConfigured(result.configured);
+      setSupervisorPassword("");
+      toast.success("Supervisor password updated");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setSupervisorSaving(false);
+    }
+  };
+
+  const makeOwner = async (account, owner_password, company_id) => {
+    try {
+      const result = await api.put(`/access/users/${account.id}/owner`, { owner_password, company_id });
+      setAccessUsers((current) => current.map((userAccount) => userAccount.id === account.id
+        ? { ...userAccount, ...result, is_owner: false, company_ids: result.company_ids, company_roles: result.company_roles }
+        : userAccount));
+      toast.success(`${account.username} is now an owner for this company`);
+      return true;
+    } catch (error) {
+      toast.error(apiError(error));
+      return false;
+    }
+  };
+
+  const saveProfileCredentials = async (profile, accountType) => {
     const draft = profileDrafts[profile.id];
-    if (!draft) return;
-    const savingId = accountType ? `${profile.id}-${accountType}` : profile.id;
+    if (!draft || !["owner", "user"].includes(accountType)) return;
+    const savingId = `${profile.id}-${accountType}`;
     setProfileSavingId(savingId);
     try {
-      if (accountType) {
-        await api.put(`/access/profiles/${profile.id}/password/${accountType}`, {
-          password: accountType === "user" ? draft.userPassword : draft.ownerPassword,
-        });
-        setProfileAccounts((current) => current.map((item) => item.id === profile.id
-          ? { ...item, [`${accountType}_configured`]: true }
-          : item));
-        setProfileDrafts((current) => ({
-          ...current,
-          [profile.id]: { ...current[profile.id], [`${accountType}Password`]: "" },
-        }));
-        toast.success(`${accountType === "owner" ? "Owner" : "User"} password updated`);
-      } else {
-        const updated = await api.put(`/access/profiles/${profile.id}`, {
-          username: draft.username,
-          ...(draft.password ? { password: draft.password } : {}),
-        });
-        setProfileAccounts((current) => current.map((item) => item.id === profile.id ? updated : item));
-        setProfileDrafts((current) => ({ ...current, [profile.id]: { ...current[profile.id], username: updated.username, password: "" } }));
-        toast.success(`${updated.name} credentials updated`);
-      }
+      await api.put(`/access/profiles/${profile.id}/password/${accountType}`, {
+        password: accountType === "user" ? draft.userPassword : draft.ownerPassword,
+      });
+      setProfileAccounts((current) => current.map((item) => item.id === profile.id
+        ? { ...item, [`${accountType}_configured`]: true }
+        : item));
+      setProfileDrafts((current) => ({
+        ...current,
+        [profile.id]: { ...current[profile.id], [`${accountType}Password`]: "" },
+      }));
+      toast.success(`${accountType === "owner" ? "Owner" : "User"} password updated`);
     } catch (e) { toast.error(apiError(e)); }
     finally { setProfileSavingId(""); }
   };
@@ -297,7 +364,7 @@ export default function Settings() {
     <div>
       <PageHeader title="Settings" subtitle="Configure your business" />
       <div className="flex gap-2 mb-6 overflow-x-auto no-print">
-        {TABS.filter((t) => (t.k !== "diesel" || user?.is_admin) && (!["access", "profiles"].includes(t.k) || user?.is_owner)).map((t) => (
+        {TABS.filter((t) => (t.k !== "diesel" || user?.is_admin) && (t.k !== "access" || user?.is_owner) && (t.k !== "profiles" || user?.is_owner || user?.is_company_owner)).map((t) => (
           <button key={t.k} onClick={() => setTab(t.k)} data-testid={`settings-tab-${t.k}`}
             className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold whitespace-nowrap ${tab === t.k ? "bg-primary text-white" : "bg-white border border-border text-slate-600"}`}>
             <t.icon size={16} /> {t.l}
@@ -401,30 +468,41 @@ export default function Settings() {
         </Card>
       )}
 
-      {tab === "access" && user?.is_owner && <AccessTab users={accessUsers} companies={companies} loading={accessLoading} currentUserId={user.id} onRoleChange={changeRole} onStatusChange={changeStatus} onRemove={setRemoveUser} onCreate={createAccessUser} />}
+      {tab === "access" && user?.is_owner && <AccessTab users={accessUsers} companies={companies} loading={accessLoading} currentUserId={user.id} isPrimaryOwner={user.is_primary_owner} onRoleChange={changeRole} onStatusChange={changeStatus} onRemove={setRemoveUser} onCreate={createAccessUser} onMakeOwner={makeOwner} />}
 
-      {tab === "profiles" && user?.is_owner && (
+      {tab === "profiles" && (user?.is_owner || user?.is_company_owner) && (
         <div className="space-y-4 max-w-3xl" data-testid="profile-credentials-tab">
-          <p className="text-sm text-slate-500">View each profile username and set a new password. Existing passwords are never displayed; changes are saved directly to the account.</p>
-          {profilesLoading ? <p className="text-sm text-slate-400 py-4">Loading profiles...</p> : profileAccounts.map((profile) => {
-            const draft = profileDrafts[profile.id] || { username: profile.username, password: "", userPassword: "", ownerPassword: "" };
-            if (profile.id === "superiqfoam") return (
+          <p className="text-sm text-slate-500">Passwords are stored securely and cannot be viewed. Check whether a supervisor password is configured and replace it here when needed.</p>
+          <Card className="p-5 space-y-4" data-testid="supervisor-password-settings">
+            <div>
+              <h3 className="font-bold text-slate-800 font-display">Supervisor password</h3>
+              <p className="mt-1 text-sm text-slate-500">{supervisorStatusLoading ? "Checking password status..." : supervisorConfigured ? "Configured for this profile. It is required to edit existing invoices and buyings." : "Not configured. Until one is set, active admin/owner passwords remain valid."}</p>
+              <p className="mt-1 text-xs text-slate-500">Each company profile must use a different supervisor password. The current password cannot be displayed; set a new one to replace it.</p>
+            </div>
+            <Input label="New supervisor password (at least 8 characters)" type="password" minLength={8} autoComplete="new-password" value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} data-testid="supervisor-password-settings-input" />
+            <Btn onClick={saveSupervisorPassword} disabled={supervisorSaving || supervisorPassword.length < 8} data-testid="save-supervisor-password">
+              <Save size={16} /> {supervisorSaving ? "Saving..." : "Save supervisor password"}
+            </Btn>
+          </Card>
+          {user?.is_owner && (profilesLoading ? <p className="text-sm text-slate-400 py-4">Loading profiles...</p> : profileAccounts.map((profile) => {
+            const draft = profileDrafts[profile.id] || { userPassword: "", ownerPassword: "" };
+            return (
               <Card key={profile.id} className="p-5 space-y-5" data-testid={`profile-credentials-${profile.id}`}>
                 <div>
                   <h3 className="font-bold text-slate-800 font-display">{profile.name}</h3>
-                  <p className="text-sm text-slate-500 mt-1">Both accounts use username <b>{profile.username}</b>. The User account can access only SUPERIQFOAM; the Owner account can access all three profiles.</p>
+                  <p className="text-sm text-slate-500 mt-1">Owner and User sign in independently using username <b>{profile.username}</b>. The owner account has owner access only to this profile.</p>
                 </div>
                 {[
-                  { type: "user", label: "User password", configured: profile.user_configured, password: draft.userPassword },
-                  { type: "owner", label: "Owner password", configured: profile.owner_configured, password: draft.ownerPassword },
+                  { type: "owner", label: "Owner", configured: profile.owner_configured, password: draft.ownerPassword },
+                  { type: "user", label: "User", configured: profile.user_configured, password: draft.userPassword },
                 ].map(({ type, label, configured, password }) => {
                   const savingId = `${profile.id}-${type}`;
                   return <div key={type} className="space-y-3 rounded-lg border border-border p-4">
                     <div>
-                      <h4 className="font-semibold text-slate-800">{label}</h4>
-                      <p className="text-xs text-slate-500">{configured ? "Set a new password to replace the current one." : "No user account yet; saving creates it."}</p>
+                      <h4 className="font-semibold text-slate-800">{label} password</h4>
+                      <p className="text-xs text-slate-500">{configured ? "Configured. Set a new password to replace it." : "Not configured. Saving creates this profile login."}</p>
                     </div>
-                    <Input label="New password (at least 8 characters)" type="password" minLength={8}
+                    <Input label={`New ${label.toLowerCase()} password (at least 8 characters)`} type="password" minLength={8}
                       value={password}
                       onChange={(event) => setProfileDrafts((current) => ({
                         ...current, [profile.id]: { ...draft, [`${type}Password`]: event.target.value },
@@ -433,33 +511,13 @@ export default function Settings() {
                     <Btn onClick={() => saveProfileCredentials(profile, type)}
                       disabled={profileSavingId === savingId || password.length < 8}
                       data-testid={`save-profile-${type}-${profile.id}`}>
-                      <Save size={16} /> {profileSavingId === savingId ? "Saving..." : `Save ${type} password`}
+                      <Save size={16} /> {profileSavingId === savingId ? "Saving..." : `Save ${label} password`}
                     </Btn>
                   </div>;
                 })}
               </Card>
             );
-            const changed = draft.username !== profile.username || Boolean(draft.password);
-            return (
-              <Card key={profile.id} className="p-5 space-y-4" data-testid={`profile-credentials-${profile.id}`}>
-                <div>
-                  <h3 className="font-bold text-slate-800 font-display">{profile.name}</h3>
-                  {!profile.configured && <p className="text-xs text-amber-700 mt-1">Account not configured yet. Enter a username and password to create it.</p>}
-                </div>
-                <Input label="Username" value={draft.username} onChange={(event) => setProfileDrafts((current) => ({
-                  ...current, [profile.id]: { ...draft, username: event.target.value },
-                }))} required data-testid={`profile-username-${profile.id}`} />
-                <Input label="New password (leave empty to keep current password)" type="password" minLength={8}
-                  value={draft.password} onChange={(event) => setProfileDrafts((current) => ({
-                    ...current, [profile.id]: { ...draft, password: event.target.value },
-                  }))} data-testid={`profile-password-${profile.id}`} />
-                <Btn onClick={() => saveProfileCredentials(profile)} disabled={profileSavingId === profile.id || (!changed && profile.configured) || (!profile.configured && !draft.password)}
-                  data-testid={`save-profile-${profile.id}`}>
-                  <Save size={16} /> {profileSavingId === profile.id ? "Saving..." : "Save credentials"}
-                </Btn>
-              </Card>
-            );
-          })}
+          }))}
         </div>
       )}
 
