@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDateTime } from "@/lib/format";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader } from "@/components/common";
-import { Building2, Receipt, Tag, Truck, Save, Pencil, Plus, ShieldCheck, Fuel, MapPin, Smartphone, Trash2, UserPlus, CirclePause, CirclePlay, KeyRound } from "lucide-react";
+import { Building2, Receipt, Tag, Truck, Save, Pencil, Plus, ShieldCheck, Fuel, MapPin, Smartphone, Trash2, UserPlus, CirclePause, CirclePlay, KeyRound, Database, RotateCcw } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { usesUnifiedPriceList } from "@/lib/company";
 
@@ -15,6 +15,7 @@ const TABS = [
   { k: "diesel", l: "Diesel", icon: Fuel },
   { k: "access", l: "Access", icon: ShieldCheck },
   { k: "profiles", l: "Password and Credentials", icon: KeyRound },
+  { k: "backups", l: "Backups", icon: Database },
 ];
 
 function AccessTab({ users, companies, loading, currentUserId, isPrimaryOwner, onRoleChange, onStatusChange, onRemove, onCreate, onMakeOwner }) {
@@ -169,6 +170,11 @@ export default function Settings() {
   const [priceSaving, setPriceSaving] = useState(false);
   const [dModal, setDModal] = useState(null);
   const [zone, setZone] = useState(1);
+  const [backupStatus, setBackupStatus] = useState(null);
+  const [backups, setBackups] = useState([]);
+  const [backupsLoading, setBackupsLoading] = useState(false);
+  const [backupAction, setBackupAction] = useState("");
+  const [recoveryCopy, setRecoveryCopy] = useState(null);
 
   const load = () => {
     api.get("/settings").then((settings) => { setS(settings); setDieselPrice(settings.diesel_price == null ? "" : String(settings.diesel_price)); });
@@ -204,6 +210,65 @@ export default function Settings() {
         .finally(() => setSupervisorStatusLoading(false));
     }
   }, [tab, user?.is_owner, user?.is_company_owner]);
+  useEffect(() => {
+    if (tab !== "backups" || !user?.is_primary_owner) return;
+    setBackupsLoading(true);
+    api.get("/backups")
+      .then((result) => {
+        setBackupStatus(result.status);
+        setBackups(result.snapshots);
+      })
+      .catch((error) => toast.error(apiError(error)))
+      .finally(() => setBackupsLoading(false));
+  }, [tab, user?.is_primary_owner]);
+
+  const refreshBackups = async () => {
+    setBackupsLoading(true);
+    try {
+      const result = await api.get("/backups");
+      setBackupStatus(result.status);
+      setBackups(result.snapshots);
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setBackupsLoading(false);
+    }
+  };
+
+  const createBackup = async () => {
+    setBackupAction("create");
+    try {
+      const result = await api.post("/backups", {});
+      if (result.retention_cleanup_ok === false) {
+        toast.error("Backup was created, but expired-backup cleanup failed. Ask the administrator to check server logs.");
+      } else {
+        toast.success(result.already_exists ? "A backup already exists for this time" : "Backup created in the external archive");
+      }
+      await refreshBackups();
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setBackupAction("");
+    }
+  };
+
+  const restoreBackup = async (backup) => {
+    const confirmed = window.confirm(
+      `Restore ${backup.key} into a separate copy of the databases? Current live data will not be overwritten.`
+    );
+    if (!confirmed) return;
+    setBackupAction(backup.key);
+    setRecoveryCopy(null);
+    try {
+      const result = await api.post("/backups/restore", { key: backup.key });
+      setRecoveryCopy(result);
+      toast.success("Historical backup restored into a separate database copy");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setBackupAction("");
+    }
+  };
 
   const saveSupervisorPassword = async () => {
     if (supervisorPassword.length < 8 || supervisorSaving) return;
@@ -364,7 +429,7 @@ export default function Settings() {
     <div>
       <PageHeader title="Settings" subtitle="Configure your business" />
       <div className="flex gap-2 mb-6 overflow-x-auto no-print">
-        {TABS.filter((t) => (t.k !== "diesel" || user?.is_admin) && (t.k !== "access" || user?.is_owner) && (t.k !== "profiles" || user?.is_owner || user?.is_company_owner)).map((t) => (
+        {TABS.filter((t) => (t.k !== "diesel" || user?.is_admin) && (t.k !== "access" || user?.is_owner) && (t.k !== "profiles" || user?.is_owner || user?.is_company_owner) && (t.k !== "backups" || user?.is_primary_owner)).map((t) => (
           <button key={t.k} onClick={() => setTab(t.k)} data-testid={`settings-tab-${t.k}`}
             className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold whitespace-nowrap ${tab === t.k ? "bg-primary text-white" : "bg-white border border-border text-slate-600"}`}>
             <t.icon size={16} /> {t.l}
@@ -469,6 +534,75 @@ export default function Settings() {
       )}
 
       {tab === "access" && user?.is_owner && <AccessTab users={accessUsers} companies={companies} loading={accessLoading} currentUserId={user.id} isPrimaryOwner={user.is_primary_owner} onRoleChange={changeRole} onStatusChange={changeStatus} onRemove={setRemoveUser} onCreate={createAccessUser} onMakeOwner={makeOwner} />}
+
+      {tab === "backups" && (
+        <div className="space-y-4" data-testid="backups-tab">
+          <Card className="p-5 space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="font-bold text-slate-800 font-display">Historical backups</h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  Daily copies are kept for 30 days and one monthly copy for 12 months. Backups cover all company databases; uploaded files are not included.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Btn variant="outline" onClick={refreshBackups} disabled={backupsLoading}>
+                  Refresh
+                </Btn>
+                <Btn onClick={createBackup} disabled={!backupStatus?.configured || !backupStatus?.tools_available || Boolean(backupAction)} data-testid="create-backup">
+                  <Database size={16} /> {backupAction === "create" ? "Creating..." : "Backup now"}
+                </Btn>
+              </div>
+            </div>
+            {backupStatus && (!backupStatus.configured || !backupStatus.tools_available) && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="status">
+                <p className="font-semibold">Backups are not active yet.</p>
+                <p className="mt-1">Choose a private S3-compatible archive such as Cloudflare R2, then configure these protected server variables:</p>
+                <ul className="mt-2 list-disc pl-5 font-mono text-xs">
+                  {backupStatus.missing_configuration.map((name) => <li key={name}>{name}</li>)}
+                  {Object.entries(backupStatus.tools).filter(([, available]) => !available).map(([name]) => (
+                    <li key={name}>MongoDB Database Tools ({name} executable)</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-xs">Never paste access keys into this page or send them in chat. Ask the hosting administrator to configure them as server secrets.</p>
+              </div>
+            )}
+            {recoveryCopy && (
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900" role="status">
+                <p className="font-semibold">Separate recovery copy created. Live data was not overwritten.</p>
+                <p className="mt-1">Recovery ID: <span className="font-mono">{recoveryCopy.restore_id}</span></p>
+                <p className="mt-1">Database names: <span className="font-mono break-all">{Object.values(recoveryCopy.databases).join(", ")}</span></p>
+                <p className="mt-2 text-xs">This copy is isolated in MongoDB and is not opened as an editable workspace in the live app.</p>
+              </div>
+            )}
+          </Card>
+          <Card className="overflow-hidden">
+            {backupsLoading ? <p className="p-5 text-sm text-slate-500">Loading backups...</p> : backups.length === 0 ? (
+              <p className="p-5 text-sm text-slate-500">No backup snapshots are available.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[640px] text-sm">
+                  <thead><tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500">
+                    <th className="px-4 py-3">Snapshot</th><th className="px-4 py-3">Type</th><th className="px-4 py-3">Size</th><th className="px-4 py-3 text-right">Action</th>
+                  </tr></thead>
+                  <tbody>{backups.map((backup) => (
+                    <tr key={backup.key} className="border-b border-border/60">
+                      <td className="px-4 py-3 font-mono text-xs">{backup.key}</td>
+                      <td className="px-4 py-3 capitalize">{backup.kind}</td>
+                      <td className="px-4 py-3">{(backup.size_bytes / (1024 * 1024)).toFixed(2)} MB</td>
+                      <td className="px-4 py-3 text-right">
+                        <Btn variant="outline" disabled={Boolean(backupAction)} onClick={() => restoreBackup(backup)} data-testid={`restore-backup-${backup.kind}`}>
+                          <RotateCcw size={15} /> {backupAction === backup.key ? "Restoring..." : "Restore to copy"}
+                        </Btn>
+                      </td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
 
       {tab === "profiles" && (user?.is_owner || user?.is_company_owner) && (
         <div className="space-y-4 max-w-3xl" data-testid="profile-credentials-tab">

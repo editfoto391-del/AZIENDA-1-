@@ -8,6 +8,7 @@ load_dotenv(ROOT_DIR / '.env.multicompany')
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response
 from fastapi.responses import StreamingResponse
 import json, re
+import shutil
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, field_validator
@@ -15,8 +16,8 @@ from typing import List, Optional, Any
 from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
-import uuid, logging, jwt, bcrypt, math
-from pymongo import ReturnDocument
+import uuid, logging, jwt, bcrypt, math, asyncio
+from pymongo import IndexModel, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 import seed_data
@@ -24,6 +25,14 @@ from costs_math import calculate_production_cost
 from piecework_math import calculate_piecework
 from salary_math import calculate_salary_hours
 from tenancy import DEFAULT_COMPANY_ID, GLOBAL_COLLECTIONS, ScopedDatabase, active_company_id, tenant_database, uses_unified_price_list
+from backup_service import (
+    backup_configuration,
+    create_snapshot,
+    delete_expired_snapshots,
+    list_snapshots,
+    restore_snapshot_to_copy,
+    scheduled_backup_loop,
+)
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
@@ -35,6 +44,7 @@ JWT_ALGO = "HS256"
 
 app = FastAPI()
 api = APIRouter(prefix="/api")
+backup_scheduler_task = None
 
 
 def now_iso():
@@ -391,6 +401,9 @@ class OwnerPromotionIn(BaseModel):
 
 class SupervisorPasswordIn(BaseModel):
     password: str
+
+class BackupRestoreIn(BaseModel):
+    key: str
 
 class SwitchCompanyIn(BaseModel):
     company_id: str
@@ -1138,11 +1151,11 @@ async def next_ref(key, prefix):
     c = await db.counters.find_one_and_update({"id": f"{key}-{year}"}, {"$inc": {"seq": 1}}, upsert=True, return_document=ReturnDocument.AFTER)
     return f"{prefix}-{year}-{c['seq']:04d}"
 
-async def listall(coll, flt=None, sort=None):
+async def listall(coll, flt=None, sort=None, limit=5000):
     cur = db[coll].find(flt or {}, {"_id": 0})
     if sort:
         cur = cur.sort(sort[0], sort[1])
-    return await cur.to_list(5000)
+    return await cur.to_list(limit)
 
 # ---------------- Customers ----------------
 class CustomerIn(BaseModel):
@@ -1205,13 +1218,16 @@ async def delete_customer(cid: str, user=Depends(get_current_user)):
 
 @api.get("/customers/{cid}/summary")
 async def customer_summary(cid: str, user=Depends(get_current_user)):
-    invs = await listall("invoices", {"customer_id": cid, "archived": {"$ne": True}}, ("created_at", -1))
+    invs, payment_records, orders, dels = await asyncio.gather(
+        listall("invoices", {"customer_id": cid, "archived": {"$ne": True}}, ("created_at", -1)),
+        listall("payments", {"customer_id": cid}, ("created_at", -1)),
+        listall("orders", {"customer_id": cid, "archived": {"$ne": True}}, ("created_at", -1)),
+        listall("deliveries", {"customer_id": cid, "archived": {"$ne": True}}, ("created_at", -1)),
+    )
     for i in invs:
         i["status"] = derive_status(i)
     valid = [i for i in invs if i["status"] not in ("void", "draft")]
-    pays = [p for p in await listall("payments", {"customer_id": cid}, ("created_at", -1)) if not p.get("reversed") and not p.get("archived")]
-    orders = await listall("orders", {"customer_id": cid, "archived": {"$ne": True}}, ("created_at", -1))
-    dels = await listall("deliveries", {"customer_id": cid, "archived": {"$ne": True}}, ("created_at", -1))
+    pays = [p for p in payment_records if not p.get("reversed") and not p.get("archived")]
     return {"invoices": invs, "payments": pays,
             "outstanding": dsum(i.get("outstanding", 0) for i in valid),
             "overdue": dsum(i.get("outstanding", 0) for i in valid if i["status"] == "overdue"),
@@ -1910,6 +1926,11 @@ def mov_sign(m):
 
 async def stock_current(s):
     movs = await listall("stock_movements", {"stock_id": s["id"]})
+    return apply_stock_movements(s, movs)
+
+def apply_stock_movements(stock, movements):
+    s = stock
+    movs = movements
     s["current"] = r2(D(s.get("opening", 0)) + sum((D(m["quantity"]) * mov_sign(m) for m in movs), Decimal("0")))
     s["production_received"] = dsum(m["quantity"] for m in movs if m["type"] == "production")
     s["purchased"] = dsum(m["quantity"] for m in movs if m["type"] == "purchase")
@@ -2722,11 +2743,13 @@ def salary_period_dates(start_date, end_date):
 
 async def salary_report(start_date, end_date):
     salary_period_dates(start_date, end_date)
-    employees = await listall("employees", sort=("name", 1))
-    attendance = await listall("attendance", {"date": {"$gte": start_date, "$lte": end_date}}, ("date", 1))
-    piece_records = await listall("piece_production", {"date": {"$gte": start_date, "$lte": end_date}}, ("date", 1))
-    advances = await listall("salary_advances", {"voided": {"$ne": True}})
-    cuts = await listall("salary_cuts", {"voided": {"$ne": True}})
+    employees, attendance, piece_records, advances, cuts = await asyncio.gather(
+        listall("employees", sort=("name", 1)),
+        listall("attendance", {"date": {"$gte": start_date, "$lte": end_date}}, ("date", 1)),
+        listall("piece_production", {"date": {"$gte": start_date, "$lte": end_date}}, ("date", 1)),
+        listall("salary_advances", {"voided": {"$ne": True}}),
+        listall("salary_cuts", {"voided": {"$ne": True}}),
+    )
     result = []
     for employee in employees:
         hourly_rate = float(employee.get("hourly_rate") or 20)
@@ -3111,6 +3134,94 @@ async def get_settings(user=Depends(get_current_user)):
              "unified_price_list": uses_unified_price_list(active_company_id.get())}
     return {**seed_data.DEFAULT_SETTINGS, **extra, **(s or {})}
 
+def require_primary_owner(user):
+    if canonical_email(user.get("email")) != canonical_email(os.environ["ADMIN_EMAIL"]):
+        raise HTTPException(403, "Primary owner access required")
+
+def backup_database_names():
+    return [base_db.name, *(
+        f"{base_db.name}__{profile['id']}"
+        for profile in COMPANY_PROFILES
+        if profile["id"] != DEFAULT_COMPANY_ID
+    )]
+
+def backup_runtime_status():
+    configuration = backup_configuration()
+    tools = {name: shutil.which(name) is not None for name in ("mongodump", "mongorestore")}
+    return {
+        "configured": configuration["configured"],
+        "missing_configuration": configuration["missing"],
+        "tools_available": all(tools.values()),
+        "tools": tools,
+        "storage_provider": "S3-compatible object storage",
+        "schedule": "Daily at 02:00 Africa/Johannesburg",
+        "retention": "Daily snapshots for 30 days; monthly snapshots for 12 months",
+        "scope": "All three company databases; uploaded files are not included",
+    }
+
+@api.get("/backups/status")
+async def get_backup_status(user=Depends(get_current_user)):
+    require_primary_owner(user)
+    return backup_runtime_status()
+
+@api.get("/backups")
+async def get_backups(user=Depends(get_current_user)):
+    require_primary_owner(user)
+    status = backup_runtime_status()
+    if not status["configured"] or not status["tools_available"]:
+        return {"snapshots": [], "status": status}
+    try:
+        snapshots = await list_snapshots(backup_configuration(), local_today())
+        return {"snapshots": snapshots, "status": status}
+    except Exception:
+        logging.exception("Could not list external backups")
+        raise HTTPException(502, "Could not read the backup archive")
+
+@api.post("/backups")
+async def create_manual_backup(user=Depends(get_current_user)):
+    require_primary_owner(user)
+    status = backup_runtime_status()
+    if not status["configured"] or not status["tools_available"]:
+        raise HTTPException(503, "Configure the external backup archive and MongoDB tools first")
+    try:
+        result = await create_snapshot(
+            mongo_url=mongo_url,
+            database_names=backup_database_names(),
+            configuration=backup_configuration(),
+            snapshot_date=datetime.now(timezone.utc),
+            kind="manual",
+        )
+        try:
+            await delete_expired_snapshots(backup_configuration(), local_today())
+            result["retention_cleanup_ok"] = True
+        except Exception:
+            logging.exception("Backup succeeded but expired-backup cleanup failed")
+            result["retention_cleanup_ok"] = False
+        return result
+    except Exception:
+        logging.exception("Manual backup failed")
+        raise HTTPException(502, "Backup failed; no success was reported. Check server logs and archive configuration")
+
+@api.post("/backups/restore")
+async def restore_backup(body: BackupRestoreIn, user=Depends(get_current_user)):
+    require_primary_owner(user)
+    status = backup_runtime_status()
+    if not status["configured"] or not status["tools_available"]:
+        raise HTTPException(503, "Configure the external backup archive and MongoDB tools first")
+    try:
+        return await restore_snapshot_to_copy(
+            mongo_url=mongo_url,
+            database_names=backup_database_names(),
+            configuration=backup_configuration(),
+            snapshot_key_value=body.key,
+            base_database_name=base_db.name,
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    except Exception:
+        logging.exception("Historical backup restore failed")
+        raise HTTPException(502, "Restore failed. Live databases were not intentionally changed; check the isolated recovery databases and server logs")
+
 @api.get("/settings/supervisor-password")
 async def get_supervisor_password_status(user=Depends(get_current_user)):
     require_profile_owner(user)
@@ -3183,23 +3294,45 @@ async def update_diesel_price(body: DieselPriceUpdate, user=Depends(get_current_
 # ---------------- Dashboard ----------------
 @api.get("/dashboard")
 async def dashboard(period: str = "month", user=Depends(get_current_user)):
-    invs = await listall("invoices", {"archived": {"$ne": True}})
+    (
+        invs, pays, stock, prod, att_today, deliveries, orders, parts_to_buy,
+        vehicles, vrecs, settings, expenses, buyings,
+    ) = await asyncio.gather(
+        listall("invoices", {"archived": {"$ne": True}}),
+        listall("payments", {"archived": {"$ne": True}}),
+        listall("stock"),
+        listall("production", {"archived": {"$ne": True}}),
+        listall("attendance", {"date": today_str()}),
+        listall("deliveries", {"archived": {"$ne": True}}),
+        listall("orders", {"archived": {"$ne": True}}, sort=("created_at", -1)),
+        listall("spareparts", {"status": "to_buy"}),
+        listall("vehicles"),
+        listall("vehicle_records"),
+        db.settings.find_one({"id": "singleton"}),
+        listall("expenses", {"voided": {"$ne": True}, "archived": {"$ne": True}}),
+        listall("buyings", {"voided": {"$ne": True}, "archived": {"$ne": True}}),
+    )
     for i in invs:
         i["status"] = derive_status(i)
     valid = [i for i in invs if i["status"] not in ("void", "draft")]
     total_invoiced = dsum(i.get("total", 0) for i in valid if not i.get("opening_balance"))
-    pays = [p for p in await listall("payments", {"archived": {"$ne": True}}) if not p.get("reversed")]
+    pays = [p for p in pays if not p.get("reversed")]
     payments_received = dsum(p.get("amount", 0) for p in pays)
     outstanding = dsum(i.get("outstanding", 0) for i in valid)
     overdue = dsum(i.get("outstanding", 0) for i in valid if i["status"] == "overdue")
 
-    stock = await listall("stock")
-    for s in stock:
-        await stock_current(s)
+    if stock:
+        movements = await listall(
+            "stock_movements", {"stock_id": {"$in": [s["id"] for s in stock]}}, limit=None,
+        )
+        movements_by_stock = {}
+        for movement in movements:
+            movements_by_stock.setdefault(movement["stock_id"], []).append(movement)
+        for item in stock:
+            apply_stock_movements(item, movements_by_stock.get(item["id"], []))
     finished_stock = r2(sum(s.get("current", 0) for s in stock))
     low_stock = [s for s in stock if s.get("current", 0) <= s.get("threshold", 0)]
 
-    prod = await listall("production", {"archived": {"$ne": True}})
     hours = await resting_hours()
     for p in prod:
         enrich_production(p, hours)
@@ -3207,27 +3340,29 @@ async def dashboard(period: str = "month", user=Depends(get_current_user)):
     resting = [p for p in prod if p.get("status") == "Resting" and not p["rest_elapsed"]]
     completed_today = [p for p in prod if p.get("status") == "Completed" and (p.get("updated_at") or "")[:10] == today_str()]
 
-    att_today = await listall("attendance", {"date": today_str()})
-    deliveries = await listall("deliveries", {"archived": {"$ne": True}})
     upcoming = [d for d in deliveries if d.get("status") in ("Planned", "Assigned", "Ready", "Dispatched")][:8]
 
     recent_invoices = sorted(invs, key=lambda x: x.get("created_at", ""), reverse=True)[:8]
 
-    orders = await listall("orders", {"archived": {"$ne": True}}, sort=("created_at", -1))
     open_orders = [o for o in orders if o.get("status") in OPEN_ORDER_STATUSES]
     orders_to_send = open_orders[:8]
     week, month = period_starts()
-    week_profit = await profit_for(week)
-    month_profit = await profit_for(month)
     (period_start, period_end), (previous_start, previous_end) = dashboard_period_ranges(period)
-    selected_profit = await profit_for(period_start, period_end)
-    previous_profit = await profit_for(previous_start, previous_end)
-    parts_to_buy = await listall("spareparts", {"status": "to_buy"})
-    vehicles = await listall("vehicles")
-    vrecs = await listall("vehicle_records")
+    profit_periods = [
+        (week, None),
+        (month, None),
+        (period_start, period_end),
+        (previous_start, previous_end),
+    ]
+    calculated_profits = [
+        profit_from_records(*bounds, payments=pays, expenses=expenses, vehicle_records=vrecs,
+                            buyings=buyings)
+        for bounds in profit_periods
+    ]
+    week_profit, month_profit, selected_profit, previous_profit = calculated_profits
     maint_due = [r for r in vrecs if r.get("status") in ("Needed", "Scheduled", "needed")]
 
-    settings = await db.settings.find_one({"id": "singleton"}) or {}
+    settings = settings or {}
     recommendations = []
     for s in stock:
         target = s.get("target", 0) or s.get("threshold", 0) * 2
@@ -3579,9 +3714,24 @@ def _next_month(month):
     year, value = map(int, month.split("-"))
     return f"{year + (value == 12):04d}-{1 if value == 12 else value + 1:02d}"
 
+MONTHLY_BUSINESS_SYNC_LOCKS = {}
+
 async def _sync_monthly_business_expenses():
+    company_id = active_company_id.get() or DEFAULT_COMPANY_ID
+    lock = MONTHLY_BUSINESS_SYNC_LOCKS.setdefault(company_id, asyncio.Lock())
+    async with lock:
+        await _sync_monthly_business_expenses_locked()
+
+async def _sync_monthly_business_expenses_locked():
     current_month = local_today().strftime("%Y-%m")
-    for purchase in await listall("monthly_business_purchases", {"active": {"$ne": False}}):
+    purchases = await listall("monthly_business_purchases", {"active": {"$ne": False}})
+    purchase_ids = [purchase["id"] for purchase in purchases]
+    existing_occurrences = await db.monthly_business_purchase_occurrences.find(
+        {"purchase_id": {"$in": purchase_ids}}, {"_id": 0, "source_key": 1}
+    ).to_list(None) if purchase_ids else []
+    existing_source_keys = {item["source_key"] for item in existing_occurrences}
+    pending = []
+    for purchase in purchases:
         created_month = str(purchase.get("created_at", ""))[:7]
         start_month = purchase.get("start_month") or (
             _next_month(created_month) if re.fullmatch(r"\d{4}-\d{2}", created_month)
@@ -3591,8 +3741,15 @@ async def _sync_monthly_business_expenses():
         quantity = float(purchase.get("monthly_quantity") or 1)
         unit_price = float(purchase.get("unit_price") or purchase.get("monthly_amount") or 0)
         while month <= current_month and (not purchase.get("end_month") or month <= purchase["end_month"]):
-            amount = buying_amount(quantity, unit_price)
             source_key = f"monthly_business_purchase:{purchase['id']}:{month}"
+            if source_key not in existing_source_keys:
+                pending.append((purchase, month, quantity, unit_price, buying_amount(quantity, unit_price), source_key))
+            month = _next_month(month)
+
+    semaphore = asyncio.Semaphore(20)
+
+    async def create_occurrence(purchase, month, quantity, unit_price, amount, source_key):
+        async with semaphore:
             expense_day = min(int(purchase.get("expense_day") or 1), 28)
             expense = await db.expenses.find_one_and_update(
                 {"source_key": source_key},
@@ -3620,12 +3777,23 @@ async def _sync_monthly_business_expenses():
                 }},
                 upsert=True, projection={"_id": 0}, return_document=ReturnDocument.AFTER,
             )
-            month = _next_month(month)
+
+    if pending:
+        await asyncio.gather(*(create_occurrence(*item) for item in pending))
 
 @api.get("/monthly-business-purchases")
 async def get_monthly_business_purchases(user=Depends(get_current_user)):
     await _sync_monthly_business_expenses()
     purchases = await listall("monthly_business_purchases", sort=("name", 1))
+    occurrences = await listall(
+        "monthly_business_purchase_occurrences",
+        {"purchase_id": {"$in": [purchase["id"] for purchase in purchases]}},
+        sort=("month", -1),
+        limit=None,
+    ) if purchases else []
+    occurrences_by_purchase = {}
+    for occurrence in occurrences:
+        occurrences_by_purchase.setdefault(occurrence["purchase_id"], []).append(occurrence)
     for purchase in purchases:
         purchase["monthly_quantity"] = purchase.get("monthly_quantity") or 1
         purchase["unit_price"] = purchase.get("unit_price") or purchase.get("monthly_amount", 0)
@@ -3640,9 +3808,7 @@ async def get_monthly_business_purchases(user=Depends(get_current_user)):
         )
         purchase["active"] = purchase.get("active", True)
         purchase["end_month"] = purchase.get("end_month") or ""
-        purchase["occurrences"] = await listall(
-            "monthly_business_purchase_occurrences", {"purchase_id": purchase["id"]}, sort=("month", -1),
-        )
+        purchase["occurrences"] = occurrences_by_purchase.get(purchase["id"], [])
     return purchases
 
 @api.post("/monthly-business-purchases")
@@ -4001,10 +4167,20 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
     except ValueError:
         raise HTTPException(422, "Report date must be a valid YYYY-MM-DD date")
 
-    invoice_records = await daily_report_records(
-        "invoices",
-        selected_date,
-        {"archived": {"$ne": True}},
+    invoice_records, payments, expense_records = await asyncio.gather(
+        daily_report_records("invoices", selected_date, {"archived": {"$ne": True}}),
+        daily_report_records(
+            "payments",
+            selected_date,
+            {"archived": {"$ne": True}, "reversed": {"$ne": True}},
+            "created_at",
+        ),
+        daily_report_records(
+            "expenses",
+            selected_date,
+            {"voided": {"$ne": True}, "archived": {"$ne": True}},
+            "created_at",
+        ),
     )
     invoice_records.sort(key=lambda invoice: str(invoice.get("number") or ""))
     invoices = [
@@ -4027,19 +4203,22 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
         if not invoice.get("number") and invoice.get("status") not in ("void",)
     ]
 
-    payments = await daily_report_records(
-        "payments",
-        selected_date,
-        {
-            "archived": {"$ne": True},
-            "reversed": {"$ne": True},
-        },
-        "created_at",
-    )
     linked_invoice_ids = list({payment.get("invoice_id") for payment in payments if payment.get("invoice_id")})
-    linked_invoices = await db.invoices.find(
-        {"id": {"$in": linked_invoice_ids}}, {"_id": 0}
-    ).to_list(None) if linked_invoice_ids else []
+    fuel_categories = {"fuel", "diesel"}
+    fuel_expenses = [
+        expense for expense in expense_records
+        if str(expense.get("category") or "").strip().casefold() in fuel_categories
+    ]
+    vehicle_ids = list({expense.get("vehicle_id") for expense in fuel_expenses if expense.get("vehicle_id")})
+    async def find_records(collection, ids):
+        if not ids:
+            return []
+        return await db[collection].find({"id": {"$in": ids}}, {"_id": 0}).to_list(None)
+
+    linked_invoices, vehicles = await asyncio.gather(
+        find_records("invoices", linked_invoice_ids),
+        find_records("vehicles", vehicle_ids),
+    )
     invoice_by_id = {invoice["id"]: invoice for invoice in linked_invoices}
     payment_rows = []
     for payment in payments:
@@ -4062,20 +4241,6 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
             "notes": " | ".join(note_parts),
         })
 
-    expense_records = await daily_report_records(
-        "expenses",
-        selected_date,
-        {
-            "voided": {"$ne": True},
-            "archived": {"$ne": True},
-        },
-        "created_at",
-    )
-    fuel_categories = {"fuel", "diesel"}
-    fuel_expenses = [
-        expense for expense in expense_records
-        if str(expense.get("category") or "").strip().casefold() in fuel_categories
-    ]
     expense_rows = [
         {
             "id": expense.get("id"),
@@ -4086,10 +4251,6 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
         for expense in expense_records
         if str(expense.get("category") or "").strip().casefold() not in fuel_categories
     ]
-    vehicle_ids = list({expense.get("vehicle_id") for expense in fuel_expenses if expense.get("vehicle_id")})
-    vehicles = await db.vehicles.find(
-        {"id": {"$in": vehicle_ids}}, {"_id": 0}
-    ).to_list(None) if vehicle_ids else []
     vehicle_by_id = {vehicle["id"]: vehicle for vehicle in vehicles}
     diesel_rows = []
     unassigned_fuel_rows = []
@@ -4199,8 +4360,16 @@ def dashboard_period_ranges(period):
 VEHICLE_COST_DONE = ("Done", "done")
 
 async def cost_ledger(since=None, until=None):
+    expenses, vehicles, vehicle_records = await asyncio.gather(
+        listall("expenses", {"voided": {"$ne": True}, "archived": {"$ne": True}}),
+        listall("vehicles"),
+        listall("vehicle_records"),
+    )
+    return cost_ledger_from_records(expenses, vehicles, vehicle_records, since, until)
+
+def cost_ledger_from_records(expenses, vehicles, vehicle_records, since=None, until=None):
     rows = []
-    for x in await listall("expenses", {"voided": {"$ne": True}, "archived": {"$ne": True}}):
+    for x in expenses:
         source_key = x.get("source_key", "")
         source = (
             "spare_part" if source_key.startswith("sparepart:")
@@ -4209,8 +4378,8 @@ async def cost_ledger(since=None, until=None):
         )
         rows.append({"id": x["id"], "date": x.get("date"), "description": x.get("description"), "category": x.get("category", "General"),
                      "amount": x.get("amount", 0), "vehicle_id": x.get("vehicle_id", ""), "source": source})
-    vnames = {v["id"]: v["name"] for v in await listall("vehicles")}
-    for x in await listall("vehicle_records"):
+    vnames = {v["id"]: v["name"] for v in vehicles}
+    for x in vehicle_records:
         if x.get("status") in VEHICLE_COST_DONE and (x.get("amount") or 0) > 0:
             rows.append({"id": x["id"], "date": x.get("date"), "description": f"{vnames.get(x.get('vehicle_id'), '')}: {x.get('description', '')}",
                          "category": f"Vehicle {x.get('type', 'expense').title()}", "amount": x.get("amount", 0),
@@ -4219,16 +4388,56 @@ async def cost_ledger(since=None, until=None):
         r["vehicle_name"] = vnames.get(r.get("vehicle_id"), "")
     return [r for r in rows if (not since or (r["date"] or "") >= since) and (not until or (r["date"] or "") <= until)]
 
+def profit_from_records(since, until=None, *, payments, expenses, vehicle_records, buyings):
+    def in_period(item):
+        record_date = item.get("date") or ""
+        return record_date >= since and (not until or record_date <= until)
+
+    revenue = dsum(
+        payment.get("amount", 0)
+        for payment in payments
+        if not payment.get("reversed") and in_period(payment)
+    )
+    expense_total = dsum([
+        *(expense.get("amount", 0) for expense in expenses if in_period(expense)),
+        *(
+            record.get("amount", 0)
+            for record in vehicle_records
+            if record.get("status") in VEHICLE_COST_DONE
+            and (record.get("amount") or 0) > 0
+            and in_period(record)
+        ),
+    ])
+    buying_total = dsum(
+        buying.get("amount", 0) for buying in buyings if in_period(buying)
+    )
+    return {
+        "revenue": revenue,
+        "expenses": expense_total,
+        "buyings": buying_total,
+        "profit": r2(D(revenue) - D(expense_total) - D(buying_total)),
+        "label": "Estimated result — payments received minus recorded expenses and buyings",
+        "basis": "payment dates, expense dates & buying dates",
+    }
+
+async def load_profit_records():
+    return await asyncio.gather(
+        listall("payments", {"archived": {"$ne": True}}),
+        listall("expenses", {"voided": {"$ne": True}, "archived": {"$ne": True}}),
+        listall("vehicle_records"),
+        listall("buyings", {"voided": {"$ne": True}, "archived": {"$ne": True}}),
+    )
+
 async def profit_for(since, until=None):
-    pays = [p for p in await listall("payments", {"archived": {"$ne": True}}) if not p.get("reversed")]
-    revenue = dsum(p.get("amount", 0) for p in pays if (p.get("date") or "") >= since and (not until or (p.get("date") or "") <= until))
-    expense = dsum(x["amount"] for x in await cost_ledger(since, until))
-    buyings = dsum(b.get("amount", 0) for b in await listall("buyings", {"voided": {"$ne": True}, "archived": {"$ne": True}})
-                   if (b.get("date") or "") >= since and (not until or (b.get("date") or "") <= until))
-    return {"revenue": revenue, "expenses": expense, "buyings": buyings,
-            "profit": r2(D(revenue) - D(expense) - D(buyings)),
-            "label": "Estimated result — payments received minus recorded expenses and buyings",
-            "basis": "payment dates, expense dates & buying dates"}
+    payments, expenses, vehicle_records, buyings = await load_profit_records()
+    return profit_from_records(
+        since,
+        until,
+        payments=payments,
+        expenses=expenses,
+        vehicle_records=vehicle_records,
+        buyings=buyings,
+    )
 
 @api.get("/dashboard/compare")
 async def compare_dashboard_periods(kind: str, first: str, second: str, user=Depends(get_current_user)):
@@ -4255,21 +4464,49 @@ async def compare_dashboard_periods(kind: str, first: str, second: str, user=Dep
                 raise HTTPException(400, f"Invalid year: {value}")
     else:
         raise HTTPException(400, "Comparison kind must be month or year")
+    payments, expenses, vehicle_records, buyings = await load_profit_records()
     return {
         "kind": kind,
-        "first": {"value": first, "start": values[0][0], "end": values[0][1], **(await profit_for(*values[0]))},
-        "second": {"value": second, "start": values[1][0], "end": values[1][1], **(await profit_for(*values[1]))},
+        "first": {
+            "value": first, "start": values[0][0], "end": values[0][1],
+            **profit_from_records(
+                *values[0], payments=payments, expenses=expenses,
+                vehicle_records=vehicle_records, buyings=buyings,
+            ),
+        },
+        "second": {
+            "value": second, "start": values[1][0], "end": values[1][1],
+            **profit_from_records(
+                *values[1], payments=payments, expenses=expenses,
+                vehicle_records=vehicle_records, buyings=buyings,
+            ),
+        },
     }
 
 @api.get("/reports/profit")
 async def profit_report(user=Depends(get_current_user)):
     week, month = period_starts()
     t = today_str()
+    (payments, expenses, vehicle_records, buyings), vehicles = await asyncio.gather(
+        load_profit_records(),
+        listall("vehicles"),
+    )
     return {
-        "today": await profit_for(t, t),
-        "week": await profit_for(week),
-        "month": await profit_for(month),
-        "total_expenses": dsum(x["amount"] for x in await cost_ledger()),
+        "today": profit_from_records(
+            t, t, payments=payments, expenses=expenses,
+            vehicle_records=vehicle_records, buyings=buyings,
+        ),
+        "week": profit_from_records(
+            week, payments=payments, expenses=expenses,
+            vehicle_records=vehicle_records, buyings=buyings,
+        ),
+        "month": profit_from_records(
+            month, payments=payments, expenses=expenses,
+            vehicle_records=vehicle_records, buyings=buyings,
+        ),
+        "total_expenses": dsum(
+            row["amount"] for row in cost_ledger_from_records(expenses, vehicles, vehicle_records)
+        ),
         "week_start": week, "month_start": month, "timezone": "Africa/Johannesburg",
     }
 
@@ -4507,8 +4744,17 @@ WEB_TOOL = [{"type": "function", "function": {"name": "web_search", "description
              "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}]
 
 async def business_snapshot(user):
-    dash = await dashboard(user)
-    invs = await listall("invoices", {"archived": {"$ne": True}}, sort=("date", -1))
+    dash = await dashboard(user=user)
+    week, month = period_starts()
+    invs, costs, order_records, vrecs, driver_records, vehicles, spare_parts = await asyncio.gather(
+        listall("invoices", {"archived": {"$ne": True}}, sort=("date", -1)),
+        cost_ledger(month),
+        listall("orders", {"archived": {"$ne": True}}),
+        listall("vehicle_records"),
+        listall("drivers"),
+        listall("vehicles"),
+        listall("spareparts", {"status": "to_buy"}),
+    )
     for i in invs:
         i["status"] = derive_status(i)
     open_inv = [{"number": i.get("number"), "customer": i.get("customer_name"), "date": i.get("date"), "due": i.get("due_date"),
@@ -4517,13 +4763,10 @@ async def business_snapshot(user):
     debtors = {}
     for i in open_inv:
         debtors[i["customer"]] = r2(D(debtors.get(i["customer"], 0)) + D(i["outstanding"]))
-    week, month = period_starts()
-    costs = await cost_ledger(month)
     orders = [{"ref": o.get("reference"), "customer": o.get("customer_name"), "destination": o.get("destination"), "products": o.get("products"),
                "priority": o.get("priority"), "status": o.get("status"), "ship_date": o.get("expected_ship_date")}
-              for o in await listall("orders", {"archived": {"$ne": True}}) if o.get("status") in OPEN_ORDER_STATUSES]
-    vrecs = await listall("vehicle_records")
-    drivers = {d["id"]: d["name"] for d in await listall("drivers")}
+              for o in order_records if o.get("status") in OPEN_ORDER_STATUSES]
+    drivers = {d["id"]: d["name"] for d in driver_records}
     return {
         "today": today_str(), "timezone": "Africa/Johannesburg", "currency": "ZAR",
         "totals": {k: dash[k] for k in ("total_invoiced", "payments_received", "outstanding", "overdue", "finished_stock")},
@@ -4540,8 +4783,8 @@ async def business_snapshot(user):
         "expenses_this_month": [{"date": c["date"], "description": c["description"], "category": c["category"], "amount": c["amount"]} for c in costs][:80],
         "fleet": [{"name": v["name"], "type": v.get("vtype"), "length": v.get("length"), "available": v.get("available"),
                    "pending_work": len([r for r in vrecs if r.get("vehicle_id") == v["id"] and r.get("status") in ("Needed", "Scheduled", "In Progress")])}
-                  for v in await listall("vehicles")],
-        "spare_parts_to_buy": [{"name": p["name"], "qty": p.get("quantity")} for p in await listall("spareparts", {"status": "to_buy"})],
+                  for v in vehicles],
+        "spare_parts_to_buy": [{"name": p["name"], "qty": p.get("quantity")} for p in spare_parts],
     }
 
 ASSISTANT_RULES = """You are the business assistant for SUPER IQ-FOAM, a foam mattress manufacturer and wholesaler in Kokstad, KwaZulu-Natal, South Africa.
@@ -5239,6 +5482,7 @@ async def initialize_multi_company():
         await base_db[collection_name].create_index("company_id")
     for collection_name in ("invoices", "payments", "expenses"):
         await base_db[collection_name].create_index([("company_id", 1), ("date", 1)])
+    await ensure_performance_indexes(base_db)
 
     for company_id in ("iqfoam-manufactoring", "iqfoam-whole-sallers"):
         await initialize_empty_company(company_id)
@@ -5248,6 +5492,13 @@ async def initialize_multi_company():
             await base_db.users.drop_index(index_name)
     await base_db.users.create_index("username", sparse=True)
     await base_db.companies.create_index("id", unique=True)
+    await asyncio.gather(
+        base_db.users.create_index("id"),
+        base_db.users.create_index("email"),
+        base_db.user_sessions.create_index("id"),
+        base_db.user_sessions.create_index("session_token"),
+        base_db.user_devices.create_index([("user_id", 1), ("last_seen", -1)]),
+    )
     await initialize_company_profile_users()
 
 async def initialize_company_profile_users():
@@ -5278,6 +5529,53 @@ async def initialize_company_profile_users():
             "name": username, "password_hash": hash_pw(initial_password), "role": "user",
             "company_roles": {company_id: "user"}, "company_ids": [company_id], "active": True,
             "auth_provider": "password", "profile_id": company_id, "created_at": now_iso()})
+
+async def ensure_performance_indexes(database):
+    indexes = {
+        "customers": [[("name", 1)]],
+        "invoices": [[("created_at", -1)], [("customer_id", 1), ("created_at", -1)]],
+        "payments": [
+            [("customer_id", 1), ("created_at", -1)],
+            [("invoice_id", 1), ("created_at", -1)],
+        ],
+        "orders": [[("created_at", -1)], [("customer_id", 1), ("created_at", -1)]],
+        "deliveries": [[("created_at", -1)], [("customer_id", 1), ("created_at", -1)]],
+        "stock": [[("product", 1)]],
+        "stock_movements": [
+            [("stock_id", 1), ("created_at", -1)],
+            [("invoice_id", 1), ("type", 1)],
+        ],
+        "production": [[("created_at", -1)]],
+        "production_daily": [[("date", -1)]],
+        "production_runs": [[("date", -1)]],
+        "attendance": [[("date", 1)]],
+        "piece_production": [[("date", 1)]],
+        "employees": [[("name", 1)]],
+        "drivers": [[("name", 1)]],
+        "vehicles": [[("name", 1)]],
+        "vehicle_records": [[("date", -1)], [("vehicle_id", 1), ("date", -1)]],
+        "buyings": [[("date", -1)]],
+        "suppliers": [[("name", 1)]],
+        "spareparts": [[("status", 1), ("created_at", -1)]],
+        "monthly_business_purchases": [[("name", 1)]],
+        "monthly_business_purchase_occurrences": [[("purchase_id", 1), ("month", -1)]],
+    }
+    semaphore = asyncio.Semaphore(4)
+
+    async def create_collection_indexes(collection_name, definitions):
+        async with semaphore:
+            await database[collection_name].create_indexes([
+                IndexModel([("company_id", 1), ("id", 1)]),
+                *(
+                    IndexModel([("company_id", 1), *definition])
+                    for definition in definitions
+                ),
+            ])
+
+    await asyncio.gather(*(
+        create_collection_indexes(collection_name, definitions)
+        for collection_name, definitions in indexes.items()
+    ))
 
 async def initialize_empty_company(company_id):
     company_db = tenant_database(client, base_db, company_id)
@@ -5339,11 +5637,26 @@ async def initialize_empty_company(company_id):
         await company_db[coll].create_index(keys, **options)
     for coll in ("invoices", "payments", "expenses"):
         await company_db[coll].create_index([("company_id", 1), ("date", 1)])
+    await ensure_performance_indexes(company_db)
 
 @app.on_event("startup")
 async def on_startup():
+    global backup_scheduler_task
     await seed()
     await initialize_multi_company()
+    status = backup_runtime_status()
+    if status["configured"] and status["tools_available"]:
+        backup_scheduler_task = asyncio.create_task(scheduled_backup_loop(
+            mongo_url=mongo_url,
+            database_names=backup_database_names(),
+            configuration=backup_configuration(),
+            local_timezone=TZ,
+            lock_database=base_db,
+        ))
+    else:
+        logging.warning(
+            "Automated backups are not active; configure S3-compatible storage and MongoDB backup tools"
+        )
 
 app.include_router(api)
 configured_cors_origins = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "*").split(",") if origin.strip()]
@@ -5367,4 +5680,10 @@ logging.basicConfig(level=logging.INFO)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    if backup_scheduler_task:
+        backup_scheduler_task.cancel()
+        try:
+            await backup_scheduler_task
+        except asyncio.CancelledError:
+            pass
     client.close()
