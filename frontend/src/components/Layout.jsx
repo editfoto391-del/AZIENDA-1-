@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import {
   LayoutDashboard, Users, FileText, Boxes, Factory, CalendarCheck,
   Truck, Menu, X, LogOut, Search, Bell, Layers,
-  ClipboardList, Banknote, Wrench, Wallet, ShoppingCart, ChevronDown, Building2, Settings as Cog, Calculator,
+  ClipboardList, Banknote, Wrench, Wallet, ShoppingCart, ChevronDown, Building2, Settings as Cog, Calculator, LockKeyhole,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -14,31 +14,34 @@ import { companyBrandName, companyProfileName } from "@/lib/company";
 
 const NAV_GROUPS = [
   { label: "Overview", items: [
-    { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
+    { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, section: "dashboard" },
   ] },
   { label: "Sales", items: [
-    { to: "/customers", label: "Customers", icon: Users },
-    { to: "/orders", label: "Orders", icon: ClipboardList },
-    { to: "/invoices", label: "Invoice", icon: FileText },
-    { to: "/client-payments", label: "Clients payment and balances", icon: Wallet },
+    { to: "/customers", label: "Customers", icon: Users, section: "customers" },
+    { to: "/orders", label: "Orders", icon: ClipboardList, section: "orders" },
+    { to: "/invoices", label: "Invoice", icon: FileText, section: "invoices" },
+    { to: "/client-payments", label: "Clients payment and balances", icon: Wallet, section: "client-payments" },
   ] },
   { label: "Fulfilment", items: [
-    { to: "/deliveries", label: "Deliveries", icon: Truck },
+    { to: "/deliveries", label: "Deliveries", icon: Truck, section: "deliveries" },
+  ] },
+  { label: "Purchasing", items: [
+    { to: "/buyings", label: "Buyings", icon: ShoppingCart, section: "buyings" },
+    { to: "/suppliers", label: "Suppliers", icon: Building2, section: "suppliers" },
   ] },
   { label: "Operations", items: [
-    { to: "/suppliers", label: "Suppliers", icon: Building2 },
-    { to: "/stock", label: "Stock", icon: Boxes },
-    { to: "/production", label: "Production", icon: Factory },
-    { to: "/fleet", label: "Fleet", icon: Wrench },
+    { to: "/stock", label: "Stock", icon: Boxes, section: "stock" },
+    { to: "/production", label: "Production", icon: Factory, section: "production" },
+    { to: "/fleet", label: "Fleet", icon: Wrench, section: "fleet" },
   ] },
   { label: "Finance & team", items: [
-    { to: "/costs", label: "Costs", icon: Calculator },
-    { to: "/expenses", label: "Expenses", icon: Banknote },
-    { to: "/daily-report", label: "Daily Report", icon: FileText },
-    { to: "/attendance", label: "Attendance", icon: CalendarCheck },
+    { to: "/costs", label: "Costs", icon: Calculator, section: "costs" },
+    { to: "/expenses", label: "Expenses", icon: Banknote, section: "expenses" },
+    { to: "/daily-report", label: "Daily Report", icon: FileText, section: "daily-report" },
+    { to: "/attendance", label: "Attendance", icon: CalendarCheck, section: "attendance" },
   ] },
   { label: "Administration", items: [
-    { to: "/settings", label: "Settings", icon: Cog },
+    { to: "/settings", label: "Settings", icon: Cog, section: "settings" },
   ] },
 ];
 
@@ -142,7 +145,7 @@ function WhatsAppFloatingButton() {
   );
 }
 
-function SidebarContent({ onNav, companyName, companyId }) {
+function SidebarContent({ onNav, companyName, companyId, user }) {
   const reduceMotion = useReducedMotion();
   const navGroups = NAV_GROUPS.map((group) => ({
     ...group,
@@ -164,14 +167,21 @@ function SidebarContent({ onNav, companyName, companyId }) {
           <div key={group.label} className="mb-2">
             <p className="px-3 pt-3 pb-1 text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-100/40">{group.label}</p>
             {group.items.map((n) => (
-              <NavLink key={n.to} to={n.to} end={n.end} onClick={onNav} onMouseEnter={() => preloadPage(n.to)} onFocus={() => preloadPage(n.to)} onPointerDown={() => preloadPage(n.to)} data-testid={`nav-${n.label.toLowerCase()}`}
-                className={({ isActive }) => `relative isolate flex min-h-9 items-center gap-2.5 px-2.5 py-1.5 rounded-md text-xs leading-tight font-medium transition-colors ${isActive ? "text-white" : "text-emerald-50/65 hover:bg-white/5 hover:text-white"}`}>
-                {({ isActive }) => <>
-                  {isActive && <motion.span layoutId={`active-nav-${onNav ? "mobile" : "desktop"}`} className="pointer-events-none absolute inset-0 z-0 rounded-md bg-white/10 shadow-[inset_2px_0_0_hsl(72_42%_65%)]" transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 480, damping: 38, mass: 0.5 }} />}
-                  <n.icon className="relative z-10" size={18} />
-                  <span className="relative z-10">{n.label}</span>
-                </>}
-              </NavLink>
+              user?.is_worker && !user.allowed_sections?.includes(n.section)
+                ? <div key={n.to} aria-disabled="true" title="Your administrator has not granted access to this section" data-testid={`nav-locked-${n.label.toLowerCase()}`}
+                  className="flex min-h-9 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium leading-tight text-emerald-50/35">
+                  <n.icon size={18} />
+                  <span className="flex-1">{n.label}</span>
+                  <LockKeyhole size={13} />
+                </div>
+                : <NavLink key={n.to} to={n.to} end={n.end} onClick={onNav} onMouseEnter={() => preloadPage(n.to)} onFocus={() => preloadPage(n.to)} onPointerDown={() => preloadPage(n.to)} data-testid={`nav-${n.label.toLowerCase()}`}
+                  className={({ isActive }) => `relative isolate flex min-h-9 items-center gap-2.5 px-2.5 py-1.5 rounded-md text-xs leading-tight font-medium transition-colors ${isActive ? "text-white" : "text-emerald-50/65 hover:bg-white/5 hover:text-white"}`}>
+                  {({ isActive }) => <>
+                    {isActive && <motion.span layoutId={`active-nav-${onNav ? "mobile" : "desktop"}`} className="pointer-events-none absolute inset-0 z-0 rounded-md bg-white/10 shadow-[inset_2px_0_0_hsl(72_42%_65%)]" transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 480, damping: 38, mass: 0.5 }} />}
+                    <n.icon className="relative z-10" size={18} />
+                    <span className="relative z-10">{n.label}</span>
+                  </>}
+                </NavLink>
             ))}
           </div>
         ))}
@@ -209,7 +219,7 @@ export default function Layout() {
     <div className="min-h-screen bg-background">
       {/* Desktop sidebar */}
       <aside className="no-print hidden lg:flex fixed inset-y-0 left-0 w-64 flex-col bg-[hsl(222_47%_11%)] z-30">
-        <SidebarContent companyName={activeBrandName} companyId={user?.company_id} />
+        <SidebarContent companyName={activeBrandName} companyId={user?.company_id} user={user} />
       </aside>
 
       {/* Mobile drawer */}
@@ -221,7 +231,7 @@ export default function Layout() {
             <button className="absolute top-5 right-4 text-slate-500" onClick={() => setOpen(false)} aria-label="Close navigation">
               <X size={22} />
             </button>
-            <SidebarContent onNav={() => setOpen(false)} companyName={activeBrandName} companyId={user?.company_id} />
+            <SidebarContent onNav={() => setOpen(false)} companyName={activeBrandName} companyId={user?.company_id} user={user} />
           </motion.aside>
         </motion.div>
         )}
@@ -301,7 +311,7 @@ export default function Layout() {
             </motion.div>
             <div className="hidden sm:block leading-tight">
               <div className="text-sm font-semibold text-slate-800">{user?.name || "Admin"}</div>
-              <div className="text-[11px] text-slate-500">{user?.is_owner ? "Owner" : user?.is_admin || user?.role === "admin" ? "Administrator" : "Team member"}</div>
+              <div className="text-[11px] text-slate-500">{user?.is_worker ? user.worker_role || "Worker" : user?.is_owner ? "Owner" : user?.is_admin || user?.role === "admin" ? "Administrator" : "Team member"}</div>
             </div>
             <motion.button whileHover={reduceMotion ? undefined : { x: -1, scale: 1.04 }} whileTap={reduceMotion ? undefined : { scale: 0.97 }} transition={{ type: "spring", stiffness: 500, damping: 22 }} onClick={logout} data-testid="logout-btn" className="rounded-full p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 ml-1">
               <LogOut size={18} />

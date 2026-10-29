@@ -10,6 +10,7 @@ import { usesUnifiedPriceList } from "@/lib/company";
 
 export default function InvoiceList() {
   const { user } = useAuth();
+  const canManageInvoices = user?.is_admin || user?.role === "admin" || user?.is_owner;
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -136,7 +137,7 @@ export default function InvoiceList() {
         </label>
       </Card>
 
-      {sel.length > 0 && <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2" data-testid="bulk-bar">
+      {canManageInvoices && sel.length > 0 && <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2" data-testid="bulk-bar">
         <span className="text-sm font-semibold text-amber-800">{sel.length} selected</span>
         <Btn variant="danger" onClick={() => removeMany(sel)} data-testid="bulk-delete-btn"><Trash2 size={15} /> Delete selected</Btn>
       </div>}
@@ -146,11 +147,11 @@ export default function InvoiceList() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                <th className="px-3 py-3 w-8"><input type="checkbox" checked={sel.length > 0 && sel.length === filtered.filter((i) => !i.archived && i.status === "draft").length} onChange={(e) => setSel(e.target.checked ? filtered.filter((i) => !i.archived && i.status === "draft").map((i) => i.id) : [])} data-testid="select-all-invoices" /></th><th className="px-4 py-3 font-semibold">Invoice</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">Date</th><th className="px-4 font-semibold">Due</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold text-right">Total</th><th className="px-4 font-semibold text-right">Paid</th><th className="px-4 font-semibold text-right">Balance</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
+                {canManageInvoices && <th className="px-3 py-3 w-8"><input type="checkbox" checked={sel.length > 0 && sel.length === filtered.filter((i) => !i.archived && i.status === "draft").length} onChange={(e) => setSel(e.target.checked ? filtered.filter((i) => !i.archived && i.status === "draft").map((i) => i.id) : [])} data-testid="select-all-invoices" /></th>}<th className="px-4 py-3 font-semibold">Invoice</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">Date</th><th className="px-4 font-semibold">Due</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold text-right">Total</th><th className="px-4 font-semibold text-right">Paid</th><th className="px-4 font-semibold text-right">Balance</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{filtered.map((i) => (
                 <tr key={i.id} className="border-b border-border/60 hover:bg-slate-50 cursor-pointer" onClick={() => i.archived ? view(i.id) : nav(`/invoices/${i.id}`)} data-testid={`invoice-row-${i.id}`}>
-                  <td className="px-3" onClick={(e) => e.stopPropagation()}>{!i.archived && i.status === "draft" && <input type="checkbox" checked={sel.includes(i.id)} onChange={() => toggle(i.id)} data-testid={`select-invoice-${i.id}`} />}</td>
+                  {canManageInvoices && <td className="px-3" onClick={(e) => e.stopPropagation()}>{!i.archived && i.status === "draft" && <input type="checkbox" checked={sel.includes(i.id)} onChange={() => toggle(i.id)} data-testid={`select-invoice-${i.id}`} />}</td>}
                   <td className="px-4 py-3 font-mono font-semibold text-slate-700">{i.number || "DRAFT"}{i.archived && <span className="ml-2 inline-block rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 font-sans">Archived</span>}{i.opening_balance && <span className="ml-2 inline-block rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700 font-sans" data-testid={`opening-badge-${i.id}`}>Opening Balance</span>}</td>
                   <td className="px-4 text-slate-600">{i.customer_name}{i.customer_deleted && <Badge cls="ml-2 border-red-200 bg-red-50 text-red-700">Deleted customer</Badge>}</td>
                   <td className="px-4 text-slate-500">{fmtDate(i.date)}</td>
@@ -166,8 +167,10 @@ export default function InvoiceList() {
                     </button>
                     {i.archived ? (
                       <>
-                        <button onClick={(e) => { e.stopPropagation(); restore(i.id); }} data-testid={`restore-invoice-row-${i.id}`} title="Restore invoice" aria-label={`Restore invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center rounded-lg border border-emerald-200 px-2 py-1 text-emerald-700 hover:bg-emerald-50"><RotateCcw size={12} /></button>
-                        {showArchived && <button onClick={(e) => { e.stopPropagation(); permanentlyDelete(i); }} data-testid={`permanently-delete-invoice-row-${i.id}`} title="Permanently delete invoice" aria-label={`Permanently delete invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50"><Trash2 size={12} /><span>Delete permanently</span></button>}
+                        {canManageInvoices && <>
+                          <button onClick={(e) => { e.stopPropagation(); restore(i.id); }} data-testid={`restore-invoice-row-${i.id}`} title="Restore invoice" aria-label={`Restore invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center rounded-lg border border-emerald-200 px-2 py-1 text-emerald-700 hover:bg-emerald-50"><RotateCcw size={12} /></button>
+                          {showArchived && <button onClick={(e) => { e.stopPropagation(); permanentlyDelete(i); }} data-testid={`permanently-delete-invoice-row-${i.id}`} title="Permanently delete invoice" aria-label={`Permanently delete invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50"><Trash2 size={12} /><span>Delete permanently</span></button>}
+                        </>}
                       </>
                     ) : i.status !== "void" && (
                       <>
@@ -180,7 +183,7 @@ export default function InvoiceList() {
                       </button>
                     </>
                   )}
-                    {!i.archived && <>
+                    {canManageInvoices && !i.archived && <>
                       <button onClick={(e) => { e.stopPropagation(); archiveMany([i.id]); }} data-testid={`archive-invoice-row-${i.id}`} title="Archive invoice" aria-label={`Archive invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center gap-1 rounded-lg border border-amber-200 px-2 py-1 text-amber-700 hover:bg-amber-50"><Archive size={12} /><span>Archive</span></button>
                       <button onClick={(e) => { e.stopPropagation(); removeMany([i.id]); }} data-testid={`delete-invoice-row-${i.id}`} title="Delete invoice (move to archive)" aria-label={`Delete invoice ${i.number || "draft"} (move to archive)`} className="ml-2 inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50"><Trash2 size={12} /><span>Delete</span></button>
                     </>}</td>

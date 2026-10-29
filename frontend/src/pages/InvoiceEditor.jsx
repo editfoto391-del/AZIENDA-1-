@@ -53,6 +53,10 @@ export default function InvoiceEditor() {
   const [sp, setSp] = useSearchParams();
   const [editing, setEditing] = useState(false);
   const [snapshot, setSnapshot] = useState(null);
+  const [editAuthOpen, setEditAuthOpen] = useState(false);
+  const [supervisorPassword, setSupervisorPassword] = useState("");
+  const [editAuthorization, setEditAuthorization] = useState("");
+  const [authorizingEdit, setAuthorizingEdit] = useState(false);
   const [compactPreview, setCompactPreview] = useState(false);
   const deliveryNoteRef = useRef(null);
   const locked = !!id && !editing;
@@ -74,9 +78,7 @@ export default function InvoiceEditor() {
       })) };
       setInv(loaded); setPayRecords(d.payment_records || []);
       if (sp.get("edit") && d.status !== "void") {
-        setSnapshot(loaded);
-        setInv(prepareForEdit(loaded));
-        setEditing(true);
+        setEditAuthOpen(true);
         setSp({}, { replace: true });
       }
     });
@@ -91,8 +93,30 @@ export default function InvoiceEditor() {
     }
   }, [id, inv.date]);
 
-  const startEdit = () => { setSnapshot(inv); setInv(prepareForEdit(inv)); setEditing(true); };
-  const cancelEdit = () => { setInv(snapshot); setEditing(false); };
+  const startEdit = () => setEditAuthOpen(true);
+  const authorizeEdit = async (event) => {
+    event.preventDefault();
+    if (!supervisorPassword || authorizingEdit) return;
+    setAuthorizingEdit(true);
+    try {
+      const approval = await api.post(`/invoices/${id}/authorize-edit`, { password: supervisorPassword });
+      setSnapshot(inv);
+      setInv(prepareForEdit(inv));
+      setEditAuthorization(approval.authorization_id);
+      setEditing(true);
+      setEditAuthOpen(false);
+      setSupervisorPassword("");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setAuthorizingEdit(false);
+    }
+  };
+  const cancelEdit = () => {
+    setInv(snapshot);
+    setEditing(false);
+    setEditAuthorization("");
+  };
 
   const categoriesFor = (zone) => {
     const defaults = unifiedPriceList ? UNIFIED_CATS : CATS[zone];
@@ -260,12 +284,12 @@ export default function InvoiceEditor() {
         if (savedPrices.length) setPrices((current) => [...current, ...savedPrices]);
       }
       const payload = { ...buildPayload(status), customer_id: customerId, customer_name: inv.customer_name.trim(), deduct_stock: !!deductStock };
-      const res = id ? await api.put(`/invoices/${id}`, payload) : await api.post("/invoices", payload);
+      const res = id ? await api.put(`/invoices/${id}`, { ...payload, supervisor_authorization: editAuthorization }) : await api.post("/invoices", payload);
       const submitted = !id && status !== "draft";
       toast.success(submitted ? "INVOICE SUBMITTED" : status === "draft" ? "Saved as draft" : "Invoice saved");
       setPendingSave(null);
       nav(submitted && !downloadAfterSave ? "/invoices" : `/invoices/${res.id}${downloadAfterSave ? "?pdf=1" : ""}`);
-      if (id) { setInv(res); }
+      if (id) { setInv(res); setEditAuthorization(""); }
     } catch (e) { toast.error(apiError(e)); } finally { saveLockRef.current = false; setBusy(false); }
   };
 
@@ -289,8 +313,9 @@ export default function InvoiceEditor() {
         ...buildPayload(inv.status === "draft" ? "draft" : "issued"),
         edit_reason: reason,
         deduct_stock: deductStock,
+        supervisor_authorization: editAuthorization,
       });
-      setInv(res); setPayRecords(res.payment_records || []); setEditing(false);
+      setInv(res); setPayRecords(res.payment_records || []); setEditing(false); setEditAuthorization("");
       toast.success("Invoice updated");
     } catch (e) { toast.error(apiError(e)); } finally { saveLockRef.current = false; setBusy(false); }
   };
@@ -637,7 +662,7 @@ export default function InvoiceEditor() {
                     <Btn variant="success" onClick={() => setPayModal({ amount: totals.outstanding.toFixed(2), method: "Cash", date: today(), reference: "", notes: "", idempotency_key: newKey() })} data-testid="record-payment-btn"><CreditCard size={15} /> Pay</Btn>
                   )}
                   {id && inv.status === "draft" && !editing && <Btn variant="subtle" onClick={issueExisting} data-testid="issue-existing-btn"><Send size={15} /> Issue</Btn>}
-                  {id && inv.status === "draft" && !inv.number && !editing && <Btn variant="ghost" className="col-span-2 text-amber-700" onClick={archiveDraft} data-testid="archive-draft-btn"><Archive size={15} /> Archive Draft</Btn>}
+                  {(user?.is_admin || user?.role === "admin" || user?.is_owner) && id && inv.status === "draft" && !inv.number && !editing && <Btn variant="ghost" className="col-span-2 text-amber-700" onClick={archiveDraft} data-testid="archive-draft-btn"><Archive size={15} /> Archive Draft</Btn>}
                   {id && inv.number && <Btn variant="ghost" className="col-span-2 text-red-600" onClick={voidInvoice} data-testid="void-invoice-btn"><Ban size={15} /> Void Invoice</Btn>}
                 </div>
               )}
@@ -732,6 +757,16 @@ export default function InvoiceEditor() {
             <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setPayModal(null)}>Cancel</Btn><Btn variant="success" disabled={busy} onClick={recordPayment} data-testid="confirm-payment-btn">{busy ? "Saving..." : "Confirm Payment"}</Btn></div>
           </div>
         )}
+      </Modal>
+      <Modal open={editAuthOpen} onClose={() => { setEditAuthOpen(false); setSupervisorPassword(""); }} title="Supervisor approval required">
+        <form onSubmit={authorizeEdit} className="space-y-4" data-testid="invoice-edit-authorization-form">
+          <p className="text-sm text-slate-600">Enter the password of an active Admin or Owner for this company to edit this invoice.</p>
+          <Input label="Supervisor password" type="password" autoComplete="current-password" autoFocus required value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} data-testid="supervisor-password-input" />
+          <div className="flex justify-end gap-2">
+            <Btn type="button" variant="outline" onClick={() => { setEditAuthOpen(false); setSupervisorPassword(""); }}>Cancel</Btn>
+            <Btn type="submit" disabled={authorizingEdit} data-testid="authorize-invoice-edit-btn">{authorizingEdit ? "Checking..." : "Continue to edit"}</Btn>
+          </div>
+        </form>
       </Modal>
       <Modal open={!!pendingSave} onClose={() => setPendingSave(null)} title="Save new customer or products?">
         {pendingSave && <div className="space-y-4">

@@ -30,8 +30,48 @@ const Settings = lazy(pageLoaders["/settings"]);
 
 function Protected({ children }) {
   const { user, booting } = useAuth();
+  const location = useLocation();
   if (booting || user === null) return <RouteLoading />;
   if (!user) return <Navigate to="/login" replace />;
+  if (user.is_worker) {
+    const section = location.pathname.startsWith("/invoices") ? "invoices"
+      : location.pathname.startsWith("/customers") ? "customers"
+        : location.pathname.startsWith("/suppliers") ? "suppliers"
+          : location.pathname.startsWith("/buyings") ? "buyings"
+            : location.pathname.startsWith("/orders") ? "orders"
+              : location.pathname.startsWith("/stock") ? "stock"
+                : location.pathname.startsWith("/production") ? "production"
+                  : location.pathname.startsWith("/attendance") ? "attendance"
+                    : location.pathname.startsWith("/deliveries") ? "deliveries"
+                      : location.pathname.startsWith("/fleet") ? "fleet"
+                        : location.pathname.startsWith("/expenses") ? "expenses"
+                          : location.pathname.startsWith("/costs") ? "costs"
+                            : location.pathname.startsWith("/daily-report") ? "daily-report"
+                              : location.pathname.startsWith("/client-payments") ? "client-payments"
+                                : location.pathname.startsWith("/settings") ? "settings"
+                                  : null;
+    const allowedSections = user.allowed_sections || [];
+    if (!section || !allowedSections.includes(section)) {
+      const landingPath = [
+        ["invoices", "/invoices"],
+        ["customers", "/customers"],
+        ["suppliers", "/suppliers"],
+        ["buyings", "/buyings"],
+        ["orders", "/orders"],
+        ["stock", "/stock"],
+        ["production", "/production"],
+        ["attendance", "/attendance"],
+        ["deliveries", "/deliveries"],
+        ["fleet", "/fleet"],
+        ["expenses", "/expenses"],
+        ["costs", "/costs"],
+        ["daily-report", "/daily-report"],
+        ["client-payments", "/client-payments"],
+        ["settings", "/settings"],
+      ].find(([allowed]) => allowedSections.includes(allowed))?.[1] || "/login";
+      return <Navigate to={landingPath} replace />;
+    }
+  }
   if (user.is_owner && user.company_id === "superiqfoam") {
     return <OwnerWelcome key={localStorage.getItem("token")} user={user}>{children}</OwnerWelcome>;
   }

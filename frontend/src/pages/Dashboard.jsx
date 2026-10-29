@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, useReducedMotion } from "framer-motion";
+import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, today, STATUS_META } from "@/lib/format";
-import { Card, Badge, Modal } from "@/components/common";
+import { Btn, Card, Badge, Input, Modal, Select } from "@/components/common";
 import { useAuth } from "@/context/AuthContext";
 import {
   Receipt, Wallet, AlertTriangle, Boxes, Plus, UserPlus, CreditCard,
-  PackagePlus, Factory, CalendarCheck, Truck, TrendingUp, ArrowRight, Banknote, ClipboardList,
+  PackagePlus, Factory, CalendarCheck, Truck, TrendingUp, ArrowRight, Banknote, ClipboardList, LockKeyhole,
 } from "lucide-react";
 
 const QUICK = [
@@ -20,6 +21,15 @@ const QUICK = [
   { label: "Create Delivery", icon: Truck, to: "/deliveries?add=1" },
   { label: "Create Order", icon: ClipboardList, to: "/orders" },
   { label: "Record Expense", icon: Banknote, to: "/expenses" },
+];
+
+const WORKER_SECTION_OPTIONS = [
+  ["customers", "Customers"], ["suppliers", "Suppliers"], ["buyings", "Buyings"],
+  ["invoices", "Invoice"], ["orders", "Orders"], ["stock", "Stock"],
+  ["production", "Production"], ["attendance", "Attendance"], ["deliveries", "Deliveries"],
+  ["fleet", "Fleet"], ["expenses", "Expenses"], ["costs", "Costs"],
+  ["daily-report", "Daily Report"], ["client-payments", "Clients payment and balances"],
+  ["settings", "Settings"],
 ];
 
 const currentMonth = today().slice(0, 7);
@@ -105,6 +115,8 @@ function DashboardSkeleton() {
 }
 
 export default function Dashboard() {
+  const nav = useNavigate();
+  const { user } = useAuth();
   const [d, setD] = useState(null);
   const [period, setPeriod] = useState("month");
   const [loadingError, setLoadingError] = useState("");
@@ -118,8 +130,24 @@ export default function Dashboard() {
   const [comparisonResult, setComparisonResult] = useState(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState("");
-  const nav = useNavigate();
-  const { user } = useAuth();
+  const [workers, setWorkers] = useState([]);
+  const [companies, setCompanies] = useState([]);
+  const [workerModalOpen, setWorkerModalOpen] = useState(false);
+  const [workerSaving, setWorkerSaving] = useState(false);
+  const [workerDraft, setWorkerDraft] = useState({
+    name: "", username: "", email: "", worker_role: "", password: "",
+    company_id: user?.company_id || "", allowed_sections: ["invoices"],
+  });
+
+  useEffect(() => {
+    if (!user?.is_admin) return;
+    api.get("/companies/profiles")
+      .then((companyList) => setCompanies(companyList.filter((company) => user.admin_company_ids?.includes(company.id))))
+      .catch((error) => toast.error(apiError(error)));
+    api.get("/access/workers", { company_id: user.company_id })
+      .then(setWorkers)
+      .catch((error) => toast.error(apiError(error)));
+  }, [user]);
 
   useEffect(() => {
     let active = true;
@@ -179,14 +207,102 @@ export default function Dashboard() {
     if (delta === 0) return "No difference";
     return `${delta > 0 ? "+" : "−"}${fmtMoney(Math.abs(delta))}`;
   };
+  const saveWorker = async (event) => {
+    event.preventDefault();
+    if (workerSaving) return;
+    setWorkerSaving(true);
+    try {
+      const created = await api.post("/access/workers", workerDraft);
+      if (created.company_id === workerDraft.company_id) setWorkers((current) => [...current, created]);
+      setWorkerDraft({
+        name: "", username: "", email: "", worker_role: "", password: "",
+        company_id: user?.company_id || "", allowed_sections: ["invoices"],
+      });
+      setWorkerModalOpen(false);
+      toast.success("Worker added");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setWorkerSaving(false);
+    }
+  };
+  const toggleWorkerSection = (section) => setWorkerDraft((current) => ({
+    ...current,
+    allowed_sections: current.allowed_sections.includes(section)
+      ? current.allowed_sections.filter((item) => item !== section)
+      : [...current.allowed_sections, section],
+  }));
+  const activeCompanyName = companies.find((company) => company.id === workerDraft.company_id)?.name || workerDraft.company_id;
+  const changeWorkerCompany = async (companyId) => {
+    setWorkerDraft((current) => ({ ...current, company_id: companyId }));
+    try {
+      setWorkers(await api.get("/access/workers", { company_id: companyId }));
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
 
   return (
     <div className="dashboard-stagger space-y-6">
-      <div>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
         <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary">{user?.name || "Company"} · Operations</p>
         <h1 className="text-3xl sm:text-4xl font-normal text-slate-900 font-display mt-1">Business overview</h1>
         <p className="text-sm text-slate-500 mt-1">Performance, cash flow and daily operations</p>
+        </div>
+        {user?.is_admin && <Btn onClick={() => setWorkerModalOpen(true)} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
+
+      {user?.is_admin && <Section title="Workers" icon={UserPlus} action={<span className="text-xs text-slate-400">{workers.length} workers</span>}>
+        {workers.length === 0 ? <p className="text-sm text-slate-400">No workers added for this company yet.</p> : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[560px] text-sm">
+              <thead><tr className="border-b border-border text-left text-xs text-slate-400">
+                <th className="py-2 font-semibold">Worker</th><th className="py-2 font-semibold">Role</th><th className="py-2 font-semibold">Company</th><th className="py-2 font-semibold">Sections</th>
+              </tr></thead>
+              <tbody>{workers.map((worker) => (
+                <tr key={worker.id} className="border-b border-border/60" data-testid={`worker-row-${worker.id}`}>
+                  <td className="py-3"><p className="font-semibold text-slate-800">{worker.name}</p><p className="text-xs text-slate-400">{worker.username}</p></td>
+                  <td className="py-3 text-slate-600">{worker.worker_role}</td>
+                  <td className="py-3 text-slate-600">{companies.find((company) => company.id === worker.company_id)?.name || worker.company_id}</td>
+                  <td className="py-3 text-slate-600">{(worker.allowed_sections || []).map((section) => WORKER_SECTION_OPTIONS.find(([key]) => key === section)?.[1] || section).join(", ")}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+      </Section>}
+
+      <Modal open={workerModalOpen} onClose={() => !workerSaving && setWorkerModalOpen(false)} title="Add Worker" wide>
+        <form onSubmit={saveWorker} className="space-y-4" data-testid="add-worker-form">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Input label="Worker name *" value={workerDraft.name} onChange={(event) => setWorkerDraft({ ...workerDraft, name: event.target.value })} required data-testid="worker-name" />
+            <Input label="Username *" value={workerDraft.username} onChange={(event) => setWorkerDraft({ ...workerDraft, username: event.target.value })} required data-testid="worker-username" />
+            <Input label="Role *" placeholder="e.g. Invoice Clerk" value={workerDraft.worker_role} onChange={(event) => setWorkerDraft({ ...workerDraft, worker_role: event.target.value })} required data-testid="worker-role" />
+            <Input label="Email (optional)" type="email" value={workerDraft.email} onChange={(event) => setWorkerDraft({ ...workerDraft, email: event.target.value })} data-testid="worker-email" />
+            <Input label="Initial password *" type="password" minLength={8} value={workerDraft.password} onChange={(event) => setWorkerDraft({ ...workerDraft, password: event.target.value })} required data-testid="worker-password" />
+            <Select label="Company" value={workerDraft.company_id || user?.company_id || ""} onChange={(event) => changeWorkerCompany(event.target.value)} data-testid="worker-company">
+              {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+            </Select>
+          </div>
+          <fieldset className="space-y-2">
+            <legend className="mb-2 text-sm font-semibold text-slate-700">Sections this worker can access</legend>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {WORKER_SECTION_OPTIONS.map(([section, label]) => (
+                <label key={section} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-slate-700">
+                  <input type="checkbox" checked={workerDraft.allowed_sections.includes(section)} onChange={() => toggleWorkerSection(section)} data-testid={`worker-section-${section}`} />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <p className="flex items-center gap-2 rounded-md bg-slate-50 p-3 text-xs text-slate-500"><LockKeyhole size={14} /> Other sections stay visible in the menu but remain locked. The worker starts with Invoice access selected.</p>
+          <div className="flex justify-end gap-2">
+            <Btn type="button" variant="outline" onClick={() => setWorkerModalOpen(false)} disabled={workerSaving}>Cancel</Btn>
+            <Btn type="submit" disabled={workerSaving || workerDraft.allowed_sections.length === 0} data-testid="worker-save">{workerSaving ? "Adding..." : "Add Worker"}</Btn>
+          </div>
+        </form>
+      </Modal>
 
       <section data-testid="dashboard-monthly-summary">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">

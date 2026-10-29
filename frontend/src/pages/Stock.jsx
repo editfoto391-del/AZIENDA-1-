@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
-import { fmtDateTime } from "@/lib/format";
+import { fmtDateTime, fmtMoney } from "@/lib/format";
+import { usesUnifiedPriceList } from "@/lib/company";
+import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
 import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2 } from "lucide-react";
 
@@ -20,7 +22,11 @@ const STOCK_CATEGORY = {
 };
 
 export default function Stock() {
+  const { user } = useAuth();
+  const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const [list, setList] = useState(null);
+  const [prices, setPrices] = useState([]);
+  const [costDrafts, setCostDrafts] = useState({});
   const [category, setCategory] = useState("");
   const [movements, setMovements] = useState([]);
   const [addModal, setAddModal] = useState(null);
@@ -30,6 +36,7 @@ export default function Stock() {
 
   const load = () => {
     api.get("/stock").then(setList).catch((e) => { toast.error(apiError(e)); setList([]); });
+    api.get("/prices").then(setPrices).catch((e) => toast.error(apiError(e)));
     api.get("/stock/movements").then(setMovements).catch(() => {});
   };
   useEffect(() => { load(); }, []);
@@ -46,6 +53,36 @@ export default function Stock() {
   const saveStock = async () => {
     if (!addModal.product.trim() || !addModal.size.trim()) return toast.error("Product and size are required");
     if (await run(() => api.post("/stock", addModal), "Stock item added")) setAddModal(null);
+  };
+
+  const getSellingPrice = (stock, zone) => {
+    let priceCategory = stock.product;
+    if (stock.product === "Simple") priceCategory = unifiedPriceList ? "Simple" : "Standard";
+    if (stock.product === "Candy") priceCategory = "Ribbon Black";
+    const price = prices.find((item) =>
+      item.zone === (unifiedPriceList ? 1 : zone)
+      && item.category === priceCategory
+      && item.size === stock.size
+      && item.active
+    );
+    return price?.price != null && price.confirmed ? fmtMoney(price.price) : "Not set";
+  };
+
+  const saveCost = async (stock) => {
+    const draft = costDrafts[stock.id] ?? (stock.unit_cost ?? "");
+    const unitCost = draft === "" ? null : Number(draft);
+    if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) {
+      return toast.error("Cost must be a finite non-negative amount");
+    }
+    if (await run(() => api.put(`/stock/${stock.id}`, {
+      product: stock.product,
+      size: stock.size,
+      opening: stock.opening || 0,
+      threshold: stock.threshold || 0,
+      unit_cost: unitCost,
+    }), "Cost saved")) {
+      setCostDrafts((current) => ({ ...current, [stock.id]: unitCost ?? "" }));
+    }
   };
 
   const deleteStock = async (stock) => {
@@ -93,9 +130,9 @@ export default function Stock() {
       <Card className="overflow-hidden">
         {list === null ? <p className="p-6 text-sm text-slate-400">Loading stock...</p> : filteredList.length === 0 ? <Empty icon={Boxes} title={category ? "No stock items in this category" : "No stock records"} /> : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[640px]">
+            <table className="w-full text-sm min-w-[960px]">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                <th className="px-4 py-3 font-semibold">Size</th><th className="px-4 font-semibold">Product</th><th className="px-4 font-semibold text-right">Other</th><th className="px-4 font-semibold text-right">Invoiced</th><th className="px-4 font-semibold text-right">Current</th><th className="px-4 font-semibold text-right">Actions</th>
+                <th className="px-4 py-3 font-semibold">Size</th><th className="px-4 font-semibold">Product</th><th className="px-4 font-semibold text-right">Other</th><th className="px-4 font-semibold text-right">Invoiced</th><th className="px-4 font-semibold text-right">Current Stock</th><th className="px-4 font-semibold text-right">Cost (R)</th>{unifiedPriceList ? <th className="px-4 font-semibold text-right">Selling Price</th> : <><th className="px-4 font-semibold text-right">Sell Zone 1</th><th className="px-4 font-semibold text-right">Sell Zone 2</th></>}<th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{filteredList.map((s) => (
                 <tr key={s.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`stock-row-${s.id}`}>
@@ -104,6 +141,15 @@ export default function Stock() {
                   <td className="px-4 text-right font-mono text-slate-500">{s.adjustments || 0}</td>
                   <td className="px-4 text-right font-mono text-red-500">{s.invoiced ? `-${s.invoiced}` : 0}</td>
                   <td className="px-4 text-right"><span className={`font-mono font-bold ${s.current < s.threshold ? "text-red-600" : "text-slate-800"}`} data-testid={`stock-current-${s.id}`}>{s.current}</span>{s.current < s.threshold && <Badge cls="bg-red-50 text-red-700 border-red-200 ml-2">Low</Badge>}</td>
+                  <td className="px-4">
+                    <div className="flex items-center justify-end gap-2">
+                      <Input aria-label={`Cost for ${s.product} ${s.size}`} type="number" min="0" step="0.01" value={costDrafts[s.id] ?? (s.unit_cost ?? "")} onChange={(e) => setCostDrafts((current) => ({ ...current, [s.id]: e.target.value }))} className="max-w-24 px-2 py-1.5 text-right" data-testid={`stock-cost-${s.id}`} />
+                      <button type="button" onClick={() => saveCost(s)} disabled={busy} className="text-primary hover:underline text-xs font-semibold disabled:opacity-50" data-testid={`save-stock-cost-${s.id}`}>Save</button>
+                    </div>
+                  </td>
+                  {unifiedPriceList
+                    ? <td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td>
+                    : <><td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td><td className="px-4 text-right font-mono">{getSellingPrice(s, 2)}</td></>}
                   <td className="px-4 text-right whitespace-nowrap">
                     <button onClick={() => setMoveModal({ stock_id: s.id, label: `${s.product} ${s.size}`, current: s.current, type: "adjustment_in", quantity: 1, reason: "", reference: "", notes: "" })} className="text-primary hover:underline text-xs font-semibold inline-flex items-center gap-1" data-testid={`move-stock-${s.id}`}><ArrowUpDown size={13} /> Adjust</button>
                     <button type="button" onClick={() => deleteStock(s)} disabled={busy} title="Permanently delete stock and movements" aria-label={`Permanently delete ${s.product} ${s.size}`} className="ml-2 rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50" data-testid={`delete-stock-${s.id}`}><Trash2 size={15} /></button>

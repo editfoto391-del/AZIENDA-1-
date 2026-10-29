@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Building2, Eye, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
+import { Building2, Eye, Pencil, Plus, Search, ShoppingCart, Trash2 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
+import { fmtDate, fmtMoney } from "@/lib/format";
 import { Badge, Btn, Card, Empty, Input, Modal, PageHeader, Textarea } from "@/components/common";
 
 const blankSupplier = () => ({
@@ -16,7 +18,9 @@ const blankSupplier = () => ({
 });
 
 export default function Suppliers() {
+  const navigate = useNavigate();
   const [suppliers, setSuppliers] = useState(null);
+  const [buyings, setBuyings] = useState(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [modal, setModal] = useState(null);
@@ -30,7 +34,15 @@ export default function Suppliers() {
       setSuppliers([]);
     });
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    api.get("/buyings")
+      .then(setBuyings)
+      .catch((error) => {
+        toast.error(apiError(error));
+        setBuyings([]);
+      });
+  }, []);
 
   const filtered = useMemo(() => (suppliers || []).filter((supplier) =>
     `${supplier.name} ${supplier.phone || ""} ${supplier.email || ""} ${supplier.terms || ""} ${supplier.notes || ""}`
@@ -69,6 +81,7 @@ export default function Suppliers() {
   return (
     <div>
       <PageHeader title="Suppliers" subtitle={suppliers === null ? "Loading suppliers..." : `${suppliers.length} suppliers`}>
+        <Link to="/buyings" className="inline-flex items-center gap-2 rounded-md border border-border bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-secondary" data-testid="suppliers-buyings-link"><ShoppingCart size={16} /> View Buyings</Link>
         <Btn onClick={() => setModal(blankSupplier())} data-testid="add-supplier-btn"><Plus size={16} /> Add Supplier</Btn>
       </PageHeader>
 
@@ -186,23 +199,53 @@ export default function Suppliers() {
 
       <Modal open={!!profile} onClose={() => setProfile(null)} title={profile?.name} wide>
         {profile && (
-          <div className="grid gap-3 sm:grid-cols-2" data-testid={`supplier-profile-${profile.id}`}>
-            {[
-              ["Name", profile.name],
-              ["Phone", profile.phone],
-              ["Email", profile.email],
-              ["Contact", profile.contact],
-              ["Address", profile.address],
-              ["City", profile.city],
-              ["Terms", profile.terms],
-              ["Notes", profile.notes],
-              ["Status", profile.active === false ? "Inactive" : "Active"],
-            ].map(([label, value]) => (
-              <div key={label} className="rounded-lg bg-slate-50 p-3">
-                <p className="text-xs text-slate-400">{label}</p>
-                <p className="whitespace-pre-wrap break-words text-sm font-semibold text-slate-800">{value || "-"}</p>
+          <div className="space-y-5" data-testid={`supplier-profile-${profile.id}`}>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {[
+                ["Name", profile.name],
+                ["Phone", profile.phone],
+                ["Email", profile.email],
+                ["Contact", profile.contact],
+                ["Address", profile.address],
+                ["City", profile.city],
+                ["Terms", profile.terms],
+                ["Notes", profile.notes],
+                ["Status", profile.active === false ? "Inactive" : "Active"],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-xs text-slate-400">{label}</p>
+                  <p className="whitespace-pre-wrap break-words text-sm font-semibold text-slate-800">{value || "-"}</p>
+                </div>
+              ))}
+            </div>
+            <section>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-semibold text-slate-800">Purchase history</h3>
+                  <p className="text-xs text-slate-400">Buyings linked to this supplier</p>
+                </div>
+                <Btn variant="outline" onClick={() => navigate("/buyings")}><ShoppingCart size={15} /> View Buyings</Btn>
               </div>
-            ))}
+              {buyings === null ? <p className="py-3 text-sm text-slate-400">Loading purchase history...</p> : (() => {
+                const supplierBuyings = buyings.filter((buying) =>
+                  buying.supplier_id === profile.id
+                  || (!buying.supplier_id && buying.source?.trim().toLowerCase() === profile.name.trim().toLowerCase())
+                );
+                return supplierBuyings.length === 0
+                  ? <p className="rounded-lg bg-slate-50 p-3 text-sm text-slate-400">No buyings linked to this supplier yet.</p>
+                  : <div className="max-h-64 space-y-2 overflow-y-auto">
+                    {supplierBuyings.map((buying) => (
+                      <div key={buying.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm" data-testid={`supplier-buying-${buying.id}`}>
+                        <div>
+                          <p className="font-semibold text-slate-800">{[buying.product, buying.size].filter(Boolean).join(" ")}</p>
+                          <p className="text-xs text-slate-400">{fmtDate(buying.date)} · {buying.quantity} × {fmtMoney(buying.unit_price)}</p>
+                        </div>
+                        <span className="font-mono font-semibold text-slate-700">{fmtMoney(buying.amount)}</span>
+                      </div>
+                    ))}
+                  </div>;
+              })()}
+            </section>
           </div>
         )}
       </Modal>

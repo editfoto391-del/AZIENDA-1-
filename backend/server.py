@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 import json, re
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Any
 from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -156,6 +156,11 @@ def make_token(uid, email, company_id=DEFAULT_COMPANY_ID, session_id=None):
 
 USER_PROJ = {"_id": 0, "password_hash": 0}
 OWNER_EMAIL_ALIASES = {"2j2skp87z8@privaterelay.appleid.com"}
+WORKER_SECTIONS = {
+    "customers", "suppliers", "buyings", "invoices", "orders", "stock",
+    "production", "attendance", "deliveries", "fleet", "expenses",
+    "costs", "daily-report", "client-payments", "settings",
+}
 
 def canonical_email(email):
     normalized = (email or "").strip().lower()
@@ -198,13 +203,111 @@ async def authorize_company(user, company_id, session_id=None):
             {"$set": {"company_id": company_id, "last_seen": now_iso()}})
     return user
 
+def enforce_worker_api_access(request, user):
+    if not user.get("is_worker"):
+        return
+    path = request.url.path.removeprefix("/api/").strip("/")
+    method = request.method.upper()
+    allowed = set(user.get("worker_allowed_sections") or [])
+
+    if path in {"auth/me", "auth/logout", "auth/device", "companies/profiles"}:
+        return
+
+    if "invoices" in allowed:
+        if path in {"customers", "prices", "settings"} and method == "GET":
+            return
+        if path in {"customers", "prices"} and method == "POST":
+            return
+        if path == "invoices" and method in {"GET", "POST"}:
+            return
+        if path == "invoices/next-number" and method == "GET":
+            return
+        if re.fullmatch(r"invoices/[^/]+", path) and method in {"GET", "PUT"}:
+            return
+        if re.fullmatch(r"invoices/[^/]+/authorize-edit", path) and method == "POST":
+            return
+        if re.fullmatch(r"invoices/[^/]+/issue", path) and method == "POST":
+            return
+        if "client-payments" in allowed and re.fullmatch(r"invoices/[^/]+/payments", path) and method == "POST":
+            return
+        if path == "invoices" or path.startswith("invoices/"):
+            raise HTTPException(403, "This worker account cannot perform this invoice action")
+
+    support_rules = {
+        "buyings": [("suppliers", "GET"), ("stock", "GET")],
+        "suppliers": [("buyings", "GET")],
+        "production": [("stock", "GET"), ("piece-production", "GET"), ("piece-production", "POST")],
+        "attendance": [("piece-production", "GET"), ("piece-production", "POST")],
+        "orders": [
+            ("customers", "GET"), ("prices", "GET"), ("settings", "GET"),
+            ("stock", "GET"), ("vehicles", "GET"),
+        ],
+        "deliveries": [
+            ("customers", "GET"), ("drivers", "GET"), ("vehicles", "GET"), ("stock", "GET"),
+        ],
+        "expenses": [("vehicles", "GET"), ("reports/profit", "GET"), ("reports/costs", "GET")],
+        "client-payments": [
+            ("customers", "GET"), ("invoices", "GET"), ("settings", "GET"),
+        ],
+    }
+    for section, rules in support_rules.items():
+        if section not in allowed:
+            continue
+        for prefix, supported_method in rules:
+            if method == supported_method and (path == prefix or path.startswith(f"{prefix}/")):
+                if section == "client-payments" and path.startswith("invoices/"):
+                    if re.fullmatch(r"invoices/[^/]+/payments", path) and method != "POST":
+                        continue
+                    if not re.fullmatch(r"invoices/[^/]+", path) and not re.fullmatch(r"invoices/[^/]+/payments", path):
+                        continue
+                return
+
+    section_prefixes = {
+        "customers": "customers",
+        "suppliers": "suppliers",
+        "buyings": "buyings",
+        "invoices": "invoices",
+        "orders": "orders",
+        "stock": "stock",
+        "production": "production",
+        "simple-production": "production",
+        "attendance": "attendance",
+        "employees": "attendance",
+        "salaries": "attendance",
+        "piece-production": "production",
+        "deliveries": "deliveries",
+        "drivers": "settings",
+        "vehicles": "fleet",
+        "spareparts": "fleet",
+        "fleet": "fleet",
+        "expenses": "expenses",
+        "cost-records": "costs",
+        "reports/costs": "costs",
+        "costs": "costs",
+        "daily-report": "daily-report",
+        "prices": "settings",
+        "settings": "settings",
+        "payments": "client-payments",
+        "dashboard": "dashboard",
+    }
+    section = next(
+        (section for prefix, section in section_prefixes.items()
+         if path == prefix or path.startswith(f"{prefix}/")),
+        None,
+    )
+    if section and section in allowed:
+        return
+    raise HTTPException(403, "This worker account cannot access this section")
+
 async def get_current_user(request: Request):
     cookie = request.cookies.get("session_token")
     if cookie:
         user = await user_from_session(cookie)
         if user:
-            return await authorize_company(user, user.get("_active_company_id") or DEFAULT_COMPANY_ID,
+            user = await authorize_company(user, user.get("_active_company_id") or DEFAULT_COMPANY_ID,
                                            user.get("_session_id"))
+            enforce_worker_api_access(request, user)
+            return user
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(401, "Not authenticated")
@@ -216,12 +319,15 @@ async def get_current_user(request: Request):
     except jwt.InvalidTokenError:
         user = await user_from_session(token)
         if user:
+            enforce_worker_api_access(request, user)
             return user
         raise HTTPException(401, "Invalid token")
     user = await db.users.find_one({"id": payload["sub"]}, USER_PROJ)
     if not user:
         raise HTTPException(401, "User not found")
-    return await authorize_company(user, payload.get("company_id") or DEFAULT_COMPANY_ID, payload.get("sid"))
+    user = await authorize_company(user, payload.get("company_id") or DEFAULT_COMPANY_ID, payload.get("sid"))
+    enforce_worker_api_access(request, user)
+    return user
 
 class LoginIn(BaseModel):
     email: Optional[str] = None
@@ -256,6 +362,15 @@ class CreateAccessUserIn(BaseModel):
     company_ids: List[str]
     email: Optional[str] = ""
 
+class CreateWorkerIn(BaseModel):
+    username: str
+    name: str
+    worker_role: str
+    password: str
+    company_id: str
+    allowed_sections: List[str]
+    email: Optional[str] = ""
+
 class UserStatusIn(BaseModel):
     active: bool
 
@@ -275,6 +390,13 @@ def public_user(u):
     return {"id": u["id"], "email": u.get("email", ""), "username": u.get("username", ""),
             "name": u.get("name") or u.get("username") or "User", "role": role,
             "is_owner": u.get("role") == "owner", "is_admin": role in ("owner", "admin"),
+            "is_worker": u.get("is_worker", False),
+            "worker_role": u.get("worker_role", ""),
+            "allowed_sections": u.get("worker_allowed_sections", []),
+            "admin_company_ids": allowed_company_ids(u) if u.get("role") == "owner" else [
+                company_id for company_id, company_role_value in (u.get("company_roles") or {}).items()
+                if company_role_value == "admin"
+            ],
             "company_id": company_id, "company_ids": allowed_company_ids(u), "picture": u.get("picture", "")}
 
 def require_owner(user):
@@ -532,6 +654,89 @@ async def register_device(body: DeviceIn, request: Request, user=Depends(get_cur
 def require_admin(user):
     if user.get("_active_role") not in ("owner", "admin"):
         raise HTTPException(403, "Administrator access required for this company")
+
+@api.get("/access/workers")
+async def get_workers(company_id: str = "", user=Depends(get_current_user)):
+    require_admin(user)
+    company_id = company_id or user["_active_company_id"]
+    if company_role(user, company_id) not in ("owner", "admin"):
+        raise HTTPException(403, "Administrator access required for this company")
+    workers = await base_db.users.find(
+        {"is_worker": True, f"company_roles.{company_id}": {"$in": ["user", "admin"]}},
+        {"_id": 0, "password_hash": 0},
+    ).to_list(1000)
+    return [{
+        "id": worker["id"],
+        "name": worker.get("name", ""),
+        "username": worker.get("username", ""),
+        "worker_role": worker.get("worker_role", ""),
+        "allowed_sections": worker.get("worker_allowed_sections", []),
+        "company_id": company_id,
+        "active": worker.get("active", True),
+    } for worker in workers]
+
+@api.post("/access/workers")
+async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
+    require_admin(user)
+    company_id = body.company_id
+    if company_role(user, company_id) not in ("owner", "admin"):
+        raise HTTPException(403, "You can only add workers to a company you administer")
+    if not await base_db.companies.find_one({"id": company_id, "active": True}, {"_id": 0}):
+        raise HTTPException(400, "Selected company is unavailable")
+    username = body.username.strip()
+    name = body.name.strip()
+    worker_role = body.worker_role.strip()
+    if not username or not name or not worker_role:
+        raise HTTPException(400, "Name, username and role are required")
+    if len(body.password) < 8:
+        raise HTTPException(400, "Password must contain at least 8 characters")
+    sections = list(dict.fromkeys(body.allowed_sections))
+    if not sections or any(section not in WORKER_SECTIONS for section in sections):
+        raise HTTPException(400, "Choose at least one valid section")
+    email = (body.email or "").strip().lower()
+    if email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise HTTPException(400, "Enter a valid email address")
+    username_query = {"username": {"$regex": f"^{re.escape(username)}$", "$options": "i"}}
+    if await base_db.users.find_one(username_query, {"_id": 0}):
+        raise HTTPException(409, "Username already exists")
+    if email and await base_db.users.find_one({"email": email}, {"_id": 0}):
+        raise HTTPException(409, "An account with this email already exists")
+    account = {
+        "id": new_id(),
+        "username": username,
+        "email": email,
+        "name": name,
+        "password_hash": hash_pw(body.password),
+        "role": "user",
+        "company_roles": {company_id: "user"},
+        "company_ids": [company_id],
+        "is_worker": True,
+        "worker_role": worker_role,
+        "worker_allowed_sections": sections,
+        "active": True,
+        "auth_provider": "password",
+        "created_at": now_iso(),
+    }
+    await base_db.users.insert_one(dict(account))
+    company_context = active_company_id.set(company_id)
+    try:
+        await log_audit("user", account["id"], "worker_created", user, after={
+            "username": username,
+            "worker_role": worker_role,
+            "company_id": company_id,
+            "allowed_sections": sections,
+        })
+    finally:
+        active_company_id.reset(company_context)
+    return {
+        "id": account["id"],
+        "username": username,
+        "name": name,
+        "worker_role": worker_role,
+        "company_id": company_id,
+        "allowed_sections": sections,
+        "active": True,
+    }
 
 @api.get("/access/users")
 async def access_users(user=Depends(get_current_user)):
@@ -1075,6 +1280,10 @@ class InvoiceIn(BaseModel):
     edit_reason: Optional[str] = ""
     opening_balance: Optional[bool] = None
     deduct_stock: bool = False
+    supervisor_authorization: Optional[str] = None
+
+class InvoiceEditAuthorizationIn(BaseModel):
+    password: str
 
 class InvoiceIssueIn(BaseModel):
     deduct_stock: bool = False
@@ -1153,6 +1362,47 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
     inv["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
     return inv
 
+@api.post("/invoices/{iid}/authorize-edit")
+async def authorize_invoice_edit(iid: str, body: InvoiceEditAuthorizationIn, user=Depends(get_current_user)):
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0, "id": 1, "status": 1, "archived": 1})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    if inv.get("archived") or inv.get("status") == "void":
+        raise HTTPException(400, "This invoice cannot be edited")
+
+    company_id = user["_active_company_id"]
+    company_admin_field = f"company_roles.{company_id}"
+    supervisors = await base_db.users.find({
+        "active": {"$ne": False},
+        "disabled": {"$ne": True},
+        "$or": [{"role": "owner"}, {company_admin_field: "admin"}],
+    }, {"_id": 0, "id": 1, "email": 1, "password_hash": 1}).to_list(1000)
+    supervisor = next(
+        (account for account in supervisors
+         if verify_pw(body.password, account.get("password_hash", ""))),
+        None,
+    )
+    if not supervisor:
+        raise HTTPException(403, "Supervisor password is incorrect")
+
+    await db.invoice_edit_authorizations.delete_many({
+        "user_id": user["id"],
+        "expires_at": {"$lte": datetime.now(timezone.utc)},
+    })
+    authorization_id = new_id()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    await db.invoice_edit_authorizations.insert_one({
+        "id": authorization_id,
+        "invoice_id": iid,
+        "user_id": user["id"],
+        "company_id": company_id,
+        "supervisor_id": supervisor["id"],
+        "expires_at": expires_at,
+    })
+    await log_audit("invoice", iid, "edit_authorized", user,
+                    reason=f"Supervisor approval by {supervisor.get('email') or supervisor['id']}")
+    return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
+
 async def restore_invoice_stock(inv, user):
     movements = await listall("stock_movements", {"invoice_id": inv["id"], "type": "invoice"})
     quantities = {}
@@ -1202,12 +1452,14 @@ async def _archive_invoice(iid, user, reason="", restore_stock=False):
 
 @api.delete("/invoices/{iid}")
 async def delete_invoice(iid: str, restore_stock: bool = False, user=Depends(get_current_user)):
+    require_admin(user)
     if not await _archive_invoice(iid, user, restore_stock=restore_stock):
         raise HTTPException(404, "Invoice not found")
     return {"ok": True, "archived": True, "stock_restored": restore_stock}
 
 @api.delete("/invoices/{iid}/permanent")
 async def permanently_delete_invoice(iid: str, user=Depends(get_current_user)):
+    require_admin(user)
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
         raise HTTPException(404, "Invoice not found")
@@ -1222,6 +1474,7 @@ async def permanently_delete_invoice(iid: str, user=Depends(get_current_user)):
 
 @api.post("/invoices/{iid}/restore")
 async def restore_invoice(iid: str, user=Depends(get_current_user)):
+    require_admin(user)
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
         raise HTTPException(404, "Invoice not found")
@@ -1246,6 +1499,7 @@ class BulkDeleteIn(BaseModel):
 
 @api.post("/invoices/bulk-delete")
 async def bulk_delete_invoices(body: BulkDeleteIn, user=Depends(get_current_user)):
+    require_admin(user)
     n = 0
     for iid in body.ids:
         n += await _archive_invoice(iid, user, body.reason or "", body.restore_stock)
@@ -1260,6 +1514,7 @@ async def _prepare_invoice(body: InvoiceIn):
         raise HTTPException(400, "Customer name is required")
     inv = body.model_dump()
     inv.pop("deduct_stock", None)
+    inv.pop("supervisor_authorization", None)
     inv["customer_id"] = customer_id
     if inv.get("opening_balance") is None or inv.get("opening_balance") is False:
         inv.pop("opening_balance", None)
@@ -1304,6 +1559,15 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
 
 @api.put("/invoices/{iid}")
 async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_user)):
+    authorization = await db.invoice_edit_authorizations.find_one({
+        "id": body.supervisor_authorization,
+        "invoice_id": iid,
+        "user_id": user["id"],
+        "company_id": user["_active_company_id"],
+        "expires_at": {"$gt": datetime.now(timezone.utc)},
+    })
+    if not authorization:
+        raise HTTPException(403, "Supervisor approval is required to edit this invoice")
     existing = await db.invoices.find_one({"id": iid})
     if not existing:
         raise HTTPException(404, "Invoice not found")
@@ -1495,6 +1759,14 @@ class StockIn(BaseModel):
     size: str
     opening: float = 0
     threshold: float = 5
+    unit_cost: Optional[float] = None
+
+    @field_validator("unit_cost")
+    @classmethod
+    def validate_unit_cost(cls, value):
+        if value is not None and (not math.isfinite(value) or value < 0):
+            raise ValueError("Unit cost must be a finite non-negative amount")
+        return value
 
 INC_TYPES = ("production", "purchase", "adjustment_in", "return")
 DEC_TYPES = ("dispatch", "invoice", "production_consumption", "adjustment_out", "damage")
@@ -2840,22 +3112,43 @@ async def dashboard(period: str = "month", user=Depends(get_current_user)):
 
 # ---------------- Buyings and expenses ----------------
 class BuyingIn(BaseModel):
-    product: str
+    product: str = ""
     source: str
+    supplier_id: Optional[str] = ""
+    stock_id: Optional[str] = ""
+    size: Optional[str] = ""
+    item_type: str = "raw_material"
     quantity: float
     unit_price: float
     date: str = Field(default_factory=today_str)
     notes: Optional[str] = ""
 
-def _check_buying(body):
-    if not body.product.strip():
-        raise HTTPException(400, "Product is required")
+async def _check_buying(body):
     if not body.source.strip():
         raise HTTPException(400, "Source is required")
     if not math.isfinite(body.quantity) or body.quantity <= 0:
         raise HTTPException(400, "Quantity must be greater than 0")
     if not math.isfinite(body.unit_price) or body.unit_price <= 0:
         raise HTTPException(400, "Unit price must be greater than 0")
+    if body.item_type not in ("selling_product", "raw_material"):
+        raise HTTPException(400, "Choose whether this is a selling product or raw material")
+    stock = None
+    if body.stock_id:
+        stock = await db.stock.find_one({"id": body.stock_id}, {"_id": 0})
+        if not stock:
+            raise HTTPException(400, "Selected stock product not found")
+    elif not body.product.strip():
+        raise HTTPException(400, "Product is required")
+    if body.supplier_id:
+        supplier = await db.suppliers.find_one({"id": body.supplier_id}, {"_id": 0})
+        if not supplier:
+            raise HTTPException(400, "Supplier not found")
+        source = supplier["name"]
+    else:
+        source = body.source.strip()
+    product = stock["product"] if stock else body.product.strip()
+    size = stock["size"] if stock else (body.size or "").strip()
+    return source, product, size
 
 def set_buying_quantity_unit(data):
     data["quantity_unit"] = "L" if data["product"].strip().casefold() == "chemical" else ""
@@ -2875,10 +3168,11 @@ async def get_buyings(include_archived: bool = False, user=Depends(get_current_u
 
 @api.post("/buyings")
 async def add_buying(body: BuyingIn, user=Depends(get_current_user)):
-    _check_buying(body)
+    source, product, size = await _check_buying(body)
     data = body.model_dump()
-    data["product"] = data["product"].strip()
-    data["source"] = data["source"].strip()
+    data["product"] = product
+    data["size"] = size
+    data["source"] = source
     set_buying_quantity_unit(data)
     data["quantity"] = float(data["quantity"])
     data["unit_price"] = r2(data["unit_price"])
@@ -2889,13 +3183,14 @@ async def add_buying(body: BuyingIn, user=Depends(get_current_user)):
 
 @api.put("/buyings/{bid}")
 async def edit_buying(bid: str, body: BuyingIn, user=Depends(get_current_user)):
-    _check_buying(body)
+    source, product, size = await _check_buying(body)
     before = await db.buyings.find_one({"id": bid, "voided": {"$ne": True}}, {"_id": 0})
     if not before:
         raise HTTPException(404, "Buying not found")
     data = body.model_dump()
-    data["product"] = data["product"].strip()
-    data["source"] = data["source"].strip()
+    data["product"] = product
+    data["size"] = size
+    data["source"] = source
     set_buying_quantity_unit(data)
     data["quantity"] = float(data["quantity"])
     data["unit_price"] = r2(data["unit_price"])
