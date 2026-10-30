@@ -257,6 +257,7 @@ function AppRouter() {
   return (
         <Routes>
           <Route path="/login" element={<Suspense fallback={<RouteLoading />}><Login /></Suspense>} />
+          <Route path="/worker-access/:token" element={<Suspense fallback={<RouteLoading />}><Login /></Suspense>} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/customers" element={<Customers />} />

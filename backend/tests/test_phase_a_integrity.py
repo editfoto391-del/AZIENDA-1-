@@ -43,6 +43,33 @@ def s(token):
     return ss
 
 
+def authorize_invoice_action(s, invoice_id, action, target_id=None):
+    response = s.post(f"{API}/invoices/{invoice_id}/authorize-action", json={
+        "password": PASSWORD, "action": action, "target_id": target_id,
+    })
+    assert response.status_code == 200, response.text
+    return response.json()["authorization_id"]
+
+
+def authorize_expense_action(s, expense_id, action):
+    if action == "create":
+        path = f"{API}/expenses/authorize-create"
+    else:
+        path = f"{API}/expenses/{expense_id}/authorize-action"
+    response = s.post(path, json={"password": PASSWORD, **({} if action == "create" else {"action": action})})
+    assert response.status_code == 200, response.text
+    return response.json()["authorization_id"]
+
+
+def authorize_fleet_action(s, resource_type, action, resource_id=None, target_id=None):
+    response = s.post(f"{API}/fleet-expense-authorizations", json={
+        "password": PASSWORD, "resource_type": resource_type, "action": action,
+        "resource_id": resource_id, "target_id": target_id,
+    })
+    assert response.status_code == 200, response.text
+    return response.json()["authorization_id"]
+
+
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_test_stock():
     """Owner's real stock must stay clean: delete every TEST_ stock item + its movements after the run."""
@@ -239,7 +266,10 @@ class TestPayments:
         # reverse
         pid = p2.json()["id"]
         assert s.post(f"{API}/payments/{pid}/reverse", json={"reason": ""}).status_code == 400
-        assert s.post(f"{API}/payments/{pid}/reverse", json={"reason": "TEST bounced"}).status_code == 200
+        reverse_body = {"reason": "TEST bounced"}
+        assert s.post(f"{API}/payments/{pid}/reverse", json=reverse_body).status_code == 403
+        reverse_body["supervisor_authorization"] = authorize_invoice_action(s, inv["id"], "reverse_payment", pid)
+        assert s.post(f"{API}/payments/{pid}/reverse", json=reverse_body).status_code == 200
         g = s.get(f"{API}/invoices/{inv['id']}").json()
         assert g["amount_paid"] == 50 and g["outstanding"] == 150 and g["status"] == "partially_paid"
         assert s.post(f"{API}/payments/{pid}/reverse", json={"reason": "again"}).status_code == 400
@@ -280,8 +310,14 @@ class TestVoidDelete:
         assert s.post(f"{API}/invoices/{inv['id']}/restore").status_code == 200
         p = s.post(f"{API}/invoices/{inv['id']}/payments", json={"amount": 10}).json()
         assert s.post(f"{API}/invoices/{inv['id']}/void", json={"reason": "TEST"}).status_code == 400
-        s.post(f"{API}/payments/{p['id']}/reverse", json={"reason": "TEST"})
-        r = s.post(f"{API}/invoices/{inv['id']}/void", json={"reason": "TEST void"})
+        reverse_body = {"reason": "TEST"}
+        assert s.post(f"{API}/payments/{p['id']}/reverse", json=reverse_body).status_code == 403
+        reverse_body["supervisor_authorization"] = authorize_invoice_action(s, inv["id"], "reverse_payment", p["id"])
+        assert s.post(f"{API}/payments/{p['id']}/reverse", json=reverse_body).status_code == 200
+        void_body = {"reason": "TEST void"}
+        assert s.post(f"{API}/invoices/{inv['id']}/void", json=void_body).status_code == 403
+        void_body["supervisor_authorization"] = authorize_invoice_action(s, inv["id"], "void")
+        r = s.post(f"{API}/invoices/{inv['id']}/void", json=void_body)
         assert r.status_code == 200
         assert s.get(f"{API}/invoices/{inv['id']}").json()["status"] == "void"
         assert s.post(f"{API}/invoices/{inv['id']}/payments", json={"amount": 1}).status_code == 400
@@ -403,14 +439,21 @@ class TestCosts:
     def test_vehicle_record_once(self, s):
         v = next(x for x in s.get(f"{API}/vehicles").json() if x["name"] == "Hino 300")
         before = self._week_exp(s)
-        r = s.post(f"{API}/vehicles/{v['id']}/records", json={"type": "repair", "description": "TEST_repair", "amount": 500, "status": "Done"})
+        record_body = {"type": "repair", "description": "TEST_repair", "amount": 500, "status": "Done"}
+        assert s.post(f"{API}/vehicles/{v['id']}/records", json=record_body).status_code == 403
+        record_body["supervisor_authorization"] = authorize_fleet_action(s, "vehicle_record", "create", target_id=v["id"])
+        r = s.post(f"{API}/vehicles/{v['id']}/records", json=record_body)
         assert r.status_code == 200
         assert round(self._week_exp(s) - before, 2) == 500
         n = s.post(f"{API}/vehicles/{v['id']}/records", json={"type": "maintenance", "description": "TEST_needed", "amount": 300, "status": "Needed"})
         assert n.status_code == 200
         assert round(self._week_exp(s) - before, 2) == 500
         # clean: cancel the done record
-        s.delete(f"{API}/vehicles/records/{r.json()['id']}")
+        cancel_body = {"reason": "TEST cleanup"}
+        rid = r.json()["id"]
+        assert s.post(f"{API}/vehicles/records/{rid}/cancel", json=cancel_body).status_code == 403
+        cancel_body["supervisor_authorization"] = authorize_fleet_action(s, "vehicle_record", "cancel", resource_id=rid)
+        s.post(f"{API}/vehicles/records/{rid}/cancel", json=cancel_body)
         assert round(self._week_exp(s) - before, 2) == 0
 
     def test_spare_part_once(self, s):
@@ -418,25 +461,40 @@ class TestCosts:
         before = self._week_exp(s)
         p = s.post(f"{API}/spareparts", json={"name": f"TEST_part_{uuid.uuid4().hex[:5]}", "vehicle_id": v["id"], "expected_price": 100}).json()
         body = {"name": p["name"], "vehicle_id": v["id"], "quantity": 1, "expected_price": 100}
-        assert s.put(f"{API}/spareparts/{p['id']}", json={**body, "status": "bought"}).status_code == 400
-        assert s.put(f"{API}/spareparts/{p['id']}", json={**body, "status": "bought", "actual_cost": 120}).status_code == 200
-        assert s.put(f"{API}/spareparts/{p['id']}", json={**body, "status": "installed", "actual_cost": 120}).status_code == 200
+        missing_cost = {**body, "status": "bought"}
+        missing_cost["supervisor_authorization"] = authorize_fleet_action(s, "spare_part", "edit", resource_id=p["id"])
+        assert s.put(f"{API}/spareparts/{p['id']}", json=missing_cost).status_code == 400
+        bought = {**body, "status": "bought", "actual_cost": 120}
+        bought["supervisor_authorization"] = authorize_fleet_action(s, "spare_part", "edit", resource_id=p["id"])
+        assert s.put(f"{API}/spareparts/{p['id']}", json=bought).status_code == 200
+        installed = {**body, "status": "installed", "actual_cost": 120}
+        installed["supervisor_authorization"] = authorize_fleet_action(s, "spare_part", "edit", resource_id=p["id"])
+        assert s.put(f"{API}/spareparts/{p['id']}", json=installed).status_code == 200
         assert s.put(f"{API}/spareparts/{p['id']}", json={**body, "status": "to_buy", "actual_cost": 120}).status_code == 400
         exps = [e for e in s.get(f"{API}/expenses").json() if e.get("source_key") == f"sparepart:{p['id']}"]
         assert len(exps) == 1 and exps[0]["amount"] == 120 and exps[0]["category"] == "Vehicle"
         assert round(self._week_exp(s) - before, 2) == 120
         # linked expense cannot be voided twice / edited directly
-        assert s.post(f"{API}/expenses/{exps[0]['id']}/void", json={"reason": "TEST cleanup"}).status_code == 200
+        void_body = {"reason": "TEST cleanup"}
+        assert s.post(f"{API}/expenses/{exps[0]['id']}/void", json=void_body).status_code == 403
+        void_body["supervisor_authorization"] = authorize_expense_action(s, exps[0]["id"], "void")
+        assert s.post(f"{API}/expenses/{exps[0]['id']}/void", json=void_body).status_code == 200
 
     def test_expense_rules(self, s):
         assert s.post(f"{API}/expenses", json={"description": "TEST_bad", "amount": 0}).status_code == 400
         assert s.post(f"{API}/expenses", json={"description": "TEST_neg", "amount": -5}).status_code == 400
         before = self._week_exp(s)
-        e = s.post(f"{API}/expenses", json={"description": "TEST_exp", "amount": 77.7}).json()
+        expense_body = {"description": "TEST_exp", "amount": 77.7}
+        assert s.post(f"{API}/expenses", json=expense_body).status_code == 403
+        expense_body["supervisor_authorization"] = authorize_expense_action(s, None, "create")
+        e = s.post(f"{API}/expenses", json=expense_body).json()
         assert round(self._week_exp(s) - before, 2) == 77.7
         assert s.delete(f"{API}/expenses/{e['id']}").status_code == 400
         assert s.post(f"{API}/expenses/{e['id']}/void", json={"reason": ""}).status_code == 400
-        assert s.post(f"{API}/expenses/{e['id']}/void", json={"reason": "TEST"}).status_code == 200
+        void_body = {"reason": "TEST"}
+        assert s.post(f"{API}/expenses/{e['id']}/void", json=void_body).status_code == 403
+        void_body["supervisor_authorization"] = authorize_expense_action(s, e["id"], "void")
+        assert s.post(f"{API}/expenses/{e['id']}/void", json=void_body).status_code == 200
         assert round(self._week_exp(s) - before, 2) == 0
         assert all(x["id"] != e["id"] for x in s.get(f"{API}/expenses").json())
 
@@ -453,7 +511,9 @@ class TestCosts:
         inv = issued_invoice(s, customer)
         p = s.post(f"{API}/invoices/{inv['id']}/payments", json={"amount": 33}).json()
         assert round(s.get(f"{API}/reports/profit").json()["today"]["revenue"] - before, 2) == 33
-        s.post(f"{API}/payments/{p['id']}/reverse", json={"reason": "TEST"})
+        reverse_body = {"reason": "TEST"}
+        reverse_body["supervisor_authorization"] = authorize_invoice_action(s, inv["id"], "reverse_payment", p["id"])
+        s.post(f"{API}/payments/{p['id']}/reverse", json=reverse_body)
         assert round(s.get(f"{API}/reports/profit").json()["today"]["revenue"] - before, 2) == 0
 
 

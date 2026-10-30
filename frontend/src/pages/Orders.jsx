@@ -7,6 +7,7 @@ import { ClipboardList, Plus, Trash2, Pencil, ArrowRight, Eye, FileText, Printer
 import { useRef } from "react";
 import { DeliveryNote, orderLines } from "@/components/DeliveryNote";
 import { elementToPdf, printElement } from "@/lib/pdf";
+import BarcodeScanner from "@/components/BarcodeScanner";
 
 const STATUSES = ["To Send", "Preparing", "Assigned", "Dispatched", "Delivered", "Cancelled"];
 const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
@@ -164,6 +165,39 @@ export default function Orders() {
     } catch (e) { toast.error(apiError(e)); }
   };
 
+  const scanOrderProduct = async (code) => {
+    try {
+      const product = await api.post("/products/scan", {
+        code,
+        scan_id: globalThis.crypto?.randomUUID?.(),
+      });
+      const category = products.find((item) => item.trim().toLowerCase() === product.product.trim().toLowerCase());
+      if (!category || !sizesForProduct(category).includes(product.dimensions)) {
+        toast.error(`${product.product} · ${product.dimensions} is not available in this order catalog`);
+        return;
+      }
+      setModal((current) => {
+        if (!current) return current;
+        const items = [...(current.items || [])];
+        const existingIndex = items.findIndex((item) =>
+          item.category === category && item.size === product.dimensions
+        );
+        if (existingIndex >= 0) {
+          items[existingIndex] = { ...items[existingIndex], qty: Number(items[existingIndex].qty || 0) + 1 };
+        } else {
+          const emptyIndex = items.findIndex((item) => !item.category && !item.size && !item.description);
+          const scannedItem = { qty: 1, category, size: product.dimensions };
+          if (emptyIndex >= 0) items[emptyIndex] = { ...items[emptyIndex], ...scannedItem };
+          else items.push(scannedItem);
+        }
+        return { ...current, items };
+      });
+      toast.success(`${product.product} · ${product.dimensions} added to this order`);
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
+
   const advance = async (o) => {
     const next = STATUSES[STATUSES.indexOf(o.status) + 1];
     try { await api.put(`/orders/${o.id}`, { ...o, status: next }); toast.success(`Marked ${next}`); load(); } catch (e) { toast.error(apiError(e)); }
@@ -304,6 +338,7 @@ export default function Orders() {
           </div>
           <div>
             <p className="text-xs font-semibold text-slate-600 mb-1.5">Products (no prices)</p>
+            <div className="mb-3"><BarcodeScanner onScan={scanOrderProduct} dedupeWindowMs={0} label="Scan product to add it to this order" /></div>
             <div className="space-y-2">{modal.items.map((it, i) => {
               const set = (patch) => setModal({ ...modal, items: modal.items.map((x, k) => (k === i ? { ...x, ...patch } : x)) });
               return (

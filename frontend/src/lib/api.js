@@ -50,6 +50,7 @@ export const api = {
     pendingGets.set(key, request);
     return request;
   },
+  getUncached: (u, params) => client.get(u, { params }).then((r) => r.data),
   post: (u, d) => client.post(u, d).then((r) => { invalidateGetCache(); return r.data; }),
   put: (u, d) => client.put(u, d).then((r) => { invalidateGetCache(); return r.data; }),
   del: (u) => client.delete(u).then((r) => { invalidateGetCache(); return r.data; }),

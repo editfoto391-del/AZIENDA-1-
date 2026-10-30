@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtDateTime, fmtMoney } from "@/lib/format";
-import { usesUnifiedPriceList } from "@/lib/company";
+import { companyProfileName, usesUnifiedPriceList } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
 import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2 } from "lucide-react";
+
+const ProductIdentificationManager = lazy(() => import("@/components/ProductIdentificationManager"));
 
 const MOVE_TYPES = [
   { v: "adjustment_in", l: "Manual Adjustment In (+)" },
@@ -32,6 +34,7 @@ export default function Stock() {
   const [addModal, setAddModal] = useState(null);
   const [moveModal, setMoveModal] = useState(null);
   const [showHist, setShowHist] = useState(false);
+  const [showProductIds, setShowProductIds] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = () => {
@@ -116,6 +119,7 @@ export default function Stock() {
   return (
     <div>
       <PageHeader title="Finished Stock" subtitle="Calculated from the stock movement ledger">
+        <Btn variant="outline" onClick={() => setShowProductIds(true)} data-testid="product-identification-btn"><Boxes size={16} /> Product IDs & Labels</Btn>
         <Btn variant="outline" onClick={() => setShowHist(true)} data-testid="stock-history-btn"><History size={16} /> Ledger</Btn>
         <Btn onClick={() => setAddModal({ product: "", size: "", opening: 0, threshold: 5 })} data-testid="add-stock-btn"><Plus size={16} /> Add Product</Btn>
       </PageHeader>
@@ -130,9 +134,9 @@ export default function Stock() {
       <Card className="overflow-hidden">
         {list === null ? <p className="p-6 text-sm text-slate-400">Loading stock...</p> : filteredList.length === 0 ? <Empty icon={Boxes} title={category ? "No stock items in this category" : "No stock records"} /> : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[960px]">
+            <table className={`w-full text-sm ${user?.is_worker ? "min-w-[760px]" : "min-w-[960px]"}`}>
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                <th className="px-4 py-3 font-semibold">Size</th><th className="px-4 font-semibold">Product</th><th className="px-4 font-semibold text-right">Other</th><th className="px-4 font-semibold text-right">Invoiced</th><th className="px-4 font-semibold text-right">Current Stock</th><th className="px-4 font-semibold text-right">Cost (R)</th>{unifiedPriceList ? <th className="px-4 font-semibold text-right">Selling Price</th> : <><th className="px-4 font-semibold text-right">Sell Zone 1</th><th className="px-4 font-semibold text-right">Sell Zone 2</th></>}<th className="px-4 font-semibold text-right">Actions</th>
+                <th className="px-4 py-3 font-semibold">Size</th><th className="px-4 font-semibold">Product</th><th className="px-4 font-semibold text-right">Other</th><th className="px-4 font-semibold text-right">Invoiced</th><th className="px-4 font-semibold text-right">Current Stock</th>{!user?.is_worker && <th className="px-4 font-semibold text-right">Cost (R)</th>}{unifiedPriceList ? <th className="px-4 font-semibold text-right">Selling Price</th> : <><th className="px-4 font-semibold text-right">Sell Zone 1</th><th className="px-4 font-semibold text-right">Sell Zone 2</th></>}<th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{filteredList.map((s) => (
                 <tr key={s.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`stock-row-${s.id}`}>
@@ -141,18 +145,18 @@ export default function Stock() {
                   <td className="px-4 text-right font-mono text-slate-500">{s.adjustments || 0}</td>
                   <td className="px-4 text-right font-mono text-red-500">{s.invoiced ? `-${s.invoiced}` : 0}</td>
                   <td className="px-4 text-right"><span className={`font-mono font-bold ${s.current < s.threshold ? "text-red-600" : "text-slate-800"}`} data-testid={`stock-current-${s.id}`}>{s.current}</span>{s.current < s.threshold && <Badge cls="bg-red-50 text-red-700 border-red-200 ml-2">Low</Badge>}</td>
-                  <td className="px-4">
+                  {!user?.is_worker && <td className="px-4">
                     <div className="flex items-center justify-end gap-2">
                       <Input aria-label={`Cost for ${s.product} ${s.size}`} type="number" min="0" step="0.01" value={costDrafts[s.id] ?? (s.unit_cost ?? "")} onChange={(e) => setCostDrafts((current) => ({ ...current, [s.id]: e.target.value }))} className="max-w-24 px-2 py-1.5 text-right" data-testid={`stock-cost-${s.id}`} />
                       <button type="button" onClick={() => saveCost(s)} disabled={busy} className="text-primary hover:underline text-xs font-semibold disabled:opacity-50" data-testid={`save-stock-cost-${s.id}`}>Save</button>
                     </div>
-                  </td>
+                  </td>}
                   {unifiedPriceList
                     ? <td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td>
                     : <><td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td><td className="px-4 text-right font-mono">{getSellingPrice(s, 2)}</td></>}
                   <td className="px-4 text-right whitespace-nowrap">
                     <button onClick={() => setMoveModal({ stock_id: s.id, label: `${s.product} ${s.size}`, current: s.current, type: "adjustment_in", quantity: 1, reason: "", reference: "", notes: "" })} className="text-primary hover:underline text-xs font-semibold inline-flex items-center gap-1" data-testid={`move-stock-${s.id}`}><ArrowUpDown size={13} /> Adjust</button>
-                    <button type="button" onClick={() => deleteStock(s)} disabled={busy} title="Permanently delete stock and movements" aria-label={`Permanently delete ${s.product} ${s.size}`} className="ml-2 rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50" data-testid={`delete-stock-${s.id}`}><Trash2 size={15} /></button>
+                    {!user?.is_stock_only_worker && <button type="button" onClick={() => deleteStock(s)} disabled={busy} title="Permanently delete stock and movements" aria-label={`Permanently delete ${s.product} ${s.size}`} className="ml-2 rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50" data-testid={`delete-stock-${s.id}`}><Trash2 size={15} /></button>}
                   </td>
                 </tr>))}</tbody>
             </table>
@@ -195,10 +199,32 @@ export default function Stock() {
               <span className="col-span-3 text-slate-400 text-xs truncate">{m.reason || m.reference}</span>
               <span className={`col-span-1 text-right font-mono font-semibold ${sign(m) > 0 ? "text-emerald-600" : "text-red-600"}`}>{sign(m) > 0 ? "+" : "-"}{m.quantity}</span>
               <span className="col-span-2 text-slate-400 text-xs">{fmtDateTime(m.created_at)}</span>
-              <span className="col-span-1 text-right">{!m.reversed && ["adjustment_in", "adjustment_out", "return", "damage"].includes(m.type) && <button onClick={() => reverse(m)} title="Reverse" className="text-slate-400 hover:text-red-600" data-testid={`reverse-movement-${m.id}`}><Undo2 size={15} /></button>}</span>
+              <span className="col-span-1 text-right">{!user?.is_stock_only_worker && !m.reversed && ["adjustment_in", "adjustment_out", "return", "damage"].includes(m.type) && <button onClick={() => reverse(m)} title="Reverse" className="text-slate-400 hover:text-red-600" data-testid={`reverse-movement-${m.id}`}><Undo2 size={15} /></button>}</span>
             </div>))}</div>
         )}
       </Modal>
+      {showProductIds && <Suspense fallback={<p className="text-sm text-slate-400">Loading product identification...</p>}>
+        <ProductIdentificationManager
+          stock={list || []}
+          companyName={companyProfileName(user?.company_id)}
+          onProductUpdated={load}
+          onCreateProduct={() => {
+            setShowProductIds(false);
+            setAddModal({ product: "", size: "", opening: 0, threshold: 5 });
+          }}
+          onClose={() => setShowProductIds(false)}
+          onStockMovement={(product) => setMoveModal({
+            stock_id: product.stock_id,
+            label: `${product.product} ${product.dimensions}`,
+            current: product.current_stock,
+            type: "adjustment_in",
+            quantity: 1,
+            reason: "",
+            reference: "",
+            notes: "",
+          })}
+        />
+      </Suspense>}
     </div>
   );
 }

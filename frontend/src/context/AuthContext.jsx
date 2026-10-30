@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { api, apiError } from "@/lib/api";
+import { dedicatedCompanyDomain } from "@/lib/company";
 
 const AuthCtx = createContext(null);
 export const useAuth = () => useContext(AuthCtx);
@@ -33,7 +34,21 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     // Returning from Google OAuth: AuthCallback exchanges session_id first
     if (window.location.hash?.includes("session_id=")) { setBooting(false); return; }
-    api.get("/auth/me").then(setUser).catch(() => setUser(false)).finally(() => setBooting(false));
+    if (window.location.pathname.startsWith("/worker-access/")) {
+      localStorage.removeItem("token");
+      setUser(false);
+      setBooting(false);
+      return;
+    }
+    const dedicatedDomain = dedicatedCompanyDomain();
+    api.get("/auth/me").then((authenticatedUser) => {
+      if (dedicatedDomain && !authenticatedUser.is_worker && authenticatedUser.company_id !== dedicatedDomain.companyId) {
+        localStorage.removeItem("token");
+        setUser(false);
+        return;
+      }
+      setUser(authenticatedUser);
+    }).catch(() => setUser(false)).finally(() => setBooting(false));
   }, []);
 
   const finishLogin = async (data, shareLocation) => {
@@ -43,8 +58,14 @@ export function AuthProvider({ children }) {
     return data.user;
   };
 
-  const login = async (username, password, companyId, shareLocation = false) => {
-    const data = await api.post("/auth/login", { username, password, company_id: companyId });
+  const login = async (username, password, companyId, shareLocation = false, personalAccessToken = "") => {
+    const dedicatedDomain = dedicatedCompanyDomain();
+    const data = await api.post("/auth/login", {
+      username: personalAccessToken ? username : dedicatedDomain?.username || username,
+      password,
+      company_id: personalAccessToken ? companyId : dedicatedDomain?.companyId || companyId,
+      ...(personalAccessToken ? { personal_access_token: personalAccessToken } : {}),
+    });
     return finishLogin(data, shareLocation);
   };
 
@@ -54,7 +75,7 @@ export function AuthProvider({ children }) {
   };
 
   const completeGoogle = async (sessionId) => {
-    const companyId = localStorage.getItem("selectedCompanyId");
+    const companyId = dedicatedCompanyDomain()?.companyId || localStorage.getItem("selectedCompanyId");
     const data = await api.post("/auth/google/session", { session_id: sessionId, company_id: companyId });
     localStorage.removeItem("selectedCompanyId");
     const shareLocation = localStorage.getItem("shareDeviceLocation") === "true";

@@ -8,6 +8,7 @@ import { Truck, Plus, Wrench, Package, Trash2, Pencil, ArrowRight, Fuel, Setting
 const VTYPES = ["Medium Truck", "Large Truck", "Small Truck", "Bakkie", "Trailer", "Other"];
 const RSTATUS = ["Needed", "Scheduled", "In Progress", "Done", "Cancelled"];
 const isDone = (r) => r.status === "Done" || r.status === "done";
+const isBillable = (r) => isDone(r) && Number(r.amount) > 0;
 const isPending = (r) => ["Needed", "Scheduled", "In Progress", "needed"].includes(r.status);
 const RTYPES = { expense: { label: "Expense", icon: Fuel, cls: "bg-orange-50 text-orange-700 border-orange-200" }, repair: { label: "Repair", icon: Wrench, cls: "bg-red-50 text-red-700 border-red-200" }, maintenance: { label: "Maintenance", icon: Settings2, cls: "bg-blue-50 text-blue-700 border-blue-200" } };
 const PSTAT = { to_buy: { label: "To Buy", cls: "bg-amber-50 text-amber-700 border-amber-200", next: "bought" }, bought: { label: "Bought", cls: "bg-blue-50 text-blue-700 border-blue-200", next: "installed" }, installed: { label: "Installed", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" } };
@@ -55,6 +56,9 @@ export default function Fleet() {
   const [detail, setDetail] = useState(null);
   const [rForm, setRForm] = useState(blankR());
   const [pModal, setPModal] = useState(null);
+  const [approvalRequest, setApprovalRequest] = useState(null);
+  const [supervisorPassword, setSupervisorPassword] = useState("");
+  const [authorizing, setAuthorizing] = useState(false);
 
   const load = () => {
     Promise.all([api.get("/vehicles"), api.get("/vehicles/records/all"), api.get("/spareparts")])
@@ -74,17 +78,80 @@ export default function Fleet() {
     try { await api.del(`/vehicles/${v.id}`); toast.success("Vehicle removed from the fleet"); load(); }
     catch (e) { err(e); }
   };
+  const requestApproval = (details) => setApprovalRequest(details);
+  const submitApproval = async (event) => {
+    event.preventDefault();
+    if (!approvalRequest || !supervisorPassword || authorizing) return;
+    setAuthorizing(true);
+    try {
+      const approval = await api.post("/fleet-expense-authorizations", {
+        password: supervisorPassword,
+        resource_type: approvalRequest.resourceType,
+        action: approvalRequest.action,
+        resource_id: approvalRequest.resourceId,
+        target_id: approvalRequest.targetId,
+      });
+      await approvalRequest.execute(approval.authorization_id);
+      setApprovalRequest(null);
+      setSupervisorPassword("");
+    } catch (e) { err(e); }
+    finally { setAuthorizing(false); }
+  };
   const addRecord = async () => {
     if (!rForm.description.trim()) return toast.error("Description required");
-    try { await api.post(`/vehicles/${detail.id}/records`, { ...rForm, amount: Number(rForm.amount) || 0 }); toast.success("Record added"); setRForm(blankR()); load(); } catch (e) { err(e); }
+    const payload = { ...rForm, amount: Number(rForm.amount) || 0 };
+    const execute = async (supervisor_authorization) => {
+      await api.post(`/vehicles/${detail.id}/records`, { ...payload, supervisor_authorization });
+      toast.success("Record added"); setRForm(blankR()); load();
+    };
+    if (isDone(payload) && payload.amount > 0) {
+      requestApproval({ resourceType: "vehicle_record", action: "create", targetId: detail.id, execute });
+      return;
+    }
+    try { await execute(undefined); } catch (e) { err(e); }
   };
-  const delRecord = async (r) => { if (!window.confirm("Cancel this vehicle record? Its history will be retained.")) return; try { await api.del(`/vehicles/records/${r.id}`); load(); } catch (e) { err(e); } };
-  const setRecStatus = async (r, status) => { try { await api.put(`/vehicles/records/${r.id}`, { ...r, status }); load(); } catch (e) { err(e); } };
+  const delRecord = async (r) => {
+    if (!window.confirm("Cancel this vehicle record? Its history will be retained.")) return;
+    const reason = window.prompt("Reason for cancelling this vehicle record:");
+    if (reason === null) return;
+    if (!reason.trim()) return toast.error("A reason is required");
+    const execute = async (supervisor_authorization) => {
+      await api.post(`/vehicles/records/${r.id}/cancel`, { reason: reason.trim(), supervisor_authorization });
+      load();
+    };
+    if (isBillable(r)) {
+      requestApproval({ resourceType: "vehicle_record", action: "cancel", resourceId: r.id, execute });
+      return;
+    }
+    try { await execute(undefined); } catch (e) { err(e); }
+  };
+  const setRecStatus = async (r, status) => {
+    const payload = { ...r, status };
+    const execute = async (supervisor_authorization) => {
+      await api.put(`/vehicles/records/${r.id}`, { ...payload, supervisor_authorization });
+      load();
+    };
+    if ((isBillable(r) || isBillable(payload))) {
+      requestApproval({ resourceType: "vehicle_record", action: "edit", resourceId: r.id, execute });
+      return;
+    }
+    try { await execute(undefined); } catch (e) { err(e); }
+  };
   const savePart = async () => {
     if (!pModal.name.trim()) return toast.error("Part name required");
     const payload = { ...pModal, quantity: Number(pModal.quantity) || 1, expected_price: Number(pModal.expected_price) || 0, actual_cost: pModal.actual_cost === "" || pModal.actual_cost == null ? null : Number(pModal.actual_cost) };
     if (payload.status !== "to_buy" && !(payload.actual_cost > 0)) return toast.error("Enter the actual purchase cost when the part is bought");
-    try { pModal.id ? await api.put(`/spareparts/${pModal.id}`, payload) : await api.post("/spareparts", payload); toast.success("Spare part saved"); setPModal(null); load(); } catch (e) { err(e); }
+    const execute = async (supervisor_authorization) => {
+      const data = { ...payload, supervisor_authorization };
+      if (pModal.id) await api.put(`/spareparts/${pModal.id}`, data);
+      else await api.post("/spareparts", data);
+      toast.success("Spare part saved"); setPModal(null); load();
+    };
+    if (payload.status !== "to_buy") {
+      requestApproval({ resourceType: "spare_part", action: pModal.id ? "edit" : "create", resourceId: pModal.id, execute });
+      return;
+    }
+    try { await execute(undefined); } catch (e) { err(e); }
   };
   const advancePart = async (p) => {
     const next = PSTAT[p.status].next;
@@ -95,7 +162,11 @@ export default function Fleet() {
       actual_cost = Number(v);
       if (!(actual_cost > 0)) return toast.error("Enter a valid cost");
     }
-    try { await api.put(`/spareparts/${p.id}`, { ...p, status: next, actual_cost }); toast.success(`Marked ${PSTAT[next].label}`); load(); } catch (e) { err(e); }
+    const execute = async (supervisor_authorization) => {
+      await api.put(`/spareparts/${p.id}`, { ...p, status: next, actual_cost, supervisor_authorization });
+      toast.success(`Marked ${PSTAT[next].label}`); load();
+    };
+    requestApproval({ resourceType: "spare_part", action: "edit", resourceId: p.id, execute });
   };
   const delPart = async (p) => { if (!window.confirm(`Archive "${p.name}"? Its record will be retained.`)) return; try { await api.del(`/spareparts/${p.id}`); load(); } catch (e) { err(e); } };
   const restorePart = async (p) => { try { await api.post(`/spareparts/${p.id}/restore`); toast.success("Spare part restored"); load(); } catch (e) { err(e); } };
@@ -231,6 +302,16 @@ export default function Fleet() {
           <Textarea label="Notes" rows={2} value={pModal.notes} onChange={(e) => setPModal({ ...pModal, notes: e.target.value })} />
           <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setPModal(null)}>Cancel</Btn><Btn onClick={savePart} data-testid="save-part-btn">Save</Btn></div>
         </div>}
+      </Modal>
+      <Modal open={!!approvalRequest} onClose={() => { setApprovalRequest(null); setSupervisorPassword(""); }} title="Supervisor approval required">
+        {approvalRequest && <form onSubmit={submitApproval} className="space-y-4" data-testid="fleet-expense-authorization-form">
+          <p className="text-sm text-slate-600">Enter the supervisor password to {approvalRequest.resourceType === "vehicle_record" ? approvalRequest.action === "create" ? "record this completed vehicle cost" : approvalRequest.action === "edit" ? "change a completed vehicle cost" : "cancel this vehicle cost" : approvalRequest.action === "create" ? "record this spare-part purchase" : "change this purchased spare part"}. Approval is required for every user role.</p>
+          <Input label="Supervisor password" type="password" autoComplete="current-password" autoFocus required value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} data-testid="fleet-supervisor-password-input" />
+          <div className="flex justify-end gap-2">
+            <Btn type="button" variant="outline" onClick={() => { setApprovalRequest(null); setSupervisorPassword(""); }}>Cancel</Btn>
+            <Btn type="submit" disabled={authorizing} data-testid="authorize-fleet-expense-btn">{authorizing ? "Checking..." : "Approve action"}</Btn>
+          </div>
+        </form>}
       </Modal>
     </div>
   );

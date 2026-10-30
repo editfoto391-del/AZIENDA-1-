@@ -91,7 +91,13 @@ export function Modal({ open, onClose, title, children, wide = false }) {
       {open && (
         <motion.div
           key={titleId}
-          className="dialog-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4 sm:p-8"
+          className="dialog-backdrop fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-3 sm:p-8"
+          style={{
+            paddingTop: "max(0.75rem, env(safe-area-inset-top))",
+            paddingRight: "max(0.75rem, env(safe-area-inset-right))",
+            paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))",
+            paddingLeft: "max(0.75rem, env(safe-area-inset-left))",
+          }}
           onClick={onClose}
           initial={reduceMotion ? false : { opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -102,20 +108,21 @@ export function Modal({ open, onClose, title, children, wide = false }) {
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
-            className={`liquid-glass-surface w-full overflow-hidden rounded-2xl border border-white/70 shadow-2xl ${wide ? "max-w-3xl" : "max-w-lg"} my-4`}
+            className={`liquid-glass-surface my-0 flex w-full flex-col overflow-hidden rounded-2xl border border-white/70 shadow-2xl sm:my-4 ${wide ? "max-w-3xl" : "max-w-lg"}`}
             onClick={(e) => e.stopPropagation()}
+            style={{ maxHeight: "calc(100dvh - 1.5rem - env(safe-area-inset-top) - env(safe-area-inset-bottom))" }}
             initial={reduceMotion ? false : { opacity: 0, y: 12, scale: 0.975 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 6, scale: 0.985 }}
             transition={reduceMotion ? { duration: 0 } : spring}
           >
-            <div className="flex items-center justify-between border-b border-border/70 px-6 py-4">
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border/70 px-4 py-3 sm:px-6 sm:py-4">
               <h3 id={titleId} className="text-lg font-bold text-slate-900 font-display">{title}</h3>
-              <button onClick={onClose} aria-label="Close dialog" data-testid="modal-close" className="rounded-full p-1 text-slate-400 transition-colors hover:bg-black/5 hover:text-slate-700">
+              <button onClick={onClose} aria-label="Close dialog" data-testid="modal-close" className="shrink-0 rounded-full p-2 text-slate-400 transition-colors hover:bg-black/5 hover:text-slate-700">
                 <X size={20} />
               </button>
             </div>
-            <div className="px-6 py-5">{children}</div>
+            <div className="min-h-0 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6 sm:py-5">{children}</div>
           </motion.div>
         </motion.div>
       )}

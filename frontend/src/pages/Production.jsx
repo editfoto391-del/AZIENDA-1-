@@ -4,6 +4,7 @@ import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtDateTime, today } from "@/lib/format";
 import { Card, Btn, Input, Select, Modal, PageHeader, Empty, Badge } from "@/components/common";
 import { Factory, Plus, Save, Trash2, Pencil, RotateCcw } from "lucide-react";
+import BarcodeScanner from "@/components/BarcodeScanner";
 
 export default function Production() {
   const [data, setData] = useState(null);
@@ -13,6 +14,7 @@ export default function Production() {
   const [blockCuttings, setBlockCuttings] = useState([]);
   const [cutOpen, setCutOpen] = useState(false);
   const [cutForm, setCutForm] = useState({ block: "", size: "" });
+  const [cutScanProduct, setCutScanProduct] = useState(null);
   const [busy, setBusy] = useState(false);
   const [cutBusy, setCutBusy] = useState(false);
   const load = () => {
@@ -52,6 +54,19 @@ export default function Production() {
       toast.error(apiError(e));
     } finally {
       setCutBusy(false);
+    }
+  };
+  const scanCutProduct = async (code) => {
+    try {
+      const product = await api.post("/products/scan", {
+        code,
+        scan_id: globalThis.crypto?.randomUUID?.(),
+      });
+      setCutForm((current) => ({ ...current, size: product.dimensions }));
+      setCutScanProduct(product);
+      toast.success(`${product.product} · ${product.dimensions} selected`);
+    } catch (error) {
+      toast.error(apiError(error));
     }
   };
   const deleteBlockCutting = async (record) => {
@@ -108,7 +123,7 @@ export default function Production() {
       <Card className="p-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div><h2 className="font-semibold text-slate-800">Block Cutting</h2><p className="text-sm text-slate-500">Record cut block type and size without changing stock quantities.</p></div>
-          <Btn onClick={() => { setCutForm({ block: "", size: "" }); setCutOpen(true); }} data-testid="add-block-cutting-btn"><Plus size={16} /> Add Block Cutted</Btn>
+          <Btn onClick={() => { setCutForm({ block: "", size: "" }); setCutScanProduct(null); setCutOpen(true); }} data-testid="add-block-cutting-btn"><Plus size={16} /> Add Block Cutted</Btn>
         </div>
         {blockCuttings.length === 0 ? <p className="text-sm text-slate-400">No block cutting records yet.</p> : (
           <div className="overflow-x-auto">
@@ -118,7 +133,7 @@ export default function Production() {
                 <td className="px-3 py-2 font-semibold">{record.block}{record.archived && <Badge cls="ml-2 bg-amber-50 text-amber-700 border-amber-200">Archived</Badge>}</td><td className="px-3 py-2">{record.size}</td><td className="px-3 py-2 text-slate-500">{fmtDateTime(record.created_at)}</td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
                   {record.archived ? <button onClick={() => restoreBlockCutting(record)} className="text-emerald-700 hover:text-emerald-900" aria-label={`Restore ${record.block} ${record.size}`} data-testid={`restore-block-cutting-${record.id}`}><RotateCcw size={15} /></button> : <>
-                    <button onClick={() => { setCutForm({ id: record.id, block: record.block, size: record.size }); setCutOpen(true); }} className="mr-3 text-slate-400 hover:text-primary" aria-label={`Edit ${record.block} ${record.size}`} data-testid={`edit-block-cutting-${record.id}`}><Pencil size={15} /></button>
+                    <button onClick={() => { setCutForm({ id: record.id, block: record.block, size: record.size }); setCutScanProduct(null); setCutOpen(true); }} className="mr-3 text-slate-400 hover:text-primary" aria-label={`Edit ${record.block} ${record.size}`} data-testid={`edit-block-cutting-${record.id}`}><Pencil size={15} /></button>
                     <button onClick={() => deleteBlockCutting(record)} className="text-slate-400 hover:text-red-600" aria-label={`Archive ${record.block} ${record.size}`} data-testid={`delete-block-cutting-${record.id}`}><Trash2 size={15} /></button>
                   </>}
                 </td>
@@ -145,6 +160,10 @@ export default function Production() {
       </Card>
       <Modal open={cutOpen} onClose={() => setCutOpen(false)} title={cutForm.id ? "Edit Block Cutting" : "Add Block Cutted"}>
         <div className="space-y-4">
+          <BarcodeScanner onScan={scanCutProduct} disabled={cutBusy} label="Scan a finished product to select its size" />
+          {cutScanProduct && <p className="rounded-lg bg-emerald-50 p-3 text-xs text-emerald-800">
+            {cutScanProduct.product} · {cutScanProduct.dimensions} · Available stock: {cutScanProduct.current_stock}
+          </p>}
           <Input label="Which block?" list="block-cutting-options" value={cutForm.block} onChange={(event) => setCutForm({ ...cutForm, block: event.target.value, size: "" })} placeholder="Choose or type a block" data-testid="block-cutting-type-select" />
           <datalist id="block-cutting-options"><option value="Black" /><option value="White" /></datalist>
           <Select label="Which size?" value={cutForm.size} onChange={(event) => setCutForm({ ...cutForm, size: event.target.value })} disabled={!cutForm.block || availableSizes.length === 0} data-testid="block-cutting-size-select">

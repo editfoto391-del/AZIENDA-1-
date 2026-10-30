@@ -10,6 +10,7 @@ import { usesUnifiedPriceList } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal } from "@/components/common";
 import { Copy, Download, Save, Send, CreditCard, Plus, Trash2, ArrowLeft, Ban, Printer, AlertTriangle, Pencil, X, History, Eye, EyeOff, Archive } from "lucide-react";
+import BarcodeScanner from "@/components/BarcodeScanner";
 
 const CATS = {
   1: ["Simple/Mix color", "Ribbon Black", "Ribbon Pink", "Candy", "Strong Boy", "Uncovered"],
@@ -56,6 +57,7 @@ export default function InvoiceEditor() {
   const [editAuthOpen, setEditAuthOpen] = useState(false);
   const [supervisorPassword, setSupervisorPassword] = useState("");
   const [editAuthorization, setEditAuthorization] = useState("");
+  const [pendingInvoiceAction, setPendingInvoiceAction] = useState(null);
   const [authorizingEdit, setAuthorizingEdit] = useState(false);
   const [compactPreview, setCompactPreview] = useState(false);
   const deliveryNoteRef = useRef(null);
@@ -99,6 +101,32 @@ export default function InvoiceEditor() {
     if (!supervisorPassword || authorizingEdit) return;
     setAuthorizingEdit(true);
     try {
+      if (pendingInvoiceAction) {
+        const approval = await api.post(`/invoices/${id}/authorize-action`, {
+          password: supervisorPassword,
+          action: pendingInvoiceAction.action,
+          target_id: pendingInvoiceAction.paymentId,
+        });
+        if (pendingInvoiceAction.action === "void") {
+          const res = await api.post(`/invoices/${id}/void`, {
+            reason: pendingInvoiceAction.reason,
+            supervisor_authorization: approval.authorization_id,
+          });
+          setInv({ ...inv, status: res.status, void_reason: pendingInvoiceAction.reason });
+          toast.success("Invoice voided");
+        } else {
+          await api.post(`/payments/${pendingInvoiceAction.paymentId}/reverse`, {
+            reason: pendingInvoiceAction.reason,
+            supervisor_authorization: approval.authorization_id,
+          });
+          await reloadInv();
+          toast.success("Payment reversed");
+        }
+        setPendingInvoiceAction(null);
+        setEditAuthOpen(false);
+        setSupervisorPassword("");
+        return;
+      }
       const approval = await api.post(`/invoices/${id}/authorize-edit`, { password: supervisorPassword });
       setSnapshot(inv);
       setInv(prepareForEdit(inv));
@@ -153,6 +181,55 @@ export default function InvoiceEditor() {
       patch._needsConfig = r.needsConfig || r.missing;
     } else { patch.unit_price = 0; patch._needsConfig = false; }
     updateItem(idx, patch);
+  };
+
+  const scanInvoiceProduct = async (code) => {
+    try {
+      const product = await api.post("/products/scan", {
+        code,
+        scan_id: globalThis.crypto?.randomUUID?.(),
+      });
+      const aliases = {
+        simple: "Simple/Mix color",
+        "ribbon balck": "Ribbon Black",
+        "ribbon black": "Ribbon Black",
+        "ribbon pink": "Ribbon Pink",
+      };
+      const categoryKey = product.product.trim().toLowerCase();
+      const category = categoriesFor(inv.zone).find((item) => item.toLowerCase() === categoryKey)
+        || categoriesFor(inv.zone).find((item) => item === aliases[categoryKey]);
+      if (!category) {
+        toast.error(`${product.product} is not available as an invoice product in this price list`);
+        return;
+      }
+      const price = lookupPrice(inv.zone, category, product.dimensions);
+      const scannedItem = {
+        ...emptyItem(category),
+        size: product.dimensions,
+        unit_price: price.price ?? 0,
+        _needsConfig: price.needsConfig || price.missing,
+      };
+      setInv((current) => {
+        const items = [...current.items];
+        const existingIndex = items.findIndex((item) =>
+          item.category === category && item.size === product.dimensions && !item.price_override
+        );
+        if (existingIndex >= 0) {
+          items[existingIndex] = {
+            ...items[existingIndex],
+            qty: (Number(items[existingIndex].qty) || 0) + 1,
+          };
+        } else {
+          const emptyIndex = items.findIndex((item) => !item.size && !item.description);
+          if (emptyIndex >= 0) items[emptyIndex] = { ...items[emptyIndex], ...scannedItem };
+          else items.push(scannedItem);
+        }
+        return { ...current, items };
+      });
+      toast.success(`${product.product} · ${product.dimensions} added at the current price`);
+    } catch (error) {
+      toast.error(apiError(error));
+    }
   };
 
   const repriceItems = (items, zone) => items.map((it) => {
@@ -295,8 +372,9 @@ export default function InvoiceEditor() {
 
   const saveEdit = async () => {
     if (!validate(inv.status === "draft" ? "draft" : "issued") || busy || saveLockRef.current) return;
-    const reason = window.prompt("Reason for this change (optional):", "");
+    const reason = window.prompt("Reason for this change (required):", "");
     if (reason === null) return;
+    if (!reason.trim()) return toast.error("A reason is required to edit an invoice");
     if (inv.status !== "draft") {
       setPendingStockSubmit({ action: "edit", reason });
       return;
@@ -355,8 +433,8 @@ export default function InvoiceEditor() {
     const reason = window.prompt("Reason for voiding this invoice (required):");
     if (reason === null) return;
     if (!reason.trim()) return toast.error("A reason is required to void an invoice");
-    try { const res = await api.post(`/invoices/${id}/void`, { reason }); setInv({ ...inv, status: res.status, void_reason: reason }); toast.success("Invoice voided"); }
-    catch (e) { toast.error(apiError(e)); }
+    setPendingInvoiceAction({ action: "void", reason: reason.trim() });
+    setEditAuthOpen(true);
   };
 
   const archiveDraft = async () => {
@@ -385,8 +463,8 @@ export default function InvoiceEditor() {
     const reason = window.prompt(`Reverse payment of ${fmtMoney(p.amount)}? Enter a reason:`);
     if (reason === null) return;
     if (!reason.trim()) return toast.error("A reason is required");
-    try { await api.post(`/payments/${p.id}/reverse`, { reason }); await reloadInv(); toast.success("Payment reversed"); }
-    catch (e) { toast.error(apiError(e)); }
+    setPendingInvoiceAction({ action: "reverse_payment", paymentId: p.id, reason: reason.trim() });
+    setEditAuthOpen(true);
   };
 
   const invoiceText = () => {
@@ -600,6 +678,9 @@ export default function InvoiceEditor() {
 
             {(!openingBalanceOnly || editing) && <Card className="p-5">
               <h3 className="font-bold text-slate-800 mb-4 font-display">3. Products</h3>
+              {!locked && <div className="mb-4 max-w-xl">
+                <BarcodeScanner onScan={scanInvoiceProduct} disabled={busy} dedupeWindowMs={0} label="Scan product to add it at the current price" />
+              </div>}
               <div className="overflow-x-auto -mx-5 px-5">
                 <table className="w-full text-sm min-w-[720px]">
                   <thead><tr className="text-left text-xs text-slate-400 border-b border-border">
@@ -758,13 +839,13 @@ export default function InvoiceEditor() {
           </div>
         )}
       </Modal>
-      <Modal open={editAuthOpen} onClose={() => { setEditAuthOpen(false); setSupervisorPassword(""); }} title="Supervisor approval required">
+      <Modal open={editAuthOpen} onClose={() => { setEditAuthOpen(false); setSupervisorPassword(""); setPendingInvoiceAction(null); }} title="Supervisor approval required">
         <form onSubmit={authorizeEdit} className="space-y-4" data-testid="invoice-edit-authorization-form">
-          <p className="text-sm text-slate-600">Enter the supervisor password to edit this invoice. This approval is required for every user role.</p>
+          <p className="text-sm text-slate-600">Enter the supervisor password to {pendingInvoiceAction?.action === "void" ? "void this invoice" : pendingInvoiceAction?.action === "reverse_payment" ? "reverse this payment" : "edit this invoice"}. This approval is required for every user role.</p>
           <Input label="Supervisor password" type="password" autoComplete="current-password" autoFocus required value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} data-testid="supervisor-password-input" />
           <div className="flex justify-end gap-2">
-            <Btn type="button" variant="outline" onClick={() => { setEditAuthOpen(false); setSupervisorPassword(""); }}>Cancel</Btn>
-            <Btn type="submit" disabled={authorizingEdit} data-testid="authorize-invoice-edit-btn">{authorizingEdit ? "Checking..." : "Continue to edit"}</Btn>
+            <Btn type="button" variant="outline" onClick={() => { setEditAuthOpen(false); setSupervisorPassword(""); setPendingInvoiceAction(null); }}>Cancel</Btn>
+            <Btn type="submit" disabled={authorizingEdit} data-testid="authorize-invoice-edit-btn">{authorizingEdit ? "Checking..." : pendingInvoiceAction ? "Approve action" : "Continue to edit"}</Btn>
           </div>
         </form>
       </Modal>

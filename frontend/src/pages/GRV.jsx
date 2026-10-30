@@ -9,6 +9,7 @@ import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtMoney, today } from "@/lib/format";
 import { companyProfileName } from "@/lib/company";
 import { Badge, Btn, Card, Empty, Input, Modal, PageHeader, Select, Textarea } from "@/components/common";
+import BarcodeScanner from "@/components/BarcodeScanner";
 
 const STATUSES = [
   ["draft", "Draft"],
@@ -319,6 +320,50 @@ export default function GRV() {
     }));
   };
 
+  const scanGRVProduct = async (code) => {
+    try {
+      const product = await api.post("/products/scan", {
+        code,
+        scan_id: globalThis.crypto?.randomUUID?.(),
+      });
+      if (draft.purchase_order_id && !draft.items.some((line) => line.stock_id === product.stock_id)) {
+        toast.error(`${product.product} · ${product.dimensions} is not part of this purchase order`);
+        return;
+      }
+      setDraft((current) => {
+        if (!current) return current;
+        const items = [...current.items];
+        let lineIndex = items.findIndex((line) => line.stock_id === product.stock_id);
+        if (lineIndex < 0) {
+          lineIndex = items.findIndex((line) => !line.stock_id);
+          if (lineIndex < 0) {
+            lineIndex = items.length;
+            items.push(blankLine());
+          }
+          const selectedStock = stock.find((item) => item.id === product.stock_id);
+          items[lineIndex] = {
+            ...items[lineIndex],
+            stock_id: product.stock_id,
+            product_code: product.product_id,
+            product: product.product,
+            size: product.dimensions,
+            unit_cost: Number(selectedStock?.unit_cost || 0),
+          };
+        }
+        const line = items[lineIndex];
+        items[lineIndex] = {
+          ...line,
+          actual_received_quantity: Number(line.actual_received_quantity || 0) + 1,
+          accepted_quantity: Number(line.accepted_quantity || 0) + 1,
+        };
+        return { ...current, items };
+      });
+      toast.success(`${product.product} · ${product.dimensions} received quantity increased`);
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
+
   const saveDraft = async (event) => {
     event.preventDefault();
     if (saving || !draft) return;
@@ -521,6 +566,9 @@ export default function GRV() {
             <Input label="Warehouse" value={draft.warehouse} onChange={(event) => setDraft({ ...draft, warehouse: event.target.value })} data-testid="grv-warehouse" />
           </div>
 
+          <div className="max-w-xl">
+            <BarcodeScanner onScan={scanGRVProduct} disabled={saving} dedupeWindowMs={0} label="Scan received product to count accepted units" />
+          </div>
           <div className="overflow-x-auto rounded-lg border border-border">
             <table className="w-full min-w-[1100px] text-xs">
               <thead><tr className="bg-slate-50 text-left text-slate-500">

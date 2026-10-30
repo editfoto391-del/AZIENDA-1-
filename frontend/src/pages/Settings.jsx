@@ -80,6 +80,7 @@ function AccessTab({ users, companies, loading, currentUserId, isPrimaryOwner, o
                   const count = adminCounts[company.id] || 0;
                   return <td key={company.id} className="py-3 pr-3">
                     {role === "owner" ? <Badge cls="bg-amber-50 text-amber-800 border-amber-200">Owner</Badge> :
+                      account.is_worker ? <Badge cls="bg-slate-100 text-slate-600 border-slate-200">{role === "none" ? "No access" : "Worker"}</Badge> :
                       <>
                         <select aria-label={`${company.name} role for ${account.username}`} value={role}
                           onChange={(event) => onRoleChange(account, company.id, event.target.value)}
@@ -103,7 +104,7 @@ function AccessTab({ users, companies, loading, currentUserId, isPrimaryOwner, o
                 </td>
                 <td className="py-3 text-xs text-slate-600">{account.current_company_id ? companyName(account.current_company_id) : "-"}<p className="mt-1 text-slate-400">{account.last_login ? fmtDateTime(account.last_login) : "No login yet"}</p></td>
                 <td className="py-3 text-right whitespace-nowrap">
-                  {isPrimaryOwner && !account.is_owner && account.active !== false && <button type="button" onClick={() => { setOwnerTarget(account); setOwnerPassword(""); setOwnerCompanyId(account.company_ids?.[0] || companies[0]?.id || ""); }} title={`Make ${account.username} a company owner`} aria-label={`Make ${account.username} a company owner`} className="rounded p-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-50" data-testid={`make-owner-${account.id}`}>Make company owner</button>}
+                  {isPrimaryOwner && !account.is_owner && !account.is_worker && account.active !== false && <button type="button" onClick={() => { setOwnerTarget(account); setOwnerPassword(""); setOwnerCompanyId(account.company_ids?.[0] || companies[0]?.id || ""); }} title={`Make ${account.username} a company owner`} aria-label={`Make ${account.username} a company owner`} className="rounded p-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-50" data-testid={`make-owner-${account.id}`}>Make company owner</button>}
                   {!account.is_owner && account.id !== currentUserId && <button type="button" onClick={() => onRemove(account)} title={`Remove ${account.username}`} aria-label={`Remove ${account.username}`} className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" data-testid={`remove-user-${account.id}`}><Trash2 size={16} /></button>}
                 </td>
               </tr>))}</tbody>
@@ -610,7 +611,7 @@ export default function Settings() {
           <Card className="p-5 space-y-4" data-testid="supervisor-password-settings">
             <div>
               <h3 className="font-bold text-slate-800 font-display">Supervisor password</h3>
-              <p className="mt-1 text-sm text-slate-500">{supervisorStatusLoading ? "Checking password status..." : supervisorConfigured ? "Configured for this profile. It is required to edit existing invoices and buyings." : "Not configured. Until one is set, active admin/owner passwords remain valid."}</p>
+              <p className="mt-1 text-sm text-slate-500">{supervisorStatusLoading ? "Checking password status..." : supervisorConfigured ? "Configured for this profile. It is required for invoice changes, payment reversals, expense entry or changes, completed Fleet costs, and recurring purchase changes." : "Not configured. Until one is set, active admin/owner passwords remain valid."}</p>
               <p className="mt-1 text-xs text-slate-500">Each company profile must use a different supervisor password. The current password cannot be displayed; set a new one to replace it.</p>
             </div>
             <Input label="New supervisor password (at least 8 characters)" type="password" minLength={8} autoComplete="new-password" value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} data-testid="supervisor-password-settings-input" />

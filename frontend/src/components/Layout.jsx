@@ -2,42 +2,42 @@ import { NavLink, useNavigate, Outlet, useLocation } from "react-router-dom";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
-  LayoutDashboard, Users, FileText, Boxes, Factory, CalendarCheck,
+  LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
   Truck, Menu, X, LogOut, Search, Bell, Layers,
-  ClipboardList, Banknote, Wrench, Wallet, ShoppingCart, ChevronDown, Building2, Settings as Cog, ClipboardCheck, LockKeyhole,
+  ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart, ChevronDown, Building2, Handshake, Settings as Cog, ClipboardCheck, LockKeyhole,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
 import { preloadPage } from "@/lib/pageLoaders";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { companyBrandName, companyProfileName } from "@/lib/company";
+import { companyBrandName, companyProfileName, dedicatedCompanyDomain } from "@/lib/company";
 
 const NAV_GROUPS = [
   { label: "Overview", items: [
     { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, section: "dashboard" },
   ] },
   { label: "Sales", items: [
-    { to: "/customers", label: "Customers", icon: Users, section: "customers" },
-    { to: "/orders", label: "Orders", icon: ClipboardList, section: "orders" },
-    { to: "/invoices", label: "Invoice", icon: FileText, section: "invoices" },
-    { to: "/client-payments", label: "Clients payment and balances", icon: Wallet, section: "client-payments" },
+    { to: "/customers", label: "Customers", icon: ContactRound, section: "customers" },
+    { to: "/orders", label: "Orders", icon: ShoppingBag, section: "orders" },
+    { to: "/invoices", label: "Invoice", icon: ReceiptText, section: "invoices" },
+    { to: "/client-payments", label: "Clients payment and balances", icon: HandCoins, section: "client-payments" },
   ] },
   { label: "Fulfilment", items: [
     { to: "/deliveries", label: "Deliveries", icon: Truck, section: "deliveries" },
   ] },
   { label: "Purchasing", items: [
+    { to: "/grv", label: "GRV", icon: ClipboardCheck, section: "grv" },
+    { to: "/suppliers", label: "Suppliers", icon: Handshake, section: "suppliers" },
     { to: "/buyings", label: "Buyings", icon: ShoppingCart, section: "buyings" },
-    { to: "/suppliers", label: "Suppliers", icon: Building2, section: "suppliers" },
   ] },
   { label: "Operations", items: [
-    { to: "/stock", label: "Stock", icon: Boxes, section: "stock" },
+    { to: "/stock", label: "Stock", icon: Package, section: "stock" },
     { to: "/production", label: "Production", icon: Factory, section: "production" },
-    { to: "/fleet", label: "Fleet", icon: Wrench, section: "fleet" },
+    { to: "/fleet", label: "Fleet", icon: CarFront, section: "fleet" },
   ] },
   { label: "Finance & team", items: [
-    { to: "/grv", label: "GRV", icon: ClipboardCheck, section: "grv" },
-    { to: "/expenses", label: "Expenses", icon: Banknote, section: "expenses" },
-    { to: "/daily-report", label: "Daily Report", icon: FileText, section: "daily-report" },
+    { to: "/expenses", label: "Expenses", icon: Receipt, section: "expenses" },
+    { to: "/daily-report", label: "Daily Report", icon: ChartNoAxesCombined, section: "daily-report" },
     { to: "/attendance", label: "Attendance", icon: CalendarCheck, section: "attendance" },
   ] },
   { label: "Administration", items: [
@@ -149,7 +149,12 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
   const reduceMotion = useReducedMotion();
   const navGroups = NAV_GROUPS.map((group) => ({
     ...group,
-    items: group.items.filter((item) => !item.companyId || item.companyId === companyId),
+    items: group.items.filter((item) =>
+      (!item.companyId || item.companyId === companyId)
+      && (!user?.is_worker
+        || user.allowed_sections?.includes(item.section)
+        || (item.section === "grv" && user.allowed_sections?.includes("costs")))
+    ),
   })).filter((group) => group.items.length);
   return (
     <>
@@ -205,9 +210,13 @@ export default function Layout() {
   const [profiles, setProfiles] = useState([]);
   const [switching, setSwitching] = useState(false);
   const nav = useNavigate();
+  const dedicatedDomain = dedicatedCompanyDomain();
 
   useEffect(() => { api.get("/companies/profiles").then(setProfiles).catch(() => {}); }, []);
-  const availableProfiles = profiles.filter((profile) => user?.company_ids?.includes(profile.id));
+  const availableProfiles = profiles.filter((profile) =>
+    user?.company_ids?.includes(profile.id)
+    && (!dedicatedDomain || user?.is_worker || profile.id === dedicatedDomain.companyId)
+  );
   const activeProfile = availableProfiles.find((profile) => profile.id === user?.company_id);
   const activeBrandName = companyBrandName(activeProfile?.id);
   const changeCompany = async (companyId) => {
@@ -229,8 +238,8 @@ export default function Layout() {
         {open && (
         <motion.div key="mobile-navigation" className="lg:hidden fixed inset-0 z-50 flex" initial={reduceMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={reduceMotion ? { duration: 0 } : { duration: 0.16 }}>
           <motion.div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setOpen(false)} />
-          <motion.aside className="liquid-glass-dark relative w-64 flex flex-col bg-[hsl(222_47%_11%)]" initial={reduceMotion ? false : { x: -36, opacity: 0.85 }} animate={{ x: 0, opacity: 1 }} exit={{ x: -24, opacity: 0 }} transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 360, damping: 34, mass: 0.7 }}>
-            <button className="absolute top-5 right-4 text-slate-500" onClick={() => setOpen(false)} aria-label="Close navigation">
+          <motion.aside className="mobile-nav-panel liquid-glass-dark relative flex w-[min(18rem,calc(100vw-2.5rem))] flex-col bg-[hsl(222_47%_11%)]" style={{ paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }} initial={reduceMotion ? false : { x: -36, opacity: 0.85 }} animate={{ x: 0, opacity: 1 }} exit={{ x: -24, opacity: 0 }} transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 360, damping: 34, mass: 0.7 }}>
+            <button className="absolute right-3 top-3 rounded-full p-2 text-slate-300 hover:bg-white/10" onClick={() => setOpen(false)} aria-label="Close navigation">
               <X size={22} />
             </button>
             <SidebarContent onNav={() => setOpen(false)} companyName={activeBrandName} companyId={user?.company_id} user={user} />
@@ -241,7 +250,7 @@ export default function Layout() {
 
       <div className="lg:pl-64 print:pl-0">
         {/* Topbar */}
-        <header className="no-print liquid-glass-surface sticky top-0 z-20 h-16 border-b border-white/70 flex items-center gap-4 px-4 sm:px-6">
+        <header className="mobile-topbar no-print liquid-glass-surface sticky top-0 z-20 flex h-16 items-center gap-2 border-b border-white/70 px-3 sm:gap-4 sm:px-6">
           <motion.button whileHover={reduceMotion ? undefined : { scale: 1.04, rotate: 0.5 }} whileTap={reduceMotion ? undefined : { scale: 0.96 }} transition={{ type: "spring", stiffness: 440, damping: 24 }} className="lg:hidden rounded-full p-2 text-slate-600 hover:bg-white/40" onClick={() => setOpen(true)} aria-label="Open navigation" data-testid="menu-toggle">
             <Menu size={22} />
           </motion.button>
@@ -267,7 +276,7 @@ export default function Layout() {
                 aria-expanded={profileMenuOpen}
                 aria-haspopup="menu"
                 data-testid="company-profile-menu"
-                className="flex max-w-36 sm:max-w-56 items-center gap-2 rounded-md border border-border bg-white px-2 py-2 text-left text-xs font-semibold text-slate-700 hover:border-primary/50 disabled:opacity-60"
+                className="flex max-w-28 items-center gap-1.5 rounded-md border border-border bg-white px-2 py-2 text-left text-xs font-semibold text-slate-700 hover:border-primary/50 disabled:opacity-60 sm:max-w-56 sm:gap-2"
               >
                 <Building2 size={15} className="shrink-0 text-primary" />
                 <span className="truncate">{companyProfileName(activeProfile?.id) || "Company"}</span>
@@ -321,7 +330,7 @@ export default function Layout() {
           </div>
         </header>
 
-        <main className="p-4 sm:p-6 lg:p-8 max-w-[1500px] mx-auto">
+        <main className="min-w-0 p-3 sm:p-6 lg:p-8 max-w-[1500px] mx-auto">
           <Suspense fallback={<div className="text-slate-400">Loading...</div>}>
             <AnimatedOutlet />
           </Suspense>

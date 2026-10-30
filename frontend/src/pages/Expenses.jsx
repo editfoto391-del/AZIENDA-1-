@@ -47,6 +47,8 @@ export default function Expenses() {
   const [month, setMonth] = useState("");
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState(null);
+  const [supervisorPassword, setSupervisorPassword] = useState("");
 
   const load = () => {
     api.get("/expenses").then(setList).catch((e) => { toast.error(apiError(e)); setList([]); });
@@ -60,20 +62,53 @@ export default function Expenses() {
   const save = async () => {
     if (!modal.description.trim()) return toast.error("Description required");
     if (!(Number(modal.amount) > 0)) return toast.error("Amount must be greater than 0");
-    if (busy) return; setBusy(true);
-    try {
-      const payload = { ...modal, amount: Number(modal.amount) };
-      if (modal.id) await api.put(`/expenses/${modal.id}`, payload);
-      else await api.post("/expenses", payload);
-      toast.success("Expense saved"); setModal(null); load();
-    } catch (e) { toast.error(apiError(e)); } finally { setBusy(false); }
+    if (busy) return;
+    const reason = modal.id ? window.prompt("Reason for this expense change (required):") : "";
+    if (modal.id && reason === null) return;
+    if (modal.id && !reason.trim()) return toast.error("A reason is required to edit an expense");
+    setPendingAction({ action: modal.id ? "edit" : "create", expense: { ...modal }, reason: reason?.trim() || "" });
   };
 
   const remove = async (e) => {
     const reason = window.prompt(`Void expense "${e.description}" (${fmtMoney(e.amount)})? It stays in history. Reason:`);
     if (reason === null) return;
     if (!reason.trim()) return toast.error("A reason is required");
-    try { await api.post(`/expenses/${e.id}/void`, { reason }); toast.success("Expense voided"); load(); } catch (err) { toast.error(apiError(err)); }
+    setPendingAction({ action: "void", expense: e, reason: reason.trim() });
+  };
+
+  const authorizeAction = async (event) => {
+    event.preventDefault();
+    if (!pendingAction || !supervisorPassword || busy) return;
+    setBusy(true);
+    try {
+      const { action, expense, reason } = pendingAction;
+      const approval = action === "create"
+        ? await api.post("/expenses/authorize-create", { password: supervisorPassword })
+        : await api.post(`/expenses/${expense.id}/authorize-action`, { password: supervisorPassword, action });
+      const supervisor_authorization = approval.authorization_id;
+      if (action === "void") {
+        await api.post(`/expenses/${expense.id}/void`, { reason, supervisor_authorization });
+        toast.success("Expense voided");
+      } else {
+        const payload = {
+          ...expense,
+          amount: Number(expense.amount),
+          edit_reason: reason,
+          supervisor_authorization,
+        };
+        if (action === "edit") await api.put(`/expenses/${expense.id}`, payload);
+        else await api.post("/expenses", payload);
+        toast.success("Expense saved");
+        setModal(null);
+      }
+      setPendingAction(null);
+      setSupervisorPassword("");
+      load();
+    } catch (e) {
+      toast.error(apiError(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -184,6 +219,16 @@ export default function Expenses() {
           <Input label="Notes" value={modal.notes || ""} onChange={(e) => setModal({ ...modal, notes: e.target.value })} data-testid="expense-notes-input" />
           <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setModal(null)}>Cancel</Btn><Btn disabled={busy} onClick={save} data-testid="save-expense-btn">Save Expense</Btn></div>
         </div>}
+      </Modal>
+      <Modal open={!!pendingAction} onClose={() => { setPendingAction(null); setSupervisorPassword(""); }} title="Supervisor approval required">
+        {pendingAction && <form onSubmit={authorizeAction} className="space-y-4" data-testid="expense-authorization-form">
+          <p className="text-sm text-slate-600">Enter the supervisor password to {pendingAction.action === "create" ? "record this expense" : pendingAction.action === "edit" ? "edit this expense" : "void this expense"}. Approval is required for every user role.</p>
+          <Input label="Supervisor password" type="password" autoComplete="current-password" autoFocus required value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} data-testid="expense-supervisor-password-input" />
+          <div className="flex justify-end gap-2">
+            <Btn type="button" variant="outline" onClick={() => { setPendingAction(null); setSupervisorPassword(""); }}>Cancel</Btn>
+            <Btn type="submit" disabled={busy} data-testid="authorize-expense-action-btn">{busy ? "Checking..." : "Approve action"}</Btn>
+          </div>
+        </form>}
       </Modal>
     </div>
   );

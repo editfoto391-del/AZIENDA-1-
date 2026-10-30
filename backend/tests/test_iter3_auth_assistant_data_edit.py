@@ -156,6 +156,18 @@ class TestAssistant:
 
 
 # ---- Invoice edit ----
+def supervisor_authorization(H, iid, action="edit", target_id=None):
+    if action == "edit":
+        path = f"/invoices/{iid}/authorize-edit"
+        body = {"password": ADMIN_PW}
+    else:
+        path = f"/invoices/{iid}/authorize-action"
+        body = {"password": ADMIN_PW, "action": action, "target_id": target_id}
+    response = requests.post(f"{API}{path}", json=body, headers=H)
+    assert response.status_code == 200, response.text
+    return response.json()["authorization_id"]
+
+
 class TestInvoiceEdit:
     def test_edit_flow(self, H):
         c = next(c for c in requests.get(f"{API}/customers", headers=H).json() if c["name"] == "ABBAS QUMBO")
@@ -167,7 +179,10 @@ class TestInvoiceEdit:
         assert inv["total"] == 342
         # flag as opening balance temporarily to verify it is preserved
         mdb.invoices.update_one({"id": iid}, {"$set": {"opening_balance": True}})
-        r = requests.put(f"{API}/invoices/{iid}", json={**base, "items": [{**base["items"][0], "qty": 3}], "edit_reason": "test qty"}, headers=H)
+        edit_body = {**base, "items": [{**base["items"][0], "qty": 3}], "edit_reason": "test qty"}
+        assert requests.put(f"{API}/invoices/{iid}", json=edit_body, headers=H).status_code == 403
+        edit_body["supervisor_authorization"] = supervisor_authorization(H, iid)
+        r = requests.put(f"{API}/invoices/{iid}", json=edit_body, headers=H)
         assert r.status_code == 200, r.text
         e = r.json()
         assert e["number"] == num and e["total"] == 513 and e.get("opening_balance") is True
@@ -177,18 +192,28 @@ class TestInvoiceEdit:
         assert "items" in fields and "total" in fields and fields["total"]["old"] == 342 and fields["total"]["new"] == 513
         g = requests.get(f"{API}/invoices/{iid}", headers=H).json()
         assert g["total"] == 513 and g["number"] == num
-        r = requests.put(f"{API}/invoices/{iid}", json={**base, "opening_balance": False, "edit_reason": "convert balance"}, headers=H)
+        edit_body = {**base, "opening_balance": False, "edit_reason": "convert balance",
+                 "supervisor_authorization": supervisor_authorization(H, iid)}
+        r = requests.put(f"{API}/invoices/{iid}", json=edit_body, headers=H)
         assert r.status_code == 200, r.text
         assert not r.json().get("opening_balance")
         mdb.invoices.update_one({"id": iid}, {"$unset": {"opening_balance": ""}})
         # pay 400, then edit below paid
         p = requests.post(f"{API}/invoices/{iid}/payments", json={"amount": 400}, headers=H)
         assert p.status_code == 200, p.text
-        r = requests.put(f"{API}/invoices/{iid}", json={**base, "edit_reason": "below"}, headers=H)
+        edit_body = {**base, "edit_reason": "below",
+                 "supervisor_authorization": supervisor_authorization(H, iid)}
+        r = requests.put(f"{API}/invoices/{iid}", json=edit_body, headers=H)
         assert r.status_code == 400 and "lower than payments" in r.text, r.text
         # reverse payment, void, edit voided
         pid = p.json()["id"]
-        assert requests.post(f"{API}/payments/{pid}/reverse", json={"reason": "TEST cleanup"}, headers=H).status_code == 200
-        assert requests.post(f"{API}/invoices/{iid}/void", json={"reason": "TEST cleanup"}, headers=H).status_code == 200
+        reverse_body = {"reason": "TEST cleanup"}
+        assert requests.post(f"{API}/payments/{pid}/reverse", json=reverse_body, headers=H).status_code == 403
+        reverse_body["supervisor_authorization"] = supervisor_authorization(H, iid, "reverse_payment", pid)
+        assert requests.post(f"{API}/payments/{pid}/reverse", json=reverse_body, headers=H).status_code == 200
+        void_body = {"reason": "TEST cleanup"}
+        assert requests.post(f"{API}/invoices/{iid}/void", json=void_body, headers=H).status_code == 403
+        void_body["supervisor_authorization"] = supervisor_authorization(H, iid, "void")
+        assert requests.post(f"{API}/invoices/{iid}/void", json=void_body, headers=H).status_code == 200
         r = requests.put(f"{API}/invoices/{iid}", json={**base, "edit_reason": "x"}, headers=H)
         assert r.status_code == 400 and "void" in r.text.lower()

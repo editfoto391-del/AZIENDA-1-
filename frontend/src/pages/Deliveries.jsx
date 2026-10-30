@@ -5,6 +5,7 @@ import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate } from "@/lib/format";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal, PageHeader, Empty } from "@/components/common";
 import { Truck, Plus, Send, Lightbulb, Car, Trash2 } from "lucide-react";
+import BarcodeScanner from "@/components/BarcodeScanner";
 
 const STATUSES = ["Planned", "Assigned", "Ready", "Dispatched", "Partially Delivered", "Delivered", "Failed", "Cancelled"];
 const META = {
@@ -80,6 +81,25 @@ export default function Deliveries() {
 
   const addItem = () => setModal({ ...modal, items: [...(modal.items || []), { stock_id: "", qty: 1 }] });
   const setItem = (i, patch) => { const items = [...modal.items]; items[i] = { ...items[i], ...patch }; setModal({ ...modal, items }); };
+  const scanDeliveryProduct = async (code) => {
+    try {
+      const product = await api.post("/products/scan", {
+        code,
+        scan_id: globalThis.crypto?.randomUUID?.(),
+      });
+      setModal((current) => {
+        if (!current) return current;
+        const items = [...(current.items || [])];
+        const existingIndex = items.findIndex((item) => item.stock_id === product.stock_id);
+        if (existingIndex >= 0) items[existingIndex] = { ...items[existingIndex], qty: Number(items[existingIndex].qty || 0) + 1 };
+        else items.push({ stock_id: product.stock_id, qty: 1 });
+        return { ...current, items };
+      });
+      toast.success(`${product.product} · ${product.dimensions} added to this delivery`);
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
 
   return (
     <div>
@@ -162,6 +182,7 @@ export default function Deliveries() {
 
           <div>
             <div className="flex items-center justify-between mb-2"><span className="text-xs font-semibold text-slate-500">Dispatch Items (deduct stock)</span><button onClick={addItem} className="text-primary text-xs font-semibold">+ Add item</button></div>
+            {!modal.dispatched && <div className="mb-3"><BarcodeScanner onScan={scanDeliveryProduct} disabled={saving} dedupeWindowMs={0} label="Scan product to add it to this delivery" /></div>}
             {(modal.items || []).map((it, i) => (
               <div key={i} className="flex gap-2 mb-2">
                 <select value={it.stock_id} onChange={(e) => setItem(i, { stock_id: e.target.value })} className="flex-1 rounded border border-input px-2 py-1.5 text-sm">

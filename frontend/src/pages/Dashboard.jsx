@@ -6,10 +6,12 @@ import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, today, STATUS_META } from "@/lib/format";
 import { Btn, Card, Badge, Input, Modal, Select } from "@/components/common";
 import { useAuth } from "@/context/AuthContext";
+import { dedicatedCompanyDomain } from "@/lib/company";
 import {
   Receipt, Wallet, AlertTriangle, Boxes, Plus, UserPlus, CreditCard,
   PackagePlus, Factory, CalendarCheck, Truck, TrendingUp, ArrowRight, Banknote, ClipboardList, LockKeyhole,
   Pencil, Trash2,
+  Eye, Copy, RefreshCw, ShieldOff,
 } from "lucide-react";
 
 const QUICK = [
@@ -118,6 +120,7 @@ function DashboardSkeleton() {
 export default function Dashboard() {
   const nav = useNavigate();
   const { user } = useAuth();
+  const dedicatedDomain = dedicatedCompanyDomain();
   const [d, setD] = useState(null);
   const [period, setPeriod] = useState("month");
   const [loadingError, setLoadingError] = useState("");
@@ -133,22 +136,39 @@ export default function Dashboard() {
   const [comparisonError, setComparisonError] = useState("");
   const [workers, setWorkers] = useState([]);
   const [companies, setCompanies] = useState([]);
+  const [workerCompanyId, setWorkerCompanyId] = useState(user?.company_id || dedicatedDomain?.companyId || "");
   const [workerModalOpen, setWorkerModalOpen] = useState(false);
   const [workerSaving, setWorkerSaving] = useState(false);
+  const [workerLinkOpen, setWorkerLinkOpen] = useState(false);
+  const [workerLinkInfo, setWorkerLinkInfo] = useState(null);
+  const [workerLinkLoading, setWorkerLinkLoading] = useState(false);
+  const [workerLinkSaving, setWorkerLinkSaving] = useState(false);
   const [workerDraft, setWorkerDraft] = useState({
     name: "", username: "", email: "", worker_role: "", password: "",
-    company_id: user?.company_id || "", allowed_sections: ["invoices"],
+    company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
   });
 
   useEffect(() => {
-    if (!user?.is_admin) return;
+    if (!user?.is_owner) return;
     api.get("/companies/profiles")
-      .then((companyList) => setCompanies(companyList.filter((company) => user.admin_company_ids?.includes(company.id))))
-      .catch((error) => toast.error(apiError(error)));
-    api.get("/access/workers", { company_id: user.company_id })
-      .then(setWorkers)
+      .then((companyList) => {
+        const accessibleCompanies = companyList.filter((company) =>
+          user.admin_company_ids?.includes(company.id)
+          && (!dedicatedDomain || user.is_worker || company.id === dedicatedDomain.companyId)
+        );
+        setCompanies(accessibleCompanies);
+        setWorkerCompanyId((current) => dedicatedDomain?.companyId || current || user.company_id || accessibleCompanies[0]?.id || "");
+      })
       .catch((error) => toast.error(apiError(error)));
   }, [user]);
+
+  useEffect(() => {
+    if (!user?.is_owner || !workerCompanyId) return;
+    setWorkers([]);
+    api.get("/access/workers", { company_id: workerCompanyId })
+      .then(setWorkers)
+      .catch((error) => toast.error(apiError(error)));
+  }, [user, workerCompanyId]);
 
   useEffect(() => {
     let active = true;
@@ -217,17 +237,18 @@ export default function Dashboard() {
         const updated = await api.put(`/access/workers/${workerDraft.id}?company_id=${encodeURIComponent(workerDraft.company_id)}`, {
           worker_role: workerDraft.worker_role,
           allowed_sections: workerDraft.allowed_sections,
+          stock_only: workerDraft.stock_only,
         });
         setWorkers((current) => current.map((worker) => worker.id === updated.id ? updated : worker));
         toast.success("Worker access updated");
       } else {
         const created = await api.post("/access/workers", workerDraft);
-        if (created.company_id === workerDraft.company_id) setWorkers((current) => [...current, created]);
+        if (created.company_id === workerCompanyId) setWorkers((current) => [...current, created]);
         toast.success("Worker added");
       }
       setWorkerDraft({
         name: "", username: "", email: "", worker_role: "", password: "",
-        company_id: user?.company_id || "", allowed_sections: ["invoices"],
+        company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
       });
       setWorkerModalOpen(false);
     } catch (error) {
@@ -245,11 +266,6 @@ export default function Dashboard() {
   const activeCompanyName = companies.find((company) => company.id === workerDraft.company_id)?.name || workerDraft.company_id;
   const changeWorkerCompany = async (companyId) => {
     setWorkerDraft((current) => ({ ...current, company_id: companyId }));
-    try {
-      setWorkers(await api.get("/access/workers", { company_id: companyId }));
-    } catch (error) {
-      toast.error(apiError(error));
-    }
   };
   const editWorker = (worker) => {
     setWorkerDraft({
@@ -261,6 +277,7 @@ export default function Dashboard() {
       password: "",
       company_id: worker.company_id,
       allowed_sections: [...new Set((worker.allowed_sections || []).map((section) => section === "costs" ? "grv" : section))],
+      stock_only: worker.stock_only === true,
     });
     setWorkerModalOpen(true);
   };
@@ -274,6 +291,70 @@ export default function Dashboard() {
       toast.error(apiError(error));
     }
   };
+  const workerLinkUrl = (accessToken) =>
+    accessToken ? `${window.location.origin}/worker-access/${accessToken}` : "";
+  const openWorkerLink = async (worker) => {
+    setWorkerLinkOpen(true);
+    setWorkerLinkInfo(null);
+    setWorkerLinkLoading(true);
+    try {
+      const params = `?company_id=${encodeURIComponent(worker.company_id)}`;
+      let info = await api.getUncached(`/access/workers/${worker.id}/personal-link${params}`);
+      if (info.active && !info.link_active) {
+        info = await api.post(`/access/workers/${worker.id}/personal-link${params}`, {});
+      }
+      setWorkerLinkInfo({ ...info, access_url: workerLinkUrl(info.access_token) });
+    } catch (error) {
+      toast.error(apiError(error));
+      setWorkerLinkOpen(false);
+    } finally {
+      setWorkerLinkLoading(false);
+    }
+  };
+  const regenerateWorkerLink = async () => {
+    if (!workerLinkInfo || workerLinkSaving) return;
+    setWorkerLinkSaving(true);
+    try {
+      const params = `?company_id=${encodeURIComponent(workerLinkInfo.company_id)}`;
+      const info = await api.post(
+        `/access/workers/${workerLinkInfo.id}/personal-link/regenerate${params}`,
+        {},
+      );
+      setWorkerLinkInfo({ ...info, access_url: workerLinkUrl(info.access_token) });
+      toast.success("Personal access link regenerated");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setWorkerLinkSaving(false);
+    }
+  };
+  const revokeWorkerLink = async () => {
+    if (!workerLinkInfo || workerLinkSaving) return;
+    if (!window.confirm(`Revoke access for ${workerLinkInfo.name}? Their active sessions will be ended.`)) return;
+    setWorkerLinkSaving(true);
+    try {
+      const params = `?company_id=${encodeURIComponent(workerLinkInfo.company_id)}`;
+      const info = await api.del(`/access/workers/${workerLinkInfo.id}/personal-link${params}`);
+      setWorkerLinkInfo({ ...info, access_url: "" });
+      setWorkers((current) => current.map((worker) => worker.id === info.id
+        ? { ...worker, active: false }
+        : worker));
+      toast.success("Worker access revoked");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setWorkerLinkSaving(false);
+    }
+  };
+  const copyWorkerLink = async () => {
+    if (!workerLinkInfo?.access_url) return;
+    try {
+      await navigator.clipboard.writeText(workerLinkInfo.access_url);
+      toast.success("Personal access link copied");
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
 
   return (
     <div className="dashboard-stagger space-y-6">
@@ -283,10 +364,17 @@ export default function Dashboard() {
         <h1 className="text-3xl sm:text-4xl font-normal text-slate-900 font-display mt-1">Business overview</h1>
         <p className="text-sm text-slate-500 mt-1">Performance, cash flow and daily operations</p>
         </div>
-        {user?.is_admin && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"] }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
+        {user?.is_owner && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
 
-      {user?.is_admin && <Section title="Workers" icon={UserPlus} action={<span className="text-xs text-slate-400">{workers.length} workers</span>}>
+      {user?.is_owner && <Section title="Workers" icon={UserPlus} action={<div className="flex items-center gap-3">
+        <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">Company
+          <select value={workerCompanyId} onChange={(event) => setWorkerCompanyId(event.target.value)} className="rounded-md border border-input bg-white px-2 py-1.5 text-sm" data-testid="worker-company-filter">
+            {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
+          </select>
+        </label>
+        <span className="text-xs text-slate-400">{workers.length} workers</span>
+      </div>}>
         {workers.length === 0 ? <p className="text-sm text-slate-400">No workers added for this company yet.</p> : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[560px] text-sm">
@@ -300,6 +388,7 @@ export default function Dashboard() {
                   <td className="py-3 text-slate-600">{companies.find((company) => company.id === worker.company_id)?.name || worker.company_id}</td>
                   <td className="py-3 text-slate-600">{(worker.allowed_sections || []).map((section) => WORKER_SECTION_OPTIONS.find(([key]) => key === section)?.[1] || section).join(", ")}</td>
                   <td className="py-3 text-right whitespace-nowrap">
+                    <button type="button" onClick={() => openWorkerLink(worker)} aria-label={`View personal access link for ${worker.name}`} className="rounded p-1.5 text-slate-400 hover:text-primary" data-testid={`worker-link-${worker.id}`}><Eye size={15} /></button>
                     <button type="button" onClick={() => editWorker(worker)} aria-label={`Edit access for ${worker.name}`} className="rounded p-1.5 text-slate-400 hover:text-primary" data-testid={`edit-worker-${worker.id}`}><Pencil size={15} /></button>
                     <button type="button" onClick={() => deleteWorker(worker)} aria-label={`Remove ${worker.name}`} className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" data-testid={`delete-worker-${worker.id}`}><Trash2 size={15} /></button>
                   </td>
@@ -310,7 +399,7 @@ export default function Dashboard() {
         )}
       </Section>}
 
-      <Modal open={workerModalOpen} onClose={() => !workerSaving && setWorkerModalOpen(false)} title={workerDraft.id ? "Edit Worker Access" : "Add Worker"} wide>
+      {user?.is_owner && <Modal open={workerModalOpen} onClose={() => !workerSaving && setWorkerModalOpen(false)} title={workerDraft.id ? "Edit Worker Access" : "Add Worker"} wide>
         <form onSubmit={saveWorker} className="space-y-4" data-testid="add-worker-form">
           <div className="grid gap-3 sm:grid-cols-2">
             {workerDraft.id ? <>
@@ -329,10 +418,19 @@ export default function Dashboard() {
               </Select>
             </>}
           </div>
+          <label className="flex items-start gap-2 rounded-md border border-border px-3 py-2 text-sm text-slate-700">
+            <input type="checkbox" checked={workerDraft.stock_only} onChange={(event) => setWorkerDraft((current) => ({
+              ...current,
+              stock_only: event.target.checked,
+              worker_role: event.target.checked ? "Stock Controller" : current.worker_role,
+              allowed_sections: event.target.checked ? ["stock"] : current.allowed_sections,
+            }))} data-testid="worker-stock-only" />
+            <span><span className="block font-semibold">Stock-only sub-user</span><span className="block text-xs text-slate-500">Can access stock only; selling prices are visible, purchase costs are hidden.</span></span>
+          </label>
           <fieldset className="space-y-2">
             <legend className="mb-2 text-sm font-semibold text-slate-700">Sections this worker can access</legend>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {WORKER_SECTION_OPTIONS.map(([section, label]) => (
+              {WORKER_SECTION_OPTIONS.filter(([section]) => !workerDraft.stock_only || section === "stock").map(([section, label]) => (
                 <label key={section} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-slate-700">
                   <input type="checkbox" checked={workerDraft.allowed_sections.includes(section)} onChange={() => toggleWorkerSection(section)} data-testid={`worker-section-${section}`} />
                   {label}
@@ -340,13 +438,65 @@ export default function Dashboard() {
               ))}
             </div>
           </fieldset>
-          <p className="flex items-center gap-2 rounded-md bg-slate-50 p-3 text-xs text-slate-500"><LockKeyhole size={14} /> Other sections stay visible in the menu but remain locked. The worker starts with Invoice access selected.</p>
+          <p className="flex items-center gap-2 rounded-md bg-slate-50 p-3 text-xs text-slate-500"><LockKeyhole size={14} /> Workers with Stock access can see selling prices, never purchase costs. Other sections stay locked; the worker starts with Invoice access selected.</p>
           <div className="flex justify-end gap-2">
             <Btn type="button" variant="outline" onClick={() => setWorkerModalOpen(false)} disabled={workerSaving}>Cancel</Btn>
             <Btn type="submit" disabled={workerSaving || workerDraft.allowed_sections.length === 0} data-testid="worker-save">{workerSaving ? "Saving..." : workerDraft.id ? "Save Access" : "Add Worker"}</Btn>
           </div>
         </form>
-      </Modal>
+      </Modal>}
+
+      {user?.is_owner && <Modal
+        open={workerLinkOpen}
+        onClose={() => !workerLinkSaving && setWorkerLinkOpen(false)}
+        title="Personal worker access"
+      >
+        {workerLinkLoading ? <div className="py-8 text-center text-sm text-slate-500" role="status">Preparing secure access link...</div>
+          : workerLinkInfo && <div className="space-y-5" data-testid="worker-access-link-dialog">
+            <div className="grid gap-3 rounded-xl border border-border/70 bg-white/70 p-4 sm:grid-cols-2">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">Worker</p>
+                <p className="mt-1 font-semibold text-slate-800">{workerLinkInfo.name}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">Assigned role</p>
+                <p className="mt-1 font-semibold text-slate-800">{workerLinkInfo.worker_role}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">Assigned company</p>
+                <p className="mt-1 font-semibold text-slate-800">{workerLinkInfo.company_name}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">Authorized sections</p>
+                <p className="mt-1 font-semibold text-slate-800">{(workerLinkInfo.allowed_sections || [])
+                  .map((section) => WORKER_SECTION_OPTIONS.find(([key]) => key === section)?.[1] || section)
+                  .join(", ")}</p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="worker-personal-access-url" className="text-xs font-bold uppercase tracking-[0.12em] text-slate-500">Personal access link</label>
+              {workerLinkInfo.access_url ? <div className="flex gap-2">
+                <input id="worker-personal-access-url" readOnly value={workerLinkInfo.access_url} data-testid="worker-personal-access-url"
+                  className="min-w-0 flex-1 rounded-lg border border-border bg-slate-50 px-3 py-2.5 text-xs text-slate-700 outline-none" />
+                <Btn type="button" onClick={copyWorkerLink} data-testid="worker-copy-access-link"><Copy size={15} /> Copy Link</Btn>
+              </div> : <p className="rounded-lg border border-dashed border-border bg-slate-50 px-3 py-3 text-sm text-slate-500">
+                {workerLinkInfo.active
+                  ? "No personal link exists yet."
+                  : "Access is revoked. Generate a new link to restore this worker's access."}
+              </p>}
+              <p className="text-xs text-slate-500">The link identifies the worker but does not replace their password. Access always follows the current company and section permissions.</p>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2 border-t border-border/70 pt-4">
+              {workerLinkInfo.link_active && <Btn type="button" variant="danger" onClick={revokeWorkerLink} disabled={workerLinkSaving} data-testid="worker-revoke-access">
+                <ShieldOff size={15} /> Revoke Access
+              </Btn>}
+              <Btn type="button" variant="outline" onClick={regenerateWorkerLink}
+                disabled={workerLinkSaving || !workerLinkInfo.can_regenerate} data-testid="worker-regenerate-access-link">
+                <RefreshCw size={15} /> {workerLinkInfo.link_active ? "Regenerate Link" : "Generate Link"}
+              </Btn>
+            </div>
+          </div>}
+      </Modal>}
 
       <section data-testid="dashboard-monthly-summary">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">

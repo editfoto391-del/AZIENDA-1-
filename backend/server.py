@@ -5,7 +5,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 load_dotenv(ROOT_DIR / '.env.multicompany')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, Query
 from fastapi.responses import StreamingResponse
 import json, re
 import shutil
@@ -17,6 +17,8 @@ from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 import uuid, logging, jwt, bcrypt, math, asyncio
+import base64, hashlib, secrets
+from cryptography.fernet import Fernet
 from pymongo import IndexModel, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
@@ -199,6 +201,31 @@ def make_token(uid, email, company_id=DEFAULT_COMPANY_ID, session_id=None):
                "sid": session_id or new_id(), "exp": datetime.now(timezone.utc) + timedelta(days=7)}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
 
+def worker_access_token_hash(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def encrypt_worker_access_token(token):
+    key = base64.urlsafe_b64encode(hashlib.sha256(JWT_SECRET.encode()).digest())
+    return Fernet(key).encrypt(token.encode()).decode()
+
+def decrypt_worker_access_token(token):
+    key = base64.urlsafe_b64encode(hashlib.sha256(JWT_SECRET.encode()).digest())
+    return Fernet(key).decrypt(token.encode()).decode()
+
+async def find_worker_by_access_token(token):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token or ""):
+        return None
+    token_hash = worker_access_token_hash(token)
+    worker = await base_db.users.find_one({
+        "is_worker": True,
+        "personal_access_token_hash": token_hash,
+        "personal_access_revoked": {"$ne": True},
+        "active": {"$ne": False},
+    }, {"_id": 0})
+    if worker and not secrets.compare_digest(worker.get("personal_access_token_hash", ""), token_hash):
+        return None
+    return worker
+
 USER_PROJ = {"_id": 0, "password_hash": 0}
 OWNER_EMAIL_ALIASES = {"2j2skp87z8@privaterelay.appleid.com"}
 WORKER_SECTIONS = {
@@ -233,6 +260,15 @@ async def user_from_session(token):
 async def authorize_company(user, company_id, session_id=None):
     if not user or user.get("active") is False or user.get("disabled") is True:
         raise HTTPException(401, "Account is disabled")
+    if user.get("is_worker"):
+        if user.get("personal_access_revoked"):
+            raise HTTPException(401, "Worker access has been revoked")
+        worker_companies = [
+            assigned_company for assigned_company, assigned_role in (user.get("company_roles") or {}).items()
+            if assigned_role in ("owner", "admin", "user")
+        ]
+        if company_id not in worker_companies:
+            raise HTTPException(403, "Workers cannot access another company")
     company = await base_db.companies.find_one({"id": company_id, "active": True}, {"_id": 0})
     if not company:
         raise HTTPException(403, "Company is unavailable")
@@ -258,6 +294,41 @@ def enforce_worker_api_access(request, user):
     if path in {"auth/me", "auth/logout", "auth/device", "companies/profiles"}:
         return
 
+    stock_access = "stock" in allowed or user.get("worker_stock_only")
+    if path == "products" and method == "GET" and stock_access:
+        return
+    if path == "products/scan" and method == "POST" and (
+        stock_access or allowed.intersection({"invoices", "production", "orders", "deliveries", "grv"})
+    ):
+        return
+    if re.fullmatch(r"stock/[^/]+/identification", path):
+        if stock_access and method in {"GET", "PUT"}:
+            return
+        raise HTTPException(403, "This worker account cannot manage product identification")
+    if re.fullmatch(r"stock/[^/]+/product-details", path):
+        if stock_access and method == "PUT":
+            return
+        raise HTTPException(403, "This worker account cannot edit product details")
+    if path == "product-identification-stats" and method == "GET" and stock_access:
+        return
+    if "stock" in allowed and path == "prices" and method == "GET":
+        return
+
+    if user.get("worker_stock_only"):
+        if path == "products" and method == "GET":
+            return
+        if path == "stock" and method in {"GET", "POST"}:
+            return
+        if re.fullmatch(r"stock/[^/]+", path) and method == "PUT":
+            return
+        if path == "stock/movements" and method == "GET":
+            return
+        if re.fullmatch(r"stock/[^/]+/movements", path) and method == "POST":
+            return
+        if path == "prices" and method == "GET":
+            return
+        raise HTTPException(403, "This stock-only account cannot access other sections or destructive stock actions")
+
     if "invoices" in allowed:
         if path in {"customers", "prices", "settings"} and method == "GET":
             return
@@ -271,12 +342,25 @@ def enforce_worker_api_access(request, user):
             return
         if re.fullmatch(r"invoices/[^/]+/authorize-edit", path) and method == "POST":
             return
+        if re.fullmatch(r"invoices/[^/]+/authorize-action", path) and method == "POST":
+            return
         if re.fullmatch(r"invoices/[^/]+/issue", path) and method == "POST":
             return
         if "client-payments" in allowed and re.fullmatch(r"invoices/[^/]+/payments", path) and method == "POST":
             return
+        if "client-payments" in allowed and re.fullmatch(r"payments/[^/]+/reverse", path) and method == "POST":
+            return
         if path == "invoices" or path.startswith("invoices/"):
             raise HTTPException(403, "This worker account cannot perform this invoice action")
+
+    if "expenses" in allowed:
+        if path == "expenses/authorize-create" and method == "POST":
+            return
+        if re.fullmatch(r"expenses/[^/]+/authorize-action", path) and method == "POST":
+            return
+
+    if "fleet" in allowed and path == "fleet-expense-authorizations" and method == "POST":
+        return
 
     support_rules = {
         "buyings": [("suppliers", "GET"), ("stock", "GET")],
@@ -378,6 +462,19 @@ async def get_current_user(request: Request):
     user = await db.users.find_one({"id": payload["sub"]}, USER_PROJ)
     if not user:
         raise HTTPException(401, "User not found")
+    if user.get("is_worker"):
+        session = await base_db.user_sessions.find_one({
+            "id": payload.get("sid"), "user_id": user["id"],
+        }, {"_id": 0})
+        if not session:
+            raise HTTPException(401, "Worker session has been revoked")
+        expires_at = session.get("expires_at")
+        if isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at and expires_at < datetime.now(timezone.utc):
+            raise HTTPException(401, "Worker session has expired")
     user = await authorize_company(user, payload.get("company_id") or DEFAULT_COMPANY_ID, payload.get("sid"))
     enforce_worker_api_access(request, user)
     return user
@@ -387,6 +484,7 @@ class LoginIn(BaseModel):
     username: Optional[str] = None
     password: str
     company_id: str = DEFAULT_COMPANY_ID
+    personal_access_token: Optional[str] = Field(default=None, min_length=40, max_length=64)
 
 class RegisterIn(BaseModel):
     name: str
@@ -422,11 +520,13 @@ class CreateWorkerIn(BaseModel):
     password: str
     company_id: str
     allowed_sections: List[str]
+    stock_only: bool = False
     email: Optional[str] = ""
 
 class WorkerAccessUpdateIn(BaseModel):
     worker_role: str
     allowed_sections: List[str]
+    stock_only: bool = False
 
 class UserStatusIn(BaseModel):
     active: bool
@@ -460,6 +560,7 @@ def public_user(u):
             "is_company_owner": role == "owner",
             "is_primary_owner": canonical_email(u.get("email")) == canonical_email(os.environ["ADMIN_EMAIL"]),
             "is_worker": u.get("is_worker", False),
+            "is_stock_only_worker": u.get("is_worker", False) and u.get("worker_stock_only", False),
             "worker_role": u.get("worker_role", ""),
             "allowed_sections": u.get("worker_allowed_sections", []),
             "admin_company_ids": allowed_company_ids(u) if u.get("role") == "owner" else [
@@ -471,6 +572,14 @@ def public_user(u):
 def require_owner(user):
     if user.get("role") != "owner":
         raise HTTPException(403, "Owner access required")
+
+def worker_sections(sections, stock_only=False):
+    if stock_only:
+        return ["stock"]
+    normalized = list(dict.fromkeys(sections))
+    if not normalized or any(section not in WORKER_SECTIONS for section in normalized):
+        raise HTTPException(400, "Choose at least one valid section")
+    return normalized
 
 def require_profile_owner(user):
     if user.get("role") != "owner" and user.get("_active_role") != "owner":
@@ -509,20 +618,35 @@ async def register(body: RegisterIn, user=Depends(get_current_user)):
 
 @api.post("/auth/login")
 async def login(body: LoginIn, response: Response):
-    identifier = canonical_email(body.email or body.username)
-    if not identifier:
-        raise HTTPException(400, "Username or email is required")
-    username_pattern = {"$regex": f"^{re.escape(identifier)}$", "$options": "i"}
-    candidates = await base_db.users.find(
-        {"$or": [{"email": identifier}, {"username": username_pattern}]}, {"_id": 0},
-    ).to_list(20)
-    user = next((candidate for candidate in candidates
-                 if verify_pw(body.password, candidate.get("password_hash", ""))), None)
+    if body.personal_access_token:
+        user = await find_worker_by_access_token(body.personal_access_token)
+        if not user or not verify_pw(body.password, user.get("password_hash", "")):
+            raise HTTPException(401, "Invalid worker access link or password")
+        assigned_companies = [
+            company_id for company_id, assigned_role in (user.get("company_roles") or {}).items()
+            if assigned_role in ("owner", "admin", "user")
+        ]
+        if len(assigned_companies) != 1:
+            raise HTTPException(403, "Worker must be assigned to exactly one company")
+        identifier = user.get("username") or user.get("email") or ""
+        company_id = assigned_companies[0]
+    else:
+        identifier = canonical_email(body.email or body.username)
+        if not identifier:
+            raise HTTPException(400, "Username or email is required")
+        username_pattern = {"$regex": f"^{re.escape(identifier)}$", "$options": "i"}
+        candidates = await base_db.users.find(
+            {"$or": [{"email": identifier}, {"username": username_pattern}]}, {"_id": 0},
+        ).to_list(20)
+        user = next((candidate for candidate in candidates
+                     if verify_pw(body.password, candidate.get("password_hash", ""))), None)
+        company_id = body.company_id or DEFAULT_COMPANY_ID
     if not user:
         raise HTTPException(401, "Invalid email or password")
     if user.get("active") is False or user.get("disabled") is True:
         raise HTTPException(403, "Account is disabled")
-    company_id = body.company_id or DEFAULT_COMPANY_ID
+    if user.get("is_worker") and user.get("personal_access_revoked"):
+        raise HTTPException(403, "Worker access has been revoked")
     role = company_role(user, company_id)
     if role not in ("owner", "admin", "user"):
         raise HTTPException(403, "You do not have access to this company")
@@ -541,7 +665,21 @@ async def me(user=Depends(get_current_user)):
     return public_user(user)
 
 @api.get("/companies/profiles")
-async def company_profiles():
+async def company_profiles(request: Request):
+    authenticated = request.headers.get("Authorization", "").startswith("Bearer ") \
+        or request.cookies.get("session_token")
+    if authenticated:
+        try:
+            user = await get_current_user(request)
+        except HTTPException as error:
+            if error.status_code != 401:
+                raise
+            user = None
+        if user and user.get("is_worker"):
+            company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+            return [{
+                "id": company["id"], "name": company["name"], "username": company["username"],
+            } for company in COMPANY_PROFILES if company["id"] == company_id]
     return [{"id": company["id"], "name": company["name"], "username": company["username"]}
             for company in COMPANY_PROFILES]
 
@@ -722,7 +860,7 @@ def require_admin(user):
 
 @api.get("/access/workers")
 async def get_workers(company_id: str = "", user=Depends(get_current_user)):
-    require_admin(user)
+    require_owner(user)
     company_id = company_id or user["_active_company_id"]
     if company_role(user, company_id) not in ("owner", "admin"):
         raise HTTPException(403, "Administrator access required for this company")
@@ -736,13 +874,130 @@ async def get_workers(company_id: str = "", user=Depends(get_current_user)):
         "username": worker.get("username", ""),
         "worker_role": worker.get("worker_role", ""),
         "allowed_sections": worker.get("worker_allowed_sections", []),
+        "stock_only": worker.get("worker_stock_only", False),
         "company_id": company_id,
         "active": worker.get("active", True),
     } for worker in workers]
 
+async def worker_access_details(worker_id, company_id, user):
+    require_owner(user)
+    if company_role(user, company_id) not in ("owner", "admin"):
+        raise HTTPException(403, "You can only manage workers in a company you administer")
+    worker = await base_db.users.find_one({
+        "id": worker_id, "is_worker": True,
+        f"company_roles.{company_id}": {"$in": ["user", "admin", "owner"]},
+    }, {"_id": 0, "password_hash": 0})
+    if not worker:
+        raise HTTPException(404, "Worker not found in this company")
+    profile = next((item for item in COMPANY_PROFILES if item["id"] == company_id), None)
+    if not profile:
+        raise HTTPException(404, "Company profile not found")
+    encrypted_token = worker.get("personal_access_token_encrypted")
+    token = decrypt_worker_access_token(encrypted_token) if encrypted_token else None
+    link_active = bool(token and not worker.get("personal_access_revoked", False)
+                       and worker.get("active", True))
+    return {
+        "id": worker["id"],
+        "name": worker.get("name", ""),
+        "username": worker.get("username", ""),
+        "worker_role": worker.get("worker_role", ""),
+        "company_id": company_id,
+        "company_name": profile["name"],
+        "allowed_sections": worker.get("worker_allowed_sections", []),
+        "stock_only": worker.get("worker_stock_only", False),
+        "active": worker.get("active", True),
+        "can_regenerate": worker.get("active", True) is not False
+                          or worker.get("personal_access_revoked", False),
+        "link_active": link_active,
+        "access_token": token if link_active else None,
+    }
+
+@api.get("/access/workers/{worker_id}/personal-link")
+async def get_worker_personal_link(
+    worker_id: str, company_id: str, response: Response, user=Depends(get_current_user),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return await worker_access_details(worker_id, company_id, user)
+
+async def issue_worker_personal_link(worker_id, company_id, user, regenerate=False):
+    details = await worker_access_details(worker_id, company_id, user)
+    worker = await base_db.users.find_one({"id": worker_id, "is_worker": True}, {"_id": 0})
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    if details["link_active"] and not regenerate:
+        return details
+    if worker.get("active") is False and not worker.get("personal_access_revoked", False):
+        raise HTTPException(403, "Worker account is disabled")
+    token = secrets.token_urlsafe(32)
+    updates = {
+        "personal_access_token_hash": worker_access_token_hash(token),
+        "personal_access_token_encrypted": encrypt_worker_access_token(token),
+        "personal_access_revoked": False,
+    }
+    if worker.get("personal_access_revoked"):
+        updates["active"] = True
+    await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": updates})
+    await log_audit("user", worker_id, "worker_access_link_regenerated" if regenerate else "worker_access_link_created",
+                    user, after={"company_id": company_id})
+    return {**details, "active": True, "can_regenerate": True, "link_active": True, "access_token": token}
+
+@api.post("/access/workers/{worker_id}/personal-link")
+async def create_worker_personal_link(
+    worker_id: str, company_id: str, response: Response, user=Depends(get_current_user),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return await issue_worker_personal_link(worker_id, company_id, user)
+
+@api.post("/access/workers/{worker_id}/personal-link/regenerate")
+async def regenerate_worker_personal_link(
+    worker_id: str, company_id: str, response: Response, user=Depends(get_current_user),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return await issue_worker_personal_link(worker_id, company_id, user, regenerate=True)
+
+@api.delete("/access/workers/{worker_id}/personal-link")
+async def revoke_worker_personal_link(
+    worker_id: str, company_id: str, user=Depends(get_current_user),
+):
+    details = await worker_access_details(worker_id, company_id, user)
+    result = await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": {
+        "active": False,
+        "personal_access_revoked": True,
+        "personal_access_token_hash": None,
+        "personal_access_token_encrypted": None,
+    }})
+    if result.matched_count != 1:
+        raise HTTPException(404, "Worker not found")
+    await base_db.user_sessions.delete_many({"user_id": worker_id})
+    await log_audit("user", worker_id, "worker_access_link_revoked", user,
+                    before={"company_id": company_id}, after={"active": False})
+    return {**details, "active": False, "can_regenerate": True, "link_active": False, "access_token": None}
+
+@api.get("/worker-access/{token}")
+async def worker_access_link_info(token: str, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    worker = await find_worker_by_access_token(token)
+    if not worker:
+        raise HTTPException(404, "This worker access link is invalid or revoked")
+    company_ids = [
+        company_id for company_id, role in (worker.get("company_roles") or {}).items()
+        if role in ("owner", "admin", "user")
+    ]
+    if len(company_ids) != 1:
+        raise HTTPException(403, "Worker must be assigned to exactly one company")
+    company_id = company_ids[0]
+    profile = next((item for item in COMPANY_PROFILES if item["id"] == company_id), None)
+    if not profile:
+        raise HTTPException(403, "Worker company is unavailable")
+    return {
+        "username": worker.get("username", ""),
+        "company_id": company_id,
+        "company_name": profile["name"],
+    }
+
 @api.post("/access/workers")
 async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
-    require_admin(user)
+    require_owner(user)
     company_id = body.company_id
     if company_role(user, company_id) not in ("owner", "admin"):
         raise HTTPException(403, "You can only add workers to a company you administer")
@@ -755,9 +1010,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         raise HTTPException(400, "Name, username and role are required")
     if len(body.password) < 8:
         raise HTTPException(400, "Password must contain at least 8 characters")
-    sections = list(dict.fromkeys(body.allowed_sections))
-    if not sections or any(section not in WORKER_SECTIONS for section in sections):
-        raise HTTPException(400, "Choose at least one valid section")
+    sections = worker_sections(body.allowed_sections, body.stock_only)
     email = (body.email or "").strip().lower()
     if email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         raise HTTPException(400, "Enter a valid email address")
@@ -778,6 +1031,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "is_worker": True,
         "worker_role": worker_role,
         "worker_allowed_sections": sections,
+        "worker_stock_only": body.stock_only,
         "active": True,
         "auth_provider": "password",
         "created_at": now_iso(),
@@ -790,6 +1044,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
             "worker_role": worker_role,
             "company_id": company_id,
             "allowed_sections": sections,
+            "stock_only": body.stock_only,
         })
     finally:
         active_company_id.reset(company_context)
@@ -800,6 +1055,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "worker_role": worker_role,
         "company_id": company_id,
         "allowed_sections": sections,
+        "stock_only": body.stock_only,
         "active": True,
     }
 
@@ -808,7 +1064,7 @@ async def update_worker_access(
     worker_id: str, body: WorkerAccessUpdateIn, company_id: str,
     user=Depends(get_current_user),
 ):
-    require_admin(user)
+    require_owner(user)
     if company_role(user, company_id) not in ("owner", "admin"):
         raise HTTPException(403, "You can only manage workers in a company you administer")
     worker = await base_db.users.find_one({
@@ -817,17 +1073,19 @@ async def update_worker_access(
     if not worker:
         raise HTTPException(404, "Worker not found in this company")
     worker_role = body.worker_role.strip()
-    sections = list(dict.fromkeys(body.allowed_sections))
+    sections = worker_sections(body.allowed_sections, body.stock_only)
     if not worker_role:
         raise HTTPException(400, "Worker role is required")
-    if not sections or any(section not in WORKER_SECTIONS for section in sections):
-        raise HTTPException(400, "Choose at least one valid section")
-    before = {"worker_role": worker.get("worker_role", ""), "allowed_sections": worker.get("worker_allowed_sections", [])}
+    before = {"worker_role": worker.get("worker_role", ""),
+              "allowed_sections": worker.get("worker_allowed_sections", []),
+              "stock_only": worker.get("worker_stock_only", False)}
     await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": {
         "worker_role": worker_role, "worker_allowed_sections": sections,
+        "worker_stock_only": body.stock_only,
     }})
     await log_audit("user", worker_id, "worker_access_updated", user, before=before,
-                    after={"worker_role": worker_role, "allowed_sections": sections})
+                    after={"worker_role": worker_role, "allowed_sections": sections,
+                           "stock_only": body.stock_only})
     return {
         "id": worker_id,
         "name": worker.get("name", ""),
@@ -835,12 +1093,13 @@ async def update_worker_access(
         "worker_role": worker_role,
         "company_id": company_id,
         "allowed_sections": sections,
+        "stock_only": body.stock_only,
         "active": worker.get("active", True),
     }
 
 @api.delete("/access/workers/{worker_id}")
 async def remove_worker(worker_id: str, company_id: str, user=Depends(get_current_user)):
-    require_admin(user)
+    require_owner(user)
     if company_role(user, company_id) not in ("owner", "admin"):
         raise HTTPException(403, "You can only manage workers in a company you administer")
     worker = await base_db.users.find_one({
@@ -901,6 +1160,7 @@ async def access_users(user=Depends(get_current_user)):
         result.append({"id": account["id"], "name": account.get("name", ""), "email": account.get("email", ""),
             "username": account.get("username", ""), "role": account.get("role", "user"),
             "is_owner": account.get("role") == "owner", "active": account.get("active", True),
+            "is_worker": account.get("is_worker", False),
             "is_primary_owner": canonical_email(account.get("email")) == primary_owner_email,
             "company_roles": memberships, "company_ids": list(memberships), "online": bool(active_sessions),
             "current_company_id": current_session.get("company_id", ""), "last_login": last_login,
@@ -968,6 +1228,8 @@ async def update_user_role(uid: str, body: UserRoleIn, user=Depends(get_current_
     target = await db.users.find_one({"id": uid}, {"_id": 0})
     if not target:
         raise HTTPException(404, "User not found")
+    if target.get("is_worker"):
+        raise HTTPException(400, "Manage worker roles and sections from the Dashboard Workers table")
     if target.get("role") == "owner":
         raise HTTPException(400, "The global owner role cannot be changed")
     if body.company_id not in allowed_company_ids(user):
@@ -1013,6 +1275,8 @@ async def promote_access_user_to_owner(
     target = await base_db.users.find_one({"id": uid}, {"_id": 0})
     if not target:
         raise HTTPException(404, "User not found")
+    if target.get("is_worker"):
+        raise HTTPException(400, "Workers cannot be promoted through company access settings")
     if target.get("role") == "owner" or (target.get("company_roles") or {}).get(body.company_id) == "owner":
         raise HTTPException(409, "This account is already an owner for this company")
     if target.get("active") is False or target.get("disabled") is True:
@@ -1048,6 +1312,8 @@ async def update_user_companies(uid: str, body: UserCompaniesIn, user=Depends(ge
     target = await base_db.users.find_one({"id": uid}, {"_id": 0})
     if not target:
         raise HTTPException(404, "User not found")
+    if target.get("is_worker"):
+        raise HTTPException(400, "Manage worker company access from the Dashboard Workers table")
     if target.get("role") == "owner":
         raise HTTPException(400, "The global owner always has access to all companies")
     known = {profile["id"] for profile in COMPANY_PROFILES}
@@ -1141,6 +1407,8 @@ async def google_session(body: GoogleSessionIn, response: Response):
     user = await db.users.find_one({"email": email}, {"_id": 0})
     if not user or user.get("active") is False:
         raise HTTPException(403, "Ask the owner to create and assign your account before using Google sign-in")
+    if user.get("is_worker") and user.get("personal_access_revoked"):
+        raise HTTPException(403, "Worker access has been revoked")
     company_id = body.company_id
     role = company_role(user, company_id)
     if role not in ("owner", "admin", "user"):
@@ -1456,6 +1724,11 @@ class InvoiceIn(BaseModel):
 class InvoiceEditAuthorizationIn(BaseModel):
     password: str
 
+class InvoiceActionAuthorizationIn(BaseModel):
+    password: str
+    action: str
+    target_id: Optional[str] = None
+
 class BuyingEditAuthorizationIn(BaseModel):
     password: str
 
@@ -1563,17 +1836,20 @@ async def authenticate_supervisor(password, user):
         raise HTTPException(403, "Supervisor password is incorrect")
     return supervisor["id"], supervisor.get("email") or supervisor["id"]
 
-@api.post("/invoices/{iid}/authorize-edit")
-async def authorize_invoice_edit(iid: str, body: InvoiceEditAuthorizationIn, user=Depends(get_current_user)):
+async def create_invoice_action_authorization(iid, action, password, user, target_id=None):
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0, "id": 1, "status": 1, "archived": 1})
     if not inv:
         raise HTTPException(404, "Invoice not found")
     if inv.get("archived") or inv.get("status") == "void":
-        raise HTTPException(400, "This invoice cannot be edited")
+        raise HTTPException(400, "This invoice cannot be changed")
+    if action == "reverse_payment":
+        payment = await db.payments.find_one({
+            "id": target_id, "invoice_id": iid, "reversed": {"$ne": True}, "archived": {"$ne": True},
+        }, {"_id": 0, "id": 1})
+        if not payment:
+            raise HTTPException(404, "Payment not found or already reversed")
 
-    company_id = user["_active_company_id"]
-    supervisor_id, supervisor_email = await authenticate_supervisor(body.password, user)
-
+    supervisor_id, supervisor_name = await authenticate_supervisor(password, user)
     await db.invoice_edit_authorizations.delete_many({
         "user_id": user["id"],
         "expires_at": {"$lte": datetime.now(timezone.utc)},
@@ -1584,13 +1860,45 @@ async def authorize_invoice_edit(iid: str, body: InvoiceEditAuthorizationIn, use
         "id": authorization_id,
         "invoice_id": iid,
         "user_id": user["id"],
-        "company_id": company_id,
+        "company_id": user["_active_company_id"],
         "supervisor_id": supervisor_id,
+        "action": action,
+        "target_id": target_id,
         "expires_at": expires_at,
     })
-    await log_audit("invoice", iid, "edit_authorized", user,
-                    reason=f"Supervisor approval by {supervisor_email}")
+    await log_audit("invoice", iid, f"{action}_authorized", user,
+                    reason=f"Supervisor approval by {supervisor_name}")
     return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
+
+async def consume_invoice_action_authorization(authorization_id, iid, action, user, target_id=None):
+    query = {
+        "id": authorization_id,
+        "invoice_id": iid,
+        "user_id": user["id"],
+        "company_id": user["_active_company_id"],
+        "action": action,
+        "expires_at": {"$gt": datetime.now(timezone.utc)},
+    }
+    if target_id is not None:
+        query["target_id"] = target_id
+    authorization = await db.invoice_edit_authorizations.find_one_and_delete(query, projection={"_id": 0})
+    if not authorization:
+        raise HTTPException(403, "Supervisor approval is required for this action")
+    return authorization
+
+@api.post("/invoices/{iid}/authorize-edit")
+async def authorize_invoice_edit(iid: str, body: InvoiceEditAuthorizationIn, user=Depends(get_current_user)):
+    return await create_invoice_action_authorization(iid, "edit", body.password, user)
+
+@api.post("/invoices/{iid}/authorize-action")
+async def authorize_invoice_action(iid: str, body: InvoiceActionAuthorizationIn, user=Depends(get_current_user)):
+    if body.action not in {"void", "reverse_payment"}:
+        raise HTTPException(400, "Unsupported supervisor action")
+    if body.action == "reverse_payment" and not body.target_id:
+        raise HTTPException(400, "A payment is required for this action")
+    if body.action == "void" and body.target_id:
+        raise HTTPException(400, "This action does not accept a target")
+    return await create_invoice_action_authorization(iid, body.action, body.password, user, body.target_id)
 
 async def restore_invoice_stock(inv, user):
     movements = await listall("stock_movements", {"invoice_id": inv["id"], "type": "invoice"})
@@ -1748,21 +2056,15 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
 
 @api.put("/invoices/{iid}")
 async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_user)):
-    authorization = await db.invoice_edit_authorizations.find_one({
-        "id": body.supervisor_authorization,
-        "invoice_id": iid,
-        "user_id": user["id"],
-        "company_id": user["_active_company_id"],
-        "expires_at": {"$gt": datetime.now(timezone.utc)},
-    })
-    if not authorization:
-        raise HTTPException(403, "Supervisor approval is required to edit this invoice")
     existing = await db.invoices.find_one({"id": iid})
     if not existing:
         raise HTTPException(404, "Invoice not found")
     if existing.get("status") == "void":
         raise HTTPException(400, "Cannot edit a voided invoice")
     reason = (body.edit_reason or "").strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required to edit an invoice")
+    await consume_invoice_action_authorization(body.supervisor_authorization, iid, "edit", user)
     inv = await _prepare_invoice(body)
     inv.pop("edit_reason", None)
     inv["amount_paid"] = existing.get("amount_paid", 0)
@@ -1807,7 +2109,6 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
                         after={"items": rec.get("items"), "total": rec.get("total")}, reason=reason)
     rec["status"] = derive_status(rec)
     rec["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
-    await db.invoice_edit_authorizations.delete_one({"id": authorization["id"]})
     return rec
 
 @api.post("/invoices/{iid}/issue")
@@ -1842,6 +2143,7 @@ async def issue_invoice(iid: str, body: InvoiceIssueIn = InvoiceIssueIn(), user=
 
 class ReasonIn(BaseModel):
     reason: str
+    supervisor_authorization: Optional[str] = None
 
 @api.post("/invoices/{iid}/void")
 async def void_invoice(iid: str, body: ReasonIn, user=Depends(get_current_user)):
@@ -1854,6 +2156,7 @@ async def void_invoice(iid: str, body: ReasonIn, user=Depends(get_current_user))
         raise HTTPException(400, "Invoice is already void")
     if await db.payments.count_documents({"invoice_id": iid, "reversed": {"$ne": True}}):
         raise HTTPException(400, "This invoice has payments. Reverse the payments first, then void it")
+    await consume_invoice_action_authorization(body.supervisor_authorization, iid, "void", user)
     audit = inv.get("audit", [])
     audit.append({"action": "voided", "reason": body.reason, "at": now_iso(), "by": user["email"]})
     rec = await update_doc("invoices", iid, {"status": "void", "void_reason": body.reason, "audit": audit})
@@ -1928,6 +2231,12 @@ async def record_payment(iid: str, body: PaymentIn, user=Depends(get_current_use
 async def reverse_payment(pid: str, body: ReasonIn, user=Depends(get_current_user)):
     if not body.reason.strip():
         raise HTTPException(400, "A reason is required to reverse a payment")
+    payment = await db.payments.find_one({"id": pid, "reversed": {"$ne": True}}, {"_id": 0})
+    if not payment:
+        raise HTTPException(400, "Payment not found or already reversed")
+    await consume_invoice_action_authorization(
+        body.supervisor_authorization, payment["invoice_id"], "reverse_payment", user, pid,
+    )
     p = await db.payments.find_one_and_update(
         {"id": pid, "reversed": {"$ne": True}},
         {"$set": {"reversed": True, "reversed_reason": body.reason, "reversed_at": now_iso(), "reversed_by": user["email"]}},
@@ -1958,6 +2267,501 @@ class StockIn(BaseModel):
             raise ValueError("Unit cost must be a finite non-negative amount")
         return value
 
+
+def valid_ean13(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{13}", value):
+        return False
+    checksum = sum(int(digit) * (1 if index % 2 == 0 else 3) for index, digit in enumerate(value[:12]))
+    return (10 - checksum % 10) % 10 == int(value[-1])
+
+
+class ProductIdentificationIn(BaseModel):
+    description: str = Field(default="", max_length=2000)
+    sku: Optional[str] = Field(default=None, max_length=80)
+    category: Optional[str] = Field(default=None, max_length=120)
+    density: Optional[str] = Field(default=None, max_length=100)
+    product_type: str = Field(default="", max_length=100)
+    length: Optional[float] = None
+    width: Optional[float] = None
+    thickness: Optional[float] = None
+    unit: Optional[str] = Field(default=None, max_length=20)
+    ean13: Optional[str] = Field(default=None, min_length=13, max_length=13)
+    data_matrix_payload: Optional[str] = Field(default=None, max_length=128)
+    gs1_allocated: bool = False
+    active: bool = True
+
+    @field_validator("sku", mode="before")
+    @classmethod
+    def normalize_sku(cls, value):
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str):
+            raise ValueError("SKU must be text")
+        value = value.strip().upper()
+        if not re.fullmatch(r"[A-Z0-9][A-Z0-9._/-]{0,79}", value):
+            raise ValueError("SKU may contain letters, numbers, dots, underscores, slashes, and hyphens")
+        return value
+
+    @field_validator("category", "density", "unit", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value):
+        return value.strip() or None if isinstance(value, str) else value
+
+    @field_validator("data_matrix_payload", mode="before")
+    @classmethod
+    def normalize_data_matrix(cls, value):
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Data Matrix payload must be non-empty text")
+        return value.strip()
+
+    @field_validator("length", "width", "thickness", mode="before")
+    @classmethod
+    def validate_dimension(cls, value):
+        if value is None or value == "":
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("Dimensions must be positive numbers")
+        if not math.isfinite(number) or number <= 0:
+            raise ValueError("Dimensions must be positive finite numbers")
+        return number
+
+    @field_validator("ean13")
+    @classmethod
+    def validate_ean13_value(cls, value):
+        if value is not None:
+            value = value.strip()
+            if not valid_ean13(value):
+                raise ValueError("EAN-13 must contain 13 digits and a valid check digit")
+        return value
+
+
+class ProductStockDetailsIn(BaseModel):
+    product: str = Field(min_length=1, max_length=120)
+    dimensions: str = Field(min_length=3, max_length=100)
+
+    @field_validator("product", "dimensions")
+    @classmethod
+    def validate_product_details(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("Product name and dimensions cannot be blank")
+        return value
+
+    @field_validator("dimensions")
+    @classmethod
+    def validate_formatted_dimensions(cls, value):
+        if not re.fullmatch(
+            r"\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?(?:\s*[x×]\s*\d+(?:\.\d+)?)?",
+            value,
+            re.IGNORECASE,
+        ):
+            raise ValueError("Dimensions must be numeric, for example 910x100 or 910x100x50")
+        return value
+
+
+class ProductScanIn(BaseModel):
+    code: str = Field(min_length=1, max_length=128)
+    scan_id: Optional[str] = Field(default=None, max_length=80)
+
+
+def product_code_payload(product_id):
+    return f"IQF1:{str(product_id).upper()}"
+
+
+def product_sku(company_id, product_id):
+    prefixes = {
+        "superiqfoam": "SFO",
+        "iqfoam-manufactoring": "MFG",
+        "iqfoam-whole-sallers": "WHL",
+    }
+    prefix = prefixes.get(company_id)
+    if not prefix or not product_id:
+        raise HTTPException(409, "Cannot create a SKU for an invalid product or company")
+    suffix = re.sub(r"[^A-Z0-9]", "", str(product_id).upper().removeprefix("IQF"))
+    if not suffix:
+        raise HTTPException(409, "Cannot create a SKU for an invalid product identifier")
+    return f"{prefix}-{suffix}"
+
+
+def public_product_identification(stock, identity):
+    company_id = identity["company_id"]
+    product_id = identity["product_id"]
+    return {
+        "id": identity["id"],
+        "company": next(
+            (company["name"] for company in COMPANY_PROFILES if company["id"] == company_id),
+            company_id,
+        ),
+        "product_id": product_id,
+        "sku": identity.get("sku") or product_sku(company_id, product_id),
+        "stock_id": stock["id"],
+        "product": stock.get("product", ""),
+        "category": identity.get("category") or stock.get("product", ""),
+        "description": identity.get("description", ""),
+        "dimensions": stock.get("size", ""),
+        "size": stock.get("size", ""),
+        "length": identity.get("length"),
+        "width": identity.get("width"),
+        "thickness": identity.get("thickness"),
+        "unit": identity.get("unit"),
+        "density": identity.get("density"),
+        "product_type": identity.get("product_type", ""),
+        "tracking_mode": identity.get("tracking_mode", "none"),
+        "company_id": company_id,
+        "company_name": next(
+            (company["name"] for company in COMPANY_PROFILES if company["id"] == company_id),
+            company_id,
+        ),
+        "ean13": identity.get("ean13"),
+        "qr_payload": identity["qr_payload"],
+        "data_matrix_payload": identity.get("data_matrix_payload"),
+        "gs1_allocated": identity.get("gs1_allocated", False),
+        "active": identity.get("active", True),
+        "created_at": identity.get("created_at"),
+        "updated_at": identity.get("updated_at"),
+    }
+
+
+def duplicate_product_identification_codes(identities):
+    code_products = {}
+    for identity in identities:
+        product_id = identity.get("product_id")
+        if not product_id:
+            continue
+        for field in ("sku", "ean13", "qr_payload", "data_matrix_payload"):
+            code = identity.get(field)
+            if isinstance(code, str) and code.strip():
+                code_products.setdefault(code.strip().upper(), set()).add(product_id)
+    return sum(1 for product_ids in code_products.values() if len(product_ids) > 1)
+
+
+async def ensure_product_identification(stock, company_id, stock_collection=None):
+    identities = base_db.product_identifications
+    if stock_collection is None:
+        stock_collection = db.stock
+    identity = await identities.find_one(
+        {"company_id": company_id, "stock_id": stock["id"]}, {"_id": 0}
+    )
+    if identity:
+        product_id = identity["product_id"]
+        stock_product_id = stock.get("product_id")
+        if stock_product_id and stock_product_id != product_id:
+            raise HTTPException(409, "Stock and product catalog identifiers disagree; manual review is required")
+        if not stock_product_id:
+            await stock_collection.update_one({"id": stock["id"]}, {"$set": {"product_id": product_id}})
+            stock["product_id"] = product_id
+        return identity
+
+    product_id = stock.get("product_id") or f"IQF-{new_id().upper()}"
+    payload = product_code_payload(product_id)
+    identity = {
+        "id": new_id(), "company_id": company_id, "stock_id": stock["id"],
+        "product_id": product_id, "sku": product_sku(company_id, product_id),
+        "qr_payload": payload, "data_matrix_payload": payload,
+        "description": "", "density": None, "product_type": "", "tracking_mode": "none",
+        "active": True, "created_at": now_iso(), "updated_at": now_iso(),
+    }
+    try:
+        await identities.insert_one(identity)
+    except DuplicateKeyError:
+        identity = await identities.find_one(
+            {"company_id": company_id, "stock_id": stock["id"]}, {"_id": 0}
+        )
+        if not identity:
+            raise HTTPException(409, "Product identifier collision; retry the operation")
+        product_id = identity["product_id"]
+    await stock_collection.update_one({"id": stock["id"]}, {"$set": {"product_id": product_id}})
+    stock["product_id"] = product_id
+    return identity
+
+
+async def product_stock_for_identity(identity):
+    stock = await db.stock.find_one({"id": identity["stock_id"]}, {"_id": 0})
+    if not stock:
+        raise HTTPException(404, "The linked stock product no longer exists")
+    return stock
+
+
+async def resolve_product_scan(code, user):
+    original_code = code.strip()
+    normalized_code = original_code.upper()
+    if not normalized_code:
+        raise HTTPException(400, "Scan a product code")
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    identity = await base_db.product_identifications.find_one({
+        "company_id": company_id,
+        "$or": [
+            {"ean13": normalized_code},
+            {"qr_payload": normalized_code},
+            {"data_matrix_payload": original_code},
+            {"data_matrix_payload": normalized_code},
+            {"product_id": normalized_code},
+            {"sku": normalized_code},
+        ],
+    }, {"_id": 0})
+    if not identity:
+        raise HTTPException(404, "Unknown product code for this company")
+    if identity.get("active") is False:
+        raise HTTPException(410, "This product is inactive")
+    stock = await product_stock_for_identity(identity)
+    await stock_current(stock)
+    return stock, identity
+
+
+@api.get("/products")
+async def list_products(
+    q: str = Query(default="", max_length=128),
+    category: Optional[str] = Query(default=None, max_length=120),
+    density: Optional[str] = Query(default=None, max_length=100),
+    active: Optional[bool] = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    user=Depends(get_current_user),
+):
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    identity_filter = {"company_id": company_id}
+    if density:
+        identity_filter["density"] = {"$regex": re.escape(density.strip()), "$options": "i"}
+    if active is not None:
+        identity_filter["active"] = active
+
+    identities = await base_db.product_identifications.find(
+        identity_filter, {"_id": 0}
+    ).to_list(50000)
+    if q.strip():
+        term = re.compile(re.escape(q.strip()), re.IGNORECASE)
+        code_matches = await base_db.product_identifications.find(
+            {
+                **identity_filter,
+                "$or": [
+                    {"product_id": term}, {"sku": term}, {"ean13": term},
+                    {"qr_payload": term}, {"data_matrix_payload": term},
+                ],
+            },
+            {"_id": 0},
+        ).to_list(50000)
+        stock_matches = await db.stock.find(
+            {"$or": [{"product": term}, {"size": term}, {"product_id": term}]},
+            {"_id": 0},
+        ).to_list(50000)
+        matched_stock_ids = {item["stock_id"] for item in code_matches}
+        matched_stock_ids.update(item["id"] for item in stock_matches)
+        identities = [item for item in identities if item["stock_id"] in matched_stock_ids]
+
+    if not identities:
+        return {"items": [], "total": 0, "page": page, "page_size": page_size, "pages": 0}
+
+    identity_by_stock = {item["stock_id"]: item for item in identities}
+    stocks = await db.stock.find(
+        {"id": {"$in": list(identity_by_stock)}}, {"_id": 0}
+    ).to_list(50000)
+    products = [
+        public_product_identification(stock, identity_by_stock[stock["id"]])
+        for stock in stocks if stock["id"] in identity_by_stock
+    ]
+    if category:
+        category_term = category.strip().casefold()
+        products = [item for item in products if category_term in item["category"].casefold()]
+    products.sort(key=lambda item: (
+        item["product"].casefold(), item["dimensions"].casefold(), item["product_id"]
+    ))
+    total = len(products)
+    start = (page - 1) * page_size
+    return {
+        "items": products[start:start + page_size],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": math.ceil(total / page_size),
+    }
+
+
+@api.get("/stock/{sid}/identification")
+async def get_stock_product_identification(sid: str, user=Depends(get_current_user)):
+    stock = await db.stock.find_one({"id": sid}, {"_id": 0})
+    if not stock:
+        raise HTTPException(404, "Stock item not found")
+    identity = await ensure_product_identification(stock, user.get("_active_company_id") or DEFAULT_COMPANY_ID)
+    return public_product_identification(stock, identity)
+
+
+@api.put("/stock/{sid}/product-details")
+async def update_stock_product_details(sid: str, body: ProductStockDetailsIn, user=Depends(get_current_user)):
+    require_admin(user)
+    stock = await db.stock.find_one({"id": sid}, {"_id": 0})
+    if not stock:
+        raise HTTPException(404, "Stock item not found")
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    identity = await base_db.product_identifications.find_one(
+        {"company_id": company_id, "stock_id": sid}, {"_id": 0}
+    )
+    if not identity:
+        raise HTTPException(409, "Product identification is unavailable for this stock item")
+    before = {"product": stock.get("product", ""), "size": stock.get("size", "")}
+    after = {"product": body.product, "size": body.dimensions}
+    if before != after:
+        result = await db.stock.update_one(
+            {"id": sid},
+            {"$set": {"product": body.product, "size": body.dimensions, "updated_at": now_iso()}},
+        )
+        if result.matched_count != 1:
+            raise HTTPException(409, "Stock item changed during the update; reload and retry")
+        await log_audit("stock", sid, "product_details_updated", user, before=before, after=after)
+    updated_stock = await db.stock.find_one({"id": sid}, {"_id": 0})
+    if not updated_stock:
+        raise HTTPException(404, "Stock item not found")
+    return public_product_identification(updated_stock, identity)
+
+
+@api.put("/stock/{sid}/identification")
+async def update_stock_product_identification(sid: str, body: ProductIdentificationIn, user=Depends(get_current_user)):
+    stock = await db.stock.find_one({"id": sid}, {"_id": 0})
+    if not stock:
+        raise HTTPException(404, "Stock item not found")
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    identity = await ensure_product_identification(stock, company_id)
+    updates = body.model_dump(exclude_unset=True)
+    unset_updates = {}
+    if "ean13" in updates:
+        ean13 = updates.pop("ean13")
+        if ean13 is None:
+            updates.pop("gs1_allocated", None)
+            unset_updates.update({"ean13": "", "gs1_allocated": ""})
+        else:
+            if not body.gs1_allocated:
+                raise HTTPException(400, "Confirm that this EAN-13 was allocated to your company by GS1")
+            duplicate = await base_db.product_identifications.find_one(
+                {"ean13": ean13, "id": {"$ne": identity["id"]}}, {"_id": 0, "company_id": 1}
+            )
+            if duplicate:
+                raise HTTPException(409, "This EAN-13 is already assigned to another product")
+            updates["ean13"] = ean13
+            updates["gs1_allocated"] = True
+    elif identity.get("ean13") and updates.get("gs1_allocated", True) is not True:
+        raise HTTPException(400, "Remove the EAN-13 before clearing its GS1 allocation confirmation")
+    elif "gs1_allocated" in updates and "ean13" not in identity:
+        updates.pop("gs1_allocated")
+    for field in ("sku", "data_matrix_payload"):
+        if field in updates and updates[field] is None:
+            updates.pop(field)
+            unset_updates[field] = ""
+    if updates.get("sku"):
+        duplicate = await base_db.product_identifications.find_one(
+            {"sku": updates["sku"], "id": {"$ne": identity["id"]}},
+            {"_id": 0, "company_id": 1},
+        )
+        if duplicate:
+            raise HTTPException(409, "This SKU is already assigned to another product")
+    if updates.get("data_matrix_payload"):
+        duplicate = await base_db.product_identifications.find_one(
+            {"data_matrix_payload": updates["data_matrix_payload"], "id": {"$ne": identity["id"]}},
+            {"_id": 0, "company_id": 1},
+        )
+        if duplicate:
+            raise HTTPException(409, "This Data Matrix payload is already assigned to another product")
+    updates["updated_at"] = now_iso()
+    try:
+        change = {"$set": updates}
+        if unset_updates:
+            change["$unset"] = unset_updates
+        result = await base_db.product_identifications.update_one(
+            {"id": identity["id"], "company_id": company_id}, change
+        )
+    except DuplicateKeyError:
+        raise HTTPException(409, "This identification code is already assigned to another product")
+    if result.matched_count != 1:
+        raise HTTPException(409, "Product identification changed during the update; reload and retry")
+    updated = await base_db.product_identifications.find_one({"id": identity["id"]}, {"_id": 0})
+    if not updated:
+        raise HTTPException(409, "Product identification no longer exists")
+    await log_audit("product_identification", identity["id"], "updated", user,
+                    before=identity, after=updated)
+    return public_product_identification(stock, updated)
+
+
+@api.post("/products/scan")
+async def scan_product(body: ProductScanIn, user=Depends(get_current_user)):
+    stock, identity = await resolve_product_scan(body.code, user)
+    scan_id = body.scan_id or new_id()
+    try:
+        normalized_code = body.code.strip()
+        if identity.get("ean13") == normalized_code:
+            code_type = "ean13"
+        elif identity.get("qr_payload") == normalized_code:
+            code_type = "qr"
+        elif identity.get("data_matrix_payload") == normalized_code:
+            code_type = "data_matrix"
+        elif identity.get("sku") == normalized_code.upper():
+            code_type = "sku"
+        else:
+            code_type = "internal"
+        await base_db.product_scans.insert_one({
+            "scan_id": scan_id, "company_id": identity["company_id"],
+            "product_id": identity["product_id"], "stock_id": stock["id"],
+            "code_type": code_type,
+            "user_id": user["id"], "scanned_at": now_iso(),
+        })
+    except DuplicateKeyError:
+        pass
+    return {
+        **public_product_identification(stock, identity),
+        "current_stock": stock.get("current", 0),
+        "threshold": stock.get("threshold", 0),
+        "unit": "units",
+    }
+
+
+@api.get("/product-identification-stats")
+async def get_product_identification_stats(user=Depends(get_current_user)):
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    stocks = await listall("stock", sort=("product", 1))
+    identities = await base_db.product_identifications.find(
+        {"company_id": company_id}, {"_id": 0}
+    ).to_list(5000)
+    identity_by_stock = {item["stock_id"]: item for item in identities}
+    recent_scans = await base_db.product_scans.find(
+        {"company_id": company_id}, {"_id": 0}
+    ).sort("scanned_at", -1).to_list(20)
+    scan_totals = await base_db.product_scans.aggregate([
+        {"$match": {"company_id": company_id}},
+        {"$group": {"_id": "$product_id", "scan_count": {"$sum": 1}}},
+        {"$sort": {"scan_count": -1, "_id": 1}},
+        {"$limit": 10},
+    ]).to_list(10)
+    invalid_ean = sum(
+        1 for item in identities if item.get("ean13") and not valid_ean13(item["ean13"])
+    )
+    product_by_id = {
+        identity["product_id"]: next(
+            (stock["product"] for stock in stocks if stock["id"] == identity["stock_id"]), ""
+        )
+        for identity in identities
+    }
+    return {
+        "identified_products": sum(
+            1 for stock in stocks if stock["id"] in identity_by_stock
+            and identity_by_stock[stock["id"]].get("active") is not False
+        ),
+        "products_missing_ean13": sum(
+            1 for stock in stocks if stock["id"] not in identity_by_stock
+            or not identity_by_stock[stock["id"]].get("ean13")
+        ),
+        "invalid_ean13": invalid_ean,
+        "duplicate_codes": duplicate_product_identification_codes(identities),
+        "scans_total": await base_db.product_scans.count_documents({"company_id": company_id}),
+        "most_scanned": [
+            {"product_id": item["_id"], "scan_count": item["scan_count"],
+             "product": product_by_id.get(item["_id"], "")}
+            for item in scan_totals
+        ],
+        "recent_scans": recent_scans,
+        "inactive_products": sum(1 for item in identities if item.get("active") is False),
+    }
+
 INC_TYPES = ("production", "purchase", "adjustment_in", "return")
 DEC_TYPES = ("dispatch", "invoice", "production_consumption", "adjustment_out", "damage")
 OPEN_ORDER_STATUSES = ("To Send", "Preparing", "Assigned", "Partially Delivered")
@@ -1984,13 +2788,19 @@ def apply_stock_movements(stock, movements):
     s["last_movement"] = max([m["created_at"] for m in movs], default=None)
     return s
 
+def stock_for_user(stock, user):
+    if user.get("is_worker"):
+        stock.pop("unit_cost", None)
+    return stock
+
 async def post_movement(stock, mtype, qty, user, reason="", reference="", notes="", dedupe_key=None, direction=None, allow_negative=False, extra=None):
     sign = direction or (1 if mtype in INC_TYPES else -1)
     if sign < 0 and not allow_negative:
         await stock_current(stock)
         if D(qty) > D(stock["current"]):
             raise HTTPException(400, f"Insufficient stock for {stock['product']} {stock['size']}: available {stock['current']}, requested {qty}")
-    m = {"stock_id": stock["id"], "product": stock["product"], "size": stock["size"], "type": mtype,
+    m = {"stock_id": stock["id"], "product_id": stock.get("product_id"),
+         "product": stock["product"], "size": stock["size"], "type": mtype,
          "direction": sign, "quantity": r2(qty), "reason": reason, "reference": reference, "notes": notes,
          "date": today_str(), "user": user["email"] if user else "system", **(extra or {})}
     if dedupe_key:
@@ -2108,14 +2918,22 @@ async def post_invoice_stock_changes(invoice, changes, stocks, user):
 
 @api.get("/stock")
 async def get_stock(user=Depends(get_current_user)):
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
     items = await listall("stock", sort=("product", 1))
     for s in items:
+        await ensure_product_identification(s, company_id)
         await stock_current(s)
+        stock_for_user(s, user)
     return items
 
 @api.post("/stock")
 async def add_stock(body: StockIn, user=Depends(get_current_user)):
-    return await insert("stock", body.model_dump())
+    data = body.model_dump()
+    if user.get("is_worker"):
+        data.pop("unit_cost", None)
+    stock = await insert("stock", data)
+    await ensure_product_identification(stock, user.get("_active_company_id") or DEFAULT_COMPANY_ID)
+    return stock_for_user(stock, user)
 
 @api.delete("/stock/{sid}")
 async def delete_stock(sid: str, user=Depends(get_current_user)):
@@ -2134,6 +2952,10 @@ async def delete_stock(sid: str, user=Depends(get_current_user)):
     result = await db.stock.delete_one({"id": sid})
     if not result.deleted_count:
         raise HTTPException(404, "Stock item not found")
+    await base_db.product_identifications.update_one(
+        {"company_id": user.get("_active_company_id") or DEFAULT_COMPANY_ID, "stock_id": sid},
+        {"$set": {"active": False, "updated_at": now_iso()}},
+    )
     await log_audit("stock", sid, "permanently_deleted", user,
                     before={"product": stock["product"], "size": stock["size"],
                             "movement_count": len(movements)},
@@ -2146,11 +2968,13 @@ async def edit_stock(sid: str, body: StockIn, user=Depends(get_current_user)):
     if not before:
         raise HTTPException(404, "Stock item not found")
     d = body.model_dump()
+    if user.get("is_worker"):
+        d.pop("unit_cost", None)
     if r2(d["opening"]) != r2(before.get("opening", 0)) and await db.stock_movements.count_documents({"stock_id": sid}):
         raise HTTPException(400, "Opening balance cannot change after movements exist. Use a manual adjustment instead")
     rec = await update_doc("stock", sid, d)
     await log_audit("stock", sid, "edited", user, before=before, after=rec)
-    return rec
+    return stock_for_user(rec, user)
 
 class MovementIn(BaseModel):
     type: str  # adjustment_in, adjustment_out, return, damage
@@ -2343,7 +3167,8 @@ async def edit_production(pid: str, body: ProductionIn, user=Depends(get_current
     return enrich_production(rec, hours)
 
 class ReceiveIn(BaseModel):
-    stock_id: str
+    stock_id: Optional[str] = None
+    product_code: Optional[str] = None
     quantity: float
 
 @api.post("/production/{pid}/receive")
@@ -2365,7 +3190,14 @@ async def receive_production(pid: str, body: ReceiveIn, user=Depends(get_current
     enrich_production(p, hours)
     if not p["rest_elapsed"]:
         raise HTTPException(400, f"Block is still resting until {fmt_local(p['ready_at'])}")
-    s = await db.stock.find_one({"id": body.stock_id}, {"_id": 0})
+    if body.product_code:
+        s, _identity = await resolve_product_scan(body.product_code, user)
+        if body.stock_id and body.stock_id != s["id"]:
+            raise HTTPException(400, "Scanned product does not match the selected stock item")
+    elif body.stock_id:
+        s = await db.stock.find_one({"id": body.stock_id}, {"_id": 0})
+    else:
+        raise HTTPException(400, "Select a stock product or scan its identification code")
     if not s:
         raise HTTPException(404, "Stock item not found")
     claimed = await db.production.find_one_and_update({"id": pid, "stock_added": {"$ne": True}}, {"$set": {"stock_added": True}})
@@ -2379,7 +3211,7 @@ async def receive_production(pid: str, body: ReceiveIn, user=Depends(get_current
     except Exception:
         await db.production.update_one({"id": pid}, {"$set": {"stock_added": False}})
         raise
-    await db.production.update_one({"id": pid}, {"$set": {"status": "Completed", "received_qty": r2(body.quantity), "stock_id": body.stock_id}})
+    await db.production.update_one({"id": pid}, {"$set": {"status": "Completed", "received_qty": r2(body.quantity), "stock_id": s["id"]}})
     await log_audit("production", pid, "received_into_stock", user, after=m)
     return m
 
@@ -3706,10 +4538,20 @@ class MonthlyBusinessPurchaseIn(BaseModel):
     end_month: Optional[str] = ""
     active: bool = True
     notes: Optional[str] = ""
+    edit_reason: Optional[str] = ""
+    supervisor_authorization: Optional[str] = None
 
 class MonthlyBusinessPurchaseActualIn(BaseModel):
     quantity: float
     unit_price: float
+    edit_reason: Optional[str] = ""
+    supervisor_authorization: Optional[str] = None
+
+class MonthlyBusinessPurchaseAuthorizationIn(BaseModel):
+    password: str
+
+class MonthlyBusinessPurchaseEditAuthorizationIn(BaseModel):
+    password: str
 
 def _check_purchase_order(body):
     if not body.items:
@@ -3878,13 +4720,74 @@ async def get_monthly_business_purchases(user=Depends(get_current_user)):
         purchase["occurrences"] = occurrences_by_purchase.get(purchase["id"], [])
     return purchases
 
+async def create_monthly_purchase_authorization(purchase_id, action, password, user):
+    if action not in {"create", "edit"}:
+        raise HTTPException(400, "Unsupported supervisor action")
+    if purchase_id and not await db.monthly_business_purchases.find_one({"id": purchase_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Monthly business purchase not found")
+    supervisor_id, supervisor_name = await authenticate_supervisor(password, user)
+    await db.monthly_business_purchase_edit_authorizations.delete_many({
+        "user_id": user["id"],
+        "expires_at": {"$lte": datetime.now(timezone.utc)},
+    })
+    authorization_id = new_id()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    authorization = {
+        "id": authorization_id,
+        "user_id": user["id"],
+        "company_id": user["_active_company_id"],
+        "supervisor_id": supervisor_id,
+        "action": action,
+        "expires_at": expires_at,
+    }
+    if purchase_id:
+        authorization["purchase_id"] = purchase_id
+        await log_audit("monthly_business_purchase", purchase_id, "edit_authorized", user,
+                        reason=f"Supervisor approval by {supervisor_name}")
+    await db.monthly_business_purchase_edit_authorizations.insert_one(authorization)
+    return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
+
+async def consume_monthly_purchase_authorization(authorization_id, purchase_id, action, user):
+    query = {
+        "id": authorization_id,
+        "user_id": user["id"],
+        "company_id": user["_active_company_id"],
+        "action": action,
+        "expires_at": {"$gt": datetime.now(timezone.utc)},
+    }
+    query["purchase_id"] = purchase_id if purchase_id else {"$exists": False}
+    authorization = await db.monthly_business_purchase_edit_authorizations.find_one_and_delete(
+        query, projection={"_id": 0},
+    )
+    if not authorization:
+        raise HTTPException(403, "Supervisor approval is required for this monthly purchase action")
+    return authorization
+
+@api.post("/monthly-business-purchases/authorize-create")
+async def authorize_monthly_purchase_create(
+    body: MonthlyBusinessPurchaseAuthorizationIn, user=Depends(get_current_user),
+):
+    return await create_monthly_purchase_authorization(None, "create", body.password, user)
+
+@api.post("/monthly-business-purchases/{purchase_id}/authorize-edit")
+async def authorize_monthly_purchase_edit(
+    purchase_id: str, body: MonthlyBusinessPurchaseEditAuthorizationIn,
+    user=Depends(get_current_user),
+):
+    return await create_monthly_purchase_authorization(purchase_id, "edit", body.password, user)
+
 @api.post("/monthly-business-purchases")
 async def add_monthly_business_purchase(body: MonthlyBusinessPurchaseIn, user=Depends(get_current_user)):
     _check_monthly_business_purchase(body)
     start_month = body.start_month or _next_month(local_today().strftime("%Y-%m"))
     if body.end_month and body.end_month < start_month:
         raise HTTPException(400, "End month cannot be before the start month")
+    authorization = await consume_monthly_purchase_authorization(
+        body.supervisor_authorization, None, "create", user,
+    )
     data = body.model_dump()
+    data.pop("edit_reason", None)
+    data.pop("supervisor_authorization", None)
     data.update({
         "name": body.name.strip(), "supplier_name": (body.supplier_name or "").strip(),
         "category": body.category, "quantity_unit": (body.quantity_unit or "unit").strip() or "unit",
@@ -3892,9 +4795,11 @@ async def add_monthly_business_purchase(body: MonthlyBusinessPurchaseIn, user=De
         "expense_day": body.expense_day, "end_month": body.end_month or "",
         "monthly_amount": buying_amount(body.monthly_quantity, body.unit_price),
         "start_month": start_month,
+        "supervisor_approved_by": authorization["supervisor_id"],
     })
     rec = await insert("monthly_business_purchases", data)
-    await log_audit("monthly_business_purchase", rec["id"], "created", user, after=rec)
+    await log_audit("monthly_business_purchase", rec["id"], "created", user, after=rec,
+                    reason=f"Supervisor approval by {authorization['supervisor_id']}")
     return rec
 
 @api.put("/monthly-business-purchases/{purchase_id}")
@@ -3903,10 +4808,18 @@ async def edit_monthly_business_purchase(purchase_id: str, body: MonthlyBusiness
     before = await db.monthly_business_purchases.find_one({"id": purchase_id}, {"_id": 0})
     if not before:
         raise HTTPException(404, "Monthly business purchase not found")
+    reason = (body.edit_reason or "").strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required to edit a monthly purchase")
+    authorization = await consume_monthly_purchase_authorization(
+        body.supervisor_authorization, purchase_id, "edit", user,
+    )
     start_month = body.start_month or before.get("start_month") or _next_month(local_today().strftime("%Y-%m"))
     if body.end_month and body.end_month < start_month:
         raise HTTPException(400, "End month cannot be before the start month")
     data = body.model_dump()
+    data.pop("edit_reason", None)
+    data.pop("supervisor_authorization", None)
     data.update({
         "name": body.name.strip(), "supplier_name": (body.supplier_name or "").strip(),
         "category": body.category, "quantity_unit": (body.quantity_unit or "unit").strip() or "unit",
@@ -3914,9 +4827,11 @@ async def edit_monthly_business_purchase(purchase_id: str, body: MonthlyBusiness
         "expense_day": body.expense_day, "end_month": body.end_month or "",
         "monthly_amount": buying_amount(body.monthly_quantity, body.unit_price),
         "start_month": start_month,
+        "supervisor_approved_by": authorization["supervisor_id"],
     })
     rec = await update_doc("monthly_business_purchases", purchase_id, data)
-    await log_audit("monthly_business_purchase", purchase_id, "updated", user, before=before, after=rec)
+    await log_audit("monthly_business_purchase", purchase_id, "updated", user,
+                    before=before, after=rec, reason=reason)
     return rec
 
 @api.put("/monthly-business-purchases/occurrences/{occurrence_id}")
@@ -3933,6 +4848,12 @@ async def update_monthly_business_purchase_actual(
     expense_before = await db.expenses.find_one({"id": before["expense_id"]}, {"_id": 0})
     if not expense_before or expense_before.get("voided"):
         raise HTTPException(409, "The monthly expense is missing or has been voided")
+    reason = (body.edit_reason or "").strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required to update a monthly expense")
+    authorization = await consume_expense_authorization(
+        body.supervisor_authorization, expense_before["id"], "monthly_actual", user,
+    )
     amount = buying_amount(body.quantity, body.unit_price)
     actual = {
         "quantity": body.quantity, "unit_price": r2(body.unit_price), "amount": amount,
@@ -3940,12 +4861,13 @@ async def update_monthly_business_purchase_actual(
     }
     updated_expense = await update_doc("expenses", before["expense_id"], {
         "amount": amount, "quantity": body.quantity, "unit_price": r2(body.unit_price),
+        "supervisor_approved_by": authorization["supervisor_id"],
     })
     occurrence = await update_doc("monthly_business_purchase_occurrences", occurrence_id, actual)
     await log_audit("monthly_business_purchase_occurrence", occurrence_id, "actual_updated", user,
                     before=before, after=occurrence)
     await log_audit("expense", expense_before["id"], "monthly_purchase_actual_updated", user,
-                    before=expense_before, after=updated_expense)
+                    before=expense_before, after=updated_expense, reason=reason)
     return occurrence
 
 @api.get("/purchase-orders")
@@ -4626,6 +5548,15 @@ class ExpenseIn(BaseModel):
     reference: Optional[str] = ""
     vehicle_id: Optional[str] = ""
     notes: Optional[str] = ""
+    edit_reason: Optional[str] = ""
+    supervisor_authorization: Optional[str] = None
+
+class ExpenseAuthorizationIn(BaseModel):
+    password: str
+
+class ExpenseActionAuthorizationIn(BaseModel):
+    password: str
+    action: str
 
 class ProductionCostItemIn(BaseModel):
     description: str
@@ -4720,6 +5651,71 @@ async def delete_cost_record(record_id: str, user=Depends(get_current_user)):
     await log_audit("cost_record", record_id, "permanently_deleted", user, before=record,
                     after={"permanently_deleted": True})
     return {"ok": True, "deleted": True}
+
+async def create_expense_authorization(expense_id, action, password, user):
+    if action not in {"create", "edit", "void", "monthly_actual"}:
+        raise HTTPException(400, "Unsupported supervisor action")
+    if expense_id:
+        expense = await db.expenses.find_one({"id": expense_id}, {"_id": 0, "id": 1, "voided": 1})
+        if not expense:
+            raise HTTPException(404, "Expense not found")
+        if expense.get("voided") and action in {"edit", "monthly_actual"}:
+            raise HTTPException(409, "A voided expense cannot be changed")
+        expense_details = await db.expenses.find_one({"id": expense_id}, {"_id": 0, "source_key": 1}) or {}
+        if action == "edit" and expense_details.get("source_key"):
+            raise HTTPException(400, "This expense is linked to a purchase and cannot be edited directly")
+        if action == "monthly_actual" and not (expense_details.get("source_key") or "").startswith("monthly_business_purchase:"):
+            raise HTTPException(400, "This is not a monthly purchase expense")
+        if action == "void" and expense.get("voided"):
+            raise HTTPException(400, "Expense is already voided")
+    supervisor_id, supervisor_name = await authenticate_supervisor(password, user)
+    await db.expense_edit_authorizations.delete_many({
+        "user_id": user["id"],
+        "expires_at": {"$lte": datetime.now(timezone.utc)},
+    })
+    authorization_id = new_id()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    authorization = {
+        "id": authorization_id,
+        "user_id": user["id"],
+        "company_id": user["_active_company_id"],
+        "supervisor_id": supervisor_id,
+        "action": action,
+        "expires_at": expires_at,
+    }
+    if expense_id:
+        authorization["expense_id"] = expense_id
+        await log_audit("expense", expense_id, f"{action}_authorized", user,
+                        reason=f"Supervisor approval by {supervisor_name}")
+    await db.expense_edit_authorizations.insert_one(authorization)
+    return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
+
+async def consume_expense_authorization(authorization_id, expense_id, action, user):
+    query = {
+        "id": authorization_id,
+        "user_id": user["id"],
+        "company_id": user["_active_company_id"],
+        "action": action,
+        "expires_at": {"$gt": datetime.now(timezone.utc)},
+    }
+    if expense_id:
+        query["expense_id"] = expense_id
+    else:
+        query["expense_id"] = {"$exists": False}
+    authorization = await db.expense_edit_authorizations.find_one_and_delete(query, projection={"_id": 0})
+    if not authorization:
+        raise HTTPException(403, "Supervisor approval is required for this expense action")
+    return authorization
+
+@api.post("/expenses/authorize-create")
+async def authorize_expense_create(body: ExpenseAuthorizationIn, user=Depends(get_current_user)):
+    return await create_expense_authorization(None, "create", body.password, user)
+
+@api.post("/expenses/{eid}/authorize-action")
+async def authorize_expense_action(eid: str, body: ExpenseActionAuthorizationIn, user=Depends(get_current_user)):
+    if body.action not in {"edit", "void", "monthly_actual"}:
+        raise HTTPException(400, "Unsupported supervisor action")
+    return await create_expense_authorization(eid, body.action, body.password, user)
 
 def _check_expense(body):
     if body.amount <= 0:
@@ -4913,10 +5909,17 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
 @api.post("/expenses")
 async def add_expense(body: ExpenseIn, user=Depends(get_current_user)):
     _check_expense(body)
+    authorization = await consume_expense_authorization(
+        body.supervisor_authorization, None, "create", user,
+    )
     d = body.model_dump()
+    d.pop("edit_reason", None)
+    d.pop("supervisor_authorization", None)
     d["amount"] = r2(d["amount"])
+    d["supervisor_approved_by"] = authorization["supervisor_id"]
     rec = await insert("expenses", d)
-    await log_audit("expense", rec["id"], "created", user, after=rec)
+    await log_audit("expense", rec["id"], "created", user, after=rec,
+                    reason=f"Supervisor approval by {authorization['supervisor_id']}")
     return rec
 
 @api.put("/expenses/{eid}")
@@ -4925,20 +5928,34 @@ async def edit_expense(eid: str, body: ExpenseIn, user=Depends(get_current_user)
     before = await db.expenses.find_one({"id": eid}, {"_id": 0})
     if not before:
         raise HTTPException(404, "Expense not found")
+    if before.get("voided"):
+        raise HTTPException(409, "A voided expense cannot be edited")
     if before.get("source_key"):
         raise HTTPException(400, "This expense is linked to a spare-part purchase. Edit it from Fleet > Spare Parts")
+    reason = (body.edit_reason or "").strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required to edit an expense")
+    authorization = await consume_expense_authorization(
+        body.supervisor_authorization, eid, "edit", user,
+    )
     d = body.model_dump()
+    d.pop("edit_reason", None)
+    d.pop("supervisor_authorization", None)
     d["amount"] = r2(d["amount"])
+    d["supervisor_approved_by"] = authorization["supervisor_id"]
     rec = await update_doc("expenses", eid, d)
-    await log_audit("expense", eid, "updated", user, before=before, after=rec)
+    await log_audit("expense", eid, "updated", user, before=before, after=rec, reason=reason)
     return rec
 
 @api.post("/expenses/{eid}/void")
 async def void_expense(eid: str, body: ReasonIn, user=Depends(get_current_user)):
     if not body.reason.strip():
         raise HTTPException(400, "A reason is required")
+    authorization = await consume_expense_authorization(
+        body.supervisor_authorization, eid, "void", user,
+    )
     rec = await db.expenses.find_one_and_update({"id": eid, "voided": {"$ne": True}},
-                                                {"$set": {"voided": True, "void_reason": body.reason, "voided_at": now_iso()}},
+                                                {"$set": {"voided": True, "void_reason": body.reason, "voided_at": now_iso(), "supervisor_approved_by": authorization["supervisor_id"]}},
                                                 projection={"_id": 0}, return_document=ReturnDocument.AFTER)
     if not rec:
         raise HTTPException(400, "Expense not found or already voided")
@@ -5145,6 +6162,12 @@ class VehicleRecordIn(BaseModel):
     date: str = Field(default_factory=today_str)
     status: str = "Done"
     notes: Optional[str] = ""
+    edit_reason: Optional[str] = ""
+    supervisor_authorization: Optional[str] = None
+
+class VehicleRecordCancelIn(BaseModel):
+    reason: str
+    supervisor_authorization: Optional[str] = None
 
 @api.get("/vehicles/records/all")
 async def all_vehicle_records(user=Depends(get_current_user)):
@@ -5173,6 +6196,13 @@ async def add_vehicle_record(vid: str, body: VehicleRecordIn, user=Depends(get_c
     if not v:
         raise HTTPException(404, "Vehicle not found")
     d = _check_vrec(body.model_dump())
+    d.pop("edit_reason", None)
+    d.pop("supervisor_authorization", None)
+    if is_billable_vehicle_record(d):
+        authorization = await consume_fleet_expense_authorization(
+            body.supervisor_authorization, "vehicle_record", "create", user, target_id=vid,
+        )
+        d["supervisor_approved_by"] = authorization["supervisor_id"]
     d["vehicle_id"] = vid
     d["vehicle_name"] = v["name"]
     rec = await insert("vehicle_records", d)
@@ -5184,20 +6214,41 @@ async def edit_vehicle_record(rid: str, body: VehicleRecordIn, user=Depends(get_
     before = await db.vehicle_records.find_one({"id": rid}, {"_id": 0})
     if not before:
         raise HTTPException(404, "Record not found")
-    rec = await update_doc("vehicle_records", rid, _check_vrec(body.model_dump()))
+    data = _check_vrec(body.model_dump())
+    data.pop("edit_reason", None)
+    data.pop("supervisor_authorization", None)
+    if is_billable_vehicle_record(before) or is_billable_vehicle_record(data):
+        authorization = await consume_fleet_expense_authorization(
+            body.supervisor_authorization, "vehicle_record", "edit", user, resource_id=rid,
+        )
+        data["supervisor_approved_by"] = authorization["supervisor_id"]
+    rec = await update_doc("vehicle_records", rid, data)
     await log_audit("vehicle_record", rid, "updated", user, before=before, after=rec)
     return rec
 
-@api.delete("/vehicles/records/{rid}")
-async def del_vehicle_record(rid: str, user=Depends(get_current_user)):
+async def _cancel_vehicle_record(rid, supervisor_authorization, user):
     before = await db.vehicle_records.find_one({"id": rid}, {"_id": 0})
     if not before:
         raise HTTPException(404, "Record not found")
-    rec = await update_doc("vehicle_records", rid, {
-        "status": "Cancelled",
-    })
+    updates = {"status": "Cancelled"}
+    if is_billable_vehicle_record(before):
+        authorization = await consume_fleet_expense_authorization(
+            supervisor_authorization, "vehicle_record", "cancel", user, resource_id=rid,
+        )
+        updates["supervisor_approved_by"] = authorization["supervisor_id"]
+    rec = await update_doc("vehicle_records", rid, updates)
     await log_audit("vehicle_record", rid, "cancelled", user, before=before, after=rec)
     return {"ok": True, "cancelled": True}
+
+@api.delete("/vehicles/records/{rid}")
+async def del_vehicle_record(rid: str, user=Depends(get_current_user)):
+    return await _cancel_vehicle_record(rid, None, user)
+
+@api.post("/vehicles/records/{rid}/cancel")
+async def cancel_vehicle_record(rid: str, body: VehicleRecordCancelIn, user=Depends(get_current_user)):
+    if not body.reason.strip():
+        raise HTTPException(400, "A reason is required to cancel a vehicle cost")
+    return await _cancel_vehicle_record(rid, body.supervisor_authorization, user)
 
 # ---------------- Spare parts ----------------
 PART_FLOW = {"to_buy": 0, "bought": 1, "installed": 2}
@@ -5210,8 +6261,83 @@ class SparePartIn(BaseModel):
     vehicle_id: Optional[str] = ""
     status: str = "to_buy"  # to_buy, bought, installed
     notes: Optional[str] = ""
+    edit_reason: Optional[str] = ""
+    supervisor_authorization: Optional[str] = None
 
-async def sync_part_expense(part, user):
+class FleetExpenseAuthorizationIn(BaseModel):
+    password: str
+    resource_type: str
+    action: str
+    resource_id: Optional[str] = None
+    target_id: Optional[str] = None
+
+def is_billable_vehicle_record(record):
+    return record.get("status") in ("Done", "done") and D(record.get("amount", 0)) > 0
+
+async def create_fleet_expense_authorization(body, user):
+    allowed = {
+        "vehicle_record": {"create", "edit", "cancel"},
+        "spare_part": {"create", "edit"},
+    }
+    if body.resource_type not in allowed or body.action not in allowed[body.resource_type]:
+        raise HTTPException(400, "Unsupported Fleet expense action")
+    if body.resource_type == "vehicle_record":
+        if body.action == "create":
+            if not body.target_id or not await db.vehicles.find_one({"id": body.target_id}, {"_id": 0, "id": 1}):
+                raise HTTPException(404, "Vehicle not found")
+        elif not body.resource_id or not await db.vehicle_records.find_one({"id": body.resource_id}, {"_id": 0, "id": 1}):
+            raise HTTPException(404, "Vehicle record not found")
+    elif body.action == "edit":
+        if not body.resource_id or not await db.spareparts.find_one({"id": body.resource_id}, {"_id": 0, "id": 1}):
+            raise HTTPException(404, "Spare part not found")
+
+    supervisor_id, supervisor_name = await authenticate_supervisor(body.password, user)
+    await db.fleet_expense_authorizations.delete_many({
+        "user_id": user["id"],
+        "expires_at": {"$lte": datetime.now(timezone.utc)},
+    })
+    authorization_id = new_id()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+    authorization = {
+        "id": authorization_id,
+        "resource_type": body.resource_type,
+        "action": body.action,
+        "user_id": user["id"],
+        "company_id": user["_active_company_id"],
+        "supervisor_id": supervisor_id,
+        "expires_at": expires_at,
+    }
+    for key in ("resource_id", "target_id"):
+        value = getattr(body, key)
+        if value:
+            authorization[key] = value
+    await db.fleet_expense_authorizations.insert_one(authorization)
+    if body.resource_id:
+        await log_audit(body.resource_type, body.resource_id, f"{body.action}_authorized", user,
+                        reason=f"Supervisor approval by {supervisor_name}")
+    return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
+
+async def consume_fleet_expense_authorization(authorization_id, resource_type, action, user, resource_id=None, target_id=None):
+    query = {
+        "id": authorization_id,
+        "resource_type": resource_type,
+        "action": action,
+        "user_id": user["id"],
+        "company_id": user["_active_company_id"],
+        "expires_at": {"$gt": datetime.now(timezone.utc)},
+        "resource_id": resource_id if resource_id else {"$exists": False},
+        "target_id": target_id if target_id else {"$exists": False},
+    }
+    authorization = await db.fleet_expense_authorizations.find_one_and_delete(query, projection={"_id": 0})
+    if not authorization:
+        raise HTTPException(403, "Supervisor approval is required for this Fleet cost action")
+    return authorization
+
+@api.post("/fleet-expense-authorizations")
+async def authorize_fleet_expense_action(body: FleetExpenseAuthorizationIn, user=Depends(get_current_user)):
+    return await create_fleet_expense_authorization(body, user)
+
+async def sync_part_expense(part, user, supervisor_id=None):
     key = f"sparepart:{part['id']}"
     if PART_FLOW.get(part["status"], 0) < 1:
         return
@@ -5222,9 +6348,13 @@ async def sync_part_expense(part, user):
     data = {"description": f"Spare part: {part['name']} x{part.get('quantity', 1):g}", "amount": r2(cost),
             "category": "Vehicle", "vehicle_id": part.get("vehicle_id", ""), "source_key": key,
             "date": part.get("bought_date") or today_str(), "payment_method": "", "reference": "", "notes": ""}
+    if supervisor_id:
+        data["supervisor_approved_by"] = supervisor_id
     if existing:
         if r2(existing.get("amount")) != r2(cost):
-            await db.expenses.update_one({"source_key": key}, {"$set": {"amount": r2(cost), "updated_at": now_iso()}})
+            await db.expenses.update_one({"source_key": key}, {"$set": {
+                "amount": r2(cost), "updated_at": now_iso(), "supervisor_approved_by": supervisor_id,
+            }})
     else:
         try:
             await insert("expenses", data)
@@ -5244,10 +6374,19 @@ async def add_sparepart(body: SparePartIn, user=Depends(get_current_user)):
     d = body.model_dump()
     if d["status"] not in PART_FLOW:
         raise HTTPException(400, "Invalid status")
+    d.pop("edit_reason", None)
+    d.pop("supervisor_authorization", None)
+    supervisor_id = None
+    if d["status"] != "to_buy":
+        authorization = await consume_fleet_expense_authorization(
+            body.supervisor_authorization, "spare_part", "create", user,
+        )
+        supervisor_id = authorization["supervisor_id"]
+        d["supervisor_approved_by"] = supervisor_id
     if d["status"] != "to_buy":
         d["bought_date"] = today_str()
     d["id"] = new_id()
-    await sync_part_expense(d, user)
+    await sync_part_expense(d, user, supervisor_id)
     rec = await insert("spareparts", d)
     await log_audit("spare_part", rec["id"], "created", user, after=rec)
     return rec
@@ -5262,9 +6401,18 @@ async def edit_sparepart(pid: str, body: SparePartIn, user=Depends(get_current_u
         raise HTTPException(400, "Invalid status")
     if PART_FLOW[d["status"]] < PART_FLOW.get(before.get("status"), 0):
         raise HTTPException(400, "A part cannot move back to an earlier status")
+    d.pop("edit_reason", None)
+    d.pop("supervisor_authorization", None)
+    supervisor_id = None
+    if d["status"] != "to_buy" or before.get("status") != "to_buy":
+        authorization = await consume_fleet_expense_authorization(
+            body.supervisor_authorization, "spare_part", "edit", user, resource_id=pid,
+        )
+        supervisor_id = authorization["supervisor_id"]
+        d["supervisor_approved_by"] = supervisor_id
     d["bought_date"] = before.get("bought_date") or (today_str() if d["status"] != "to_buy" else None)
     d["id"] = pid
-    await sync_part_expense(d, user)
+    await sync_part_expense(d, user, supervisor_id)
     rec = await update_doc("spareparts", pid, d)
     await log_audit("spare_part", pid, "updated", user, before=before, after=rec)
     return rec
@@ -6101,6 +7249,28 @@ async def initialize_multi_company():
 
     for company_id in ("iqfoam-manufactoring", "iqfoam-whole-sallers"):
         await initialize_empty_company(company_id)
+
+    await base_db.product_identifications.create_index("product_id", unique=True)
+    await base_db.product_identifications.create_index(
+        [("company_id", 1), ("stock_id", 1)], unique=True
+    )
+    await base_db.product_identifications.create_index("ean13", unique=True, sparse=True)
+    await base_db.product_identifications.create_index("sku", unique=True, sparse=True)
+    await base_db.product_identifications.create_index(
+        [("company_id", 1), ("category", 1), ("active", 1)]
+    )
+    await base_db.product_identifications.create_index(
+        [("company_id", 1), ("density", 1), ("active", 1)]
+    )
+    await base_db.product_identifications.create_index("qr_payload", unique=True)
+    await base_db.product_identifications.create_index("data_matrix_payload", unique=True)
+    await base_db.product_scans.create_index("scan_id", unique=True, sparse=True)
+    await base_db.product_scans.create_index([("company_id", 1), ("scanned_at", -1)])
+    await base_db.product_scans.create_index([("company_id", 1), ("product_id", 1)])
+    for profile in COMPANY_PROFILES:
+        company_database = tenant_database(client, base_db, profile["id"])
+        async for stock in company_database.stock.find({}, {"_id": 0}):
+            await ensure_product_identification(stock, profile["id"], company_database.stock)
 
     for index_name, index in (await base_db.users.index_information()).items():
         if index_name != "_id_" and index.get("key") == [("username", 1)] and index.get("unique"):

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Link, useNavigate } from "react-router-dom";
-import { Building2, Eye, Pencil, Plus, Search, ShoppingCart, Trash2 } from "lucide-react";
+import { Handshake, Eye, Pencil, Plus, Search, ShoppingCart, Trash2 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtMoney } from "@/lib/format";
 import { Badge, Btn, Card, Empty, Input, Modal, PageHeader, Textarea } from "@/components/common";
@@ -111,7 +111,7 @@ export default function Suppliers() {
 
       <Card className="overflow-hidden">
         {suppliers === null ? <p className="p-6 text-sm text-slate-400" role="status">Loading suppliers...</p> : filtered.length === 0 ? (
-          <Empty icon={Building2} title="No suppliers found" />
+          <Empty icon={Handshake} title="No suppliers found" />
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[700px] text-sm">
