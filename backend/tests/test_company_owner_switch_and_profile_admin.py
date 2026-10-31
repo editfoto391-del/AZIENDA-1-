@@ -148,6 +148,9 @@ def test_superiqfoam_company_owner_write_requires_one_time_supervisor_grant(monk
     grants = Collection()
     monkeypatch.setattr(server, "base_db", Database(supervisor_action_grants=grants))
     monkeypatch.setenv("ADMIN_EMAIL", "primary-owner@example.com")
+    global_owner = {"id": "global-owner", "role": "owner"}
+    assert server.can_skip_supervisor_approval(global_owner)
+    assert server.public_user(global_owner)["can_skip_supervisor_approval"] is True
     user = {
         "id": "company-owner",
         "role": "user",
@@ -174,11 +177,11 @@ def test_superiqfoam_company_owner_write_requires_one_time_supervisor_grant(monk
         "company_roles": {"iqfoam-manufactoring": "admin"},
         "_active_company_id": "iqfoam-manufactoring",
     })
-    def make_request(headers=(), path="/api/stock/stock-1"):
+    def make_request(headers=(), path="/api/stock/stock-1", method="PUT"):
         return Request({
             "type": "http",
             "http_version": "1.1",
-            "method": "PUT",
+            "method": method,
             "scheme": "https",
             "path": path,
             "raw_path": path.encode(),
@@ -203,6 +206,10 @@ def test_superiqfoam_company_owner_write_requires_one_time_supervisor_grant(monk
         with pytest.raises(HTTPException) as error:
             await server.require_supervisor_for_company_write(make_request(), company_admin)
         assert error.value.status_code == 428
+        await server.require_supervisor_for_company_write(
+            make_request(path="/api/grvs/grv-1", method="DELETE"),
+            company_admin,
+        )
         manufacturing_admin = {
             **company_admin,
             "_active_company_id": "iqfoam-manufactoring",

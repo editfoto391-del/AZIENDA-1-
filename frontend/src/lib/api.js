@@ -82,6 +82,7 @@ export const api = {
   post: (u, d) => client.post(u, d).then((r) => { invalidateGetCache(); return r.data; }),
   put: (u, d) => client.put(u, d).then((r) => { invalidateGetCache(); return r.data; }),
   del: (u) => client.delete(u).then((r) => { invalidateGetCache(); return r.data; }),
+  delWithData: (u, d) => client.delete(u, { data: d }).then((r) => { invalidateGetCache(); return r.data; }),
 };
 
 export function apiError(e) {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   Ban, Building2, ClipboardCheck, Clock3, Download, FileText, PackageCheck,
-  Pencil, Plus, RefreshCw, RotateCcw, ShieldAlert,
+  Pencil, Plus, RefreshCw, RotateCcw, ScanLine, ShieldAlert, Trash2,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -213,6 +213,10 @@ export default function GRV() {
   const [settings, setSettings] = useState({});
   const [filters, setFilters] = useState({ date_from: "", date_to: "", supplier_id: "", status: "" });
   const [draft, setDraft] = useState(null);
+  const [scanReceivingMode, setScanReceivingMode] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const [workingId, setWorkingId] = useState("");
 
@@ -347,7 +351,7 @@ export default function GRV() {
             product_code: product.product_id,
             product: product.product,
             size: product.dimensions,
-            unit_cost: Number(selectedStock?.unit_cost || 0),
+            unit_cost: scanReceivingMode ? "" : Number(selectedStock?.unit_cost || 0),
           };
         }
         const line = items[lineIndex];
@@ -363,6 +367,30 @@ export default function GRV() {
       toast.error(apiError(error));
     }
   };
+
+  const deleteGRV = async (event) => {
+    event.preventDefault();
+    if (!deleteTarget || deleteBusy) return;
+    setDeleteBusy(true);
+    try {
+      await api.delWithData(`/grvs/${deleteTarget.id}`, {
+        supervisor_password: deletePassword || undefined,
+      });
+      toast.success(`${deleteTarget.grv_number} deleted`);
+      setDeleteTarget(null);
+      setDeletePassword("");
+      await refresh();
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  const requiresGRVDeletePassword = companyId !== "superiqfoam"
+    && !user?.is_owner && !user?.is_company_owner;
+  const deleteRequiresReversal = deleteTarget
+    && !["draft", "pending_inspection", "cancelled"].includes(deleteTarget.status);
 
   const saveDraft = async (event) => {
     event.preventDefault();
@@ -446,7 +474,14 @@ export default function GRV() {
     <div className="space-y-5" data-testid="grv-page">
       <PageHeader title="Goods Received Vouchers" subtitle="Inspect supplier deliveries and post accepted quantities to Stock">
         <Btn variant="outline" onClick={refresh} disabled={records === null} data-testid="grv-refresh"><RefreshCw size={16} /> Refresh</Btn>
-        <Btn onClick={() => setDraft({ ...blankGRV(), received_by: user?.name || user?.email || "" })} data-testid="grv-create"><Plus size={16} /> Create GRV</Btn>
+        <Btn onClick={() => {
+          setScanReceivingMode(false);
+          setDraft({ ...blankGRV(), received_by: user?.name || user?.email || "" });
+        }} data-testid="grv-create"><Plus size={16} /> Create GRV</Btn>
+        <Btn variant="outline" onClick={() => {
+          setScanReceivingMode(true);
+          setDraft({ ...blankGRV(), received_by: user?.name || user?.email || "" });
+        }} data-testid="grv-quick-create"><ScanLine size={16} /> Quick GRV</Btn>
       </PageHeader>
 
       <Card className="flex flex-wrap items-center gap-3 p-4" data-testid="grv-active-company">
@@ -528,10 +563,11 @@ export default function GRV() {
                     <td className="px-4 py-3 text-right">
                       <div className="flex flex-wrap justify-end gap-1">
                         <button type="button" onClick={() => exportPdf(grv)} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="Download GRV PDF" aria-label={`Download PDF ${grv.grv_number}`} data-testid={`grv-pdf-${grv.id}`}><Download size={16} /></button>
-                        {grv.status === "draft" && <button type="button" onClick={() => setDraft({ ...grv, received_by: grv.received_by || "" })} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="Edit draft" aria-label={`Edit ${grv.grv_number}`} data-testid={`grv-edit-${grv.id}`}><Pencil size={15} /></button>}
+                        {grv.status === "draft" && <button type="button" onClick={() => { setScanReceivingMode(false); setDraft({ ...grv, received_by: grv.received_by || "" }); }} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="Edit draft" aria-label={`Edit ${grv.grv_number}`} data-testid={`grv-edit-${grv.id}`}><Pencil size={15} /></button>}
                         {grv.status === "draft" && <button type="button" onClick={() => act(grv, "inspect")} disabled={busy} className="rounded px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50" data-testid={`grv-inspect-${grv.id}`}>Inspect</button>}
                         {["draft", "pending_inspection", "confirming"].includes(grv.status) && <button type="button" onClick={() => act(grv, "confirm", `Confirm ${grv.grv_number}? Accepted quantities will be posted to Stock once.`)} disabled={busy} className="rounded px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50" data-testid={`grv-confirm-${grv.id}`}>{busy ? "Working..." : grv.status === "confirming" ? "Retry confirm" : "Confirm"}</button>}
                         {["draft", "pending_inspection"].includes(grv.status) && <button type="button" onClick={() => act(grv, "cancel")} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Cancel draft" data-testid={`grv-cancel-${grv.id}`}><Ban size={15} /></button>}
+                        {grv.status !== "reversing" && <button type="button" onClick={() => { setDeleteTarget(grv); setDeletePassword(""); }} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Delete GRV" aria-label={`Delete ${grv.grv_number}`} data-testid={`grv-delete-${grv.id}`}><Trash2 size={15} /></button>}
                         {confirmed && (user?.is_admin || user?.is_owner) && <button type="button" onClick={() => act(grv, "reverse", `Reverse ${grv.grv_number}? This adds traceable stock reversals and reopens its PO quantities when possible.`)} disabled={busy} className="rounded p-1.5 text-red-700 hover:bg-red-50 disabled:opacity-50" title="Reverse confirmed GRV" data-testid={`grv-reverse-${grv.id}`}><RotateCcw size={15} /></button>}
                       </div>
                     </td>
@@ -544,14 +580,17 @@ export default function GRV() {
       </Card>
       <p className="text-xs text-slate-500">GRVs are receiving documents only. They do not create supplier payments, expenses or Buying records. Document file attachments are not enabled in this deployment; delivery note numbers and notes remain available.</p>
 
-      <Modal open={!!draft} onClose={() => !saving && setDraft(null)} title={draft?.id ? `Edit ${draft.grv_number}` : "Create Goods Received Voucher"} wide>
+      <Modal open={!!draft} onClose={() => !saving && setDraft(null)} title={draft?.id ? `Edit ${draft.grv_number}` : scanReceivingMode ? "Receive stock by scanning" : "Create Goods Received Voucher"} wide>
         {draft && <form onSubmit={saveDraft} className="space-y-4 p-1">
+          {scanReceivingMode && <p className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+            Scan a product to match its exact stock size, then enter the received quantity and optional unit cost. Save the GRV, then confirm it to post accepted quantities to stock.
+          </p>}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            <Select label="Purchase order (optional)" value={draft.purchase_order_id} onChange={(event) => chooseOrder(event.target.value)} data-testid="grv-po-select">
+            {!scanReceivingMode && <Select label="Purchase order (optional)" value={draft.purchase_order_id} onChange={(event) => chooseOrder(event.target.value)} data-testid="grv-po-select">
               <option value="">Standalone GRV</option>
               {orders.map((order) => <option key={order.id} value={order.id}>{order.reference} · {order.supplier_name}</option>)}
-            </Select>
-            {draft.purchase_order_id
+            </Select>}
+            {!scanReceivingMode && draft.purchase_order_id
               ? <Input label="Supplier" value={draft.supplier_name} readOnly data-testid="grv-supplier-name" />
               : <Select label="Supplier *" value={draft.supplier_id} onChange={(event) => {
                 const supplier = suppliers.find((item) => item.id === event.target.value);
@@ -562,53 +601,84 @@ export default function GRV() {
               </Select>}
             <Input label="Received date *" type="date" value={draft.received_date} onChange={(event) => setDraft({ ...draft, received_date: event.target.value })} required data-testid="grv-received-date" />
             <Input label="Delivery note number" value={draft.delivery_note_number} onChange={(event) => setDraft({ ...draft, delivery_note_number: event.target.value })} data-testid="grv-delivery-note" />
-            <Input label="Received by" value={draft.received_by} onChange={(event) => setDraft({ ...draft, received_by: event.target.value })} data-testid="grv-received-by" />
+            <Input label={scanReceivingMode ? "Scanned by *" : "Received by"} value={draft.received_by} onChange={(event) => setDraft({ ...draft, received_by: event.target.value })} required={scanReceivingMode} data-testid="grv-received-by" />
             <Input label="Warehouse" value={draft.warehouse} onChange={(event) => setDraft({ ...draft, warehouse: event.target.value })} data-testid="grv-warehouse" />
           </div>
 
-          <div className="max-w-xl">
-            <BarcodeScanner onScan={scanGRVProduct} disabled={saving} dedupeWindowMs={0} label="Scan received product to count accepted units" />
-          </div>
+          {scanReceivingMode && <div className="max-w-xl">
+            <BarcodeScanner onScan={scanGRVProduct} disabled={saving} dedupeWindowMs={0} label="Scan product to match its stock size" />
+          </div>}
           <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="w-full min-w-[1100px] text-xs">
+            <table className={`w-full ${scanReceivingMode ? "min-w-[700px]" : "min-w-[1000px]"} text-xs`}>
               <thead><tr className="bg-slate-50 text-left text-slate-500">
-                <th className="p-2">Product / size</th><th className="p-2 text-right">Ordered</th>
-                <th className="p-2 text-right">Previously received</th><th className="p-2 text-right">Remaining</th>
-                <th className="p-2 text-right">Actually received</th><th className="p-2 text-right">Accepted</th>
-                <th className="p-2 text-right">Rejected</th><th className="p-2 text-right">Damaged</th>
-                <th className="p-2 text-right">Unit cost</th><th className="p-2 text-right">Total value</th>
-                {!draft.purchase_order_id && <th className="p-2"> </th>}
+                <th className="p-2">Product / size</th>
+                {scanReceivingMode
+                  ? <><th className="p-2 text-right">Quantity received</th><th className="p-2 text-right">Unit cost (optional)</th><th className="p-2 text-right">Total value</th><th className="p-2"> </th></>
+                  : <><th className="p-2 text-right">Ordered</th><th className="p-2 text-right">Remaining</th>
+                    <th className="p-2 text-right">Actually received</th><th className="p-2 text-right">Accepted</th>
+                    <th className="p-2 text-right">Rejected</th><th className="p-2 text-right">Damaged</th>
+                    <th className="p-2 text-right">Unit cost</th><th className="p-2 text-right">Total value</th>
+                    {!draft.purchase_order_id && <th className="p-2"> </th>}</>}
               </tr></thead>
               <tbody>{draft.items.map((line, index) => (
                 <tr key={`${line.stock_id}-${index}`} className="border-t border-border/70">
                   <td className="p-2">
-                    {!draft.purchase_order_id
+                    {scanReceivingMode
+                      ? <><span className="block font-semibold text-slate-800">{line.product || "Scan a product"}</span><span className="text-slate-500">{line.size}{line.product_code ? ` · ${line.product_code}` : ""}</span></>
+                      : !draft.purchase_order_id
                       ? <Select aria-label="Stock product" value={line.stock_id} onChange={(event) => chooseStock(index, event.target.value)} data-testid={`grv-stock-${index}`}>
                         <option value="">Select stock item</option>
                         {stock.map((item) => <option key={item.id} value={item.id}>{item.product} · {item.size}</option>)}
                       </Select>
                       : <><span className="block font-semibold text-slate-800">{line.product}</span><span className="text-slate-500">{line.size} · {line.product_code}</span></>}
                   </td>
-                  {[["ordered_quantity", line.ordered_quantity], ["previously_received_quantity", line.previously_received_quantity], ["remaining_quantity", line.remaining_quantity]].map(([key, value]) => (
-                    <td key={key} className="p-2 text-right font-mono">{value || 0}</td>
-                  ))}
-                  {[
-                    ["actual_received_quantity", line.actual_received_quantity],
-                    ["accepted_quantity", line.accepted_quantity],
-                    ["rejected_quantity", line.rejected_quantity],
-                    ["damaged_quantity", line.damaged_quantity],
-                    ["unit_cost", line.unit_cost],
-                  ].map(([key, value]) => (
-                    <td key={key} className="p-2">
-                      <input type="number" min="0" step={key === "unit_cost" ? "0.01" : "0.01"} value={value}
-                        onChange={(event) => updateLine(index, key, Number(event.target.value))}
-                        aria-label={`${key.replaceAll("_", " ")} line ${index + 1}`}
+                  {scanReceivingMode ? <>
+                    <td className="p-2">
+                      <input type="number" min="0" step="0.01" value={line.actual_received_quantity}
+                        onChange={(event) => {
+                          const quantity = Number(event.target.value);
+                          setDraft((current) => ({
+                            ...current,
+                            items: current.items.map((item, lineIndex) => lineIndex === index
+                              ? { ...item, actual_received_quantity: quantity, accepted_quantity: quantity }
+                              : item),
+                          }));
+                        }}
+                        aria-label={`Quantity received line ${index + 1}`}
                         className="w-24 rounded border border-input px-2 py-1.5 text-right font-mono"
-                        data-testid={`grv-${key}-${index}`} />
+                        data-testid={`grv-quick-quantity-${index}`} />
                     </td>
-                  ))}
-                  <td className="p-2 text-right font-mono font-semibold">{fmtMoney(lineValue(line))}</td>
-                  {!draft.purchase_order_id && <td className="p-2"><button type="button" onClick={() => setDraft({ ...draft, items: draft.items.filter((_, row) => row !== index) })} className="text-xs text-red-700 hover:underline">Remove</button></td>}
+                    <td className="p-2">
+                      <input type="number" min="0" step="0.01" value={line.unit_cost}
+                        onChange={(event) => updateLine(index, "unit_cost", event.target.value)}
+                        aria-label={`Optional unit cost line ${index + 1}`}
+                        className="w-28 rounded border border-input px-2 py-1.5 text-right font-mono"
+                        data-testid={`grv-quick-unit-cost-${index}`} />
+                    </td>
+                    <td className="p-2 text-right font-mono font-semibold">{fmtMoney(lineValue(line))}</td>
+                    <td className="p-2"><button type="button" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((_, row) => row !== index) }))} className="text-xs text-red-700 hover:underline">Remove</button></td>
+                  </> : <>
+                    {[["ordered_quantity", line.ordered_quantity], ["remaining_quantity", line.remaining_quantity]].map(([key, value]) => (
+                      <td key={key} className="p-2 text-right font-mono">{value || 0}</td>
+                    ))}
+                    {[
+                      ["actual_received_quantity", line.actual_received_quantity],
+                      ["accepted_quantity", line.accepted_quantity],
+                      ["rejected_quantity", line.rejected_quantity],
+                      ["damaged_quantity", line.damaged_quantity],
+                      ["unit_cost", line.unit_cost],
+                    ].map(([key, value]) => (
+                      <td key={key} className="p-2">
+                        <input type="number" min="0" step="0.01" value={value}
+                          onChange={(event) => updateLine(index, key, Number(event.target.value))}
+                          aria-label={`${key.replaceAll("_", " ")} line ${index + 1}`}
+                          className="w-24 rounded border border-input px-2 py-1.5 text-right font-mono"
+                          data-testid={`grv-${key}-${index}`} />
+                      </td>
+                    ))}
+                    <td className="p-2 text-right font-mono font-semibold">{fmtMoney(lineValue(line))}</td>
+                    {!draft.purchase_order_id && <td className="p-2"><button type="button" onClick={() => setDraft({ ...draft, items: draft.items.filter((_, row) => row !== index) })} className="text-xs text-red-700 hover:underline">Remove</button></td>}
+                  </>}
                 </tr>
               ))}</tbody>
             </table>
@@ -619,6 +689,31 @@ export default function GRV() {
           <div className="flex justify-end gap-2">
             <Btn type="button" variant="outline" onClick={() => setDraft(null)} disabled={saving}>Cancel</Btn>
             <Btn type="submit" disabled={saving} data-testid="grv-save-draft">{saving ? "Saving..." : draft.id ? "Save changes" : "Save GRV draft"}</Btn>
+          </div>
+        </form>}
+      </Modal>
+
+      <Modal open={!!deleteTarget} onClose={() => !deleteBusy && setDeleteTarget(null)} title="Delete GRV">
+        {deleteTarget && <form onSubmit={deleteGRV} className="space-y-4">
+          <p className="text-sm text-slate-700">
+            Permanently delete <span className="font-semibold">{deleteTarget.grv_number}</span>? This cannot be undone.
+            {deleteRequiresReversal && " This GRV has affected stock. Use Reverse first, then delete it to preserve the stock history."}
+          </p>
+          {!deleteRequiresReversal && requiresGRVDeletePassword && <Input
+            label="Supervisor password"
+            type="password"
+            autoComplete="current-password"
+            autoFocus
+            required
+            value={deletePassword}
+            onChange={(event) => setDeletePassword(event.target.value)}
+            data-testid="grv-delete-supervisor-password"
+          />}
+          <div className="flex justify-end gap-2">
+            <Btn type="button" variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}>Cancel</Btn>
+            <Btn type="submit" variant="danger" disabled={deleteBusy || deleteRequiresReversal || (requiresGRVDeletePassword && !deletePassword)} data-testid="grv-delete-confirm">
+              {deleteBusy ? "Deleting..." : "Delete GRV"}
+            </Btn>
           </div>
         </form>}
       </Modal>

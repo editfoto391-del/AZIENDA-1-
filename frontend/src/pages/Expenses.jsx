@@ -7,6 +7,7 @@ import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/com
 import { Banknote, Eye, Plus, TrendingUp, TrendingDown, Wallet, Trash2, Pencil } from "lucide-react";
 
 const CATS = ["General", "Materials", "Fuel", "Diesel", "Salaries", "Rent", "Utilities", "Vehicle", "Maintenance", "Other"];
+const SUPERIQFOAM_CATS = ["Bilal", "Yassine", "Bilal and Yassine", "Personal Car", "Home"];
 const blank = () => ({ description: "", amount: "", date: today(), category: "General", payment_method: "Cash", reference: "", vehicle_id: "", notes: "" });
 
 function Stat({ label, value, icon: Icon, tone, testid }) {
@@ -39,6 +40,8 @@ function ProfitPanel({ title, p, testid }) {
 
 export default function Expenses() {
   const { user } = useAuth();
+  const isSuperIqFoam = user?.company_id === "superiqfoam";
+  const categories = isSuperIqFoam ? [...CATS, ...SUPERIQFOAM_CATS] : CATS;
   const [list, setList] = useState(null);
   const [report, setReport] = useState(null);
   const [costs, setCosts] = useState(null);
@@ -160,7 +163,7 @@ export default function Expenses() {
 
       <Card className="overflow-hidden">
         <div className="flex flex-wrap items-end gap-3 p-4 border-b border-border">
-          <div className="w-44"><Select label="Category" value={cat} onChange={(e) => setCat(e.target.value)} data-testid="expense-filter-category"><option value="">All</option>{CATS.map((c) => <option key={c}>{c}</option>)}</Select></div>
+          <div className="w-44"><Select label="Category" value={cat} onChange={(e) => setCat(e.target.value)} data-testid="expense-filter-category"><option value="">All</option>{categories.map((c) => <option key={c}>{c}</option>)}</Select></div>
           <div className="w-44"><Input label="Month" type="month" value={month} onChange={(e) => setMonth(e.target.value)} data-testid="expense-filter-month" /></div>
           <div className="w-56"><Input label="Search" placeholder="Description or reference" value={q} onChange={(e) => setQ(e.target.value)} data-testid="expense-search-input" /></div>
           <div className="ml-auto text-sm text-slate-500">Filtered total: <span className="font-mono font-bold text-slate-800" data-testid="expense-filtered-total">{fmtMoney(filteredTotal)}</span></div>
@@ -224,7 +227,7 @@ export default function Expenses() {
             <Input label="Date" type="date" value={modal.date} onChange={(e) => setModal({ ...modal, date: e.target.value })} data-testid="expense-date-input" />
           </div>
           <Select label="Category" value={modal.category} onChange={(e) => setModal({ ...modal, category: e.target.value })} data-testid="expense-category-select">
-            {CATS.map((c) => <option key={c}>{c}</option>)}
+            {categories.map((c) => <option key={c}>{c}</option>)}
           </Select>
           <div className="grid grid-cols-2 gap-3">
             <Select label="Payment Method" value={modal.payment_method || ""} onChange={(e) => setModal({ ...modal, payment_method: e.target.value })} data-testid="expense-method-select">

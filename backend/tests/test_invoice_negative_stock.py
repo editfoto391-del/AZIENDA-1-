@@ -14,6 +14,17 @@ class FakeCollection:
     async def find_one(self, query, projection=None):
         return deepcopy(next((doc for doc in self.documents if all(doc.get(k) == v for k, v in query.items())), None))
 
+    def find(self, query, projection=None):
+        return FakeCursor(self.documents)
+
+
+class FakeCursor:
+    def __init__(self, documents):
+        self.documents = deepcopy(documents)
+
+    async def to_list(self, limit):
+        return self.documents if limit is None else self.documents[:limit]
+
 
 class FakeDatabase:
     def __init__(self):
@@ -21,6 +32,9 @@ class FakeDatabase:
             "id": "stock-1", "product": "Simple", "size": "1070x100", "current": 0,
         }])
         self.stock_movements = FakeCollection()
+
+    def __getitem__(self, collection):
+        return getattr(self, collection)
 
 
 def test_invoice_negative_stock_requires_confirmation_and_is_scoped(monkeypatch):
@@ -65,6 +79,8 @@ def test_invoice_negative_stock_requires_confirmation_and_is_scoped(monkeypatch)
         )
         assert inserted_movements[0]["direction"] == -1
         assert inserted_movements[0]["quantity"] == 1
+        assert inserted_movements[0]["batch_allocations"][0]["cost_status"] == "unavailable"
+        assert inserted_movements[0]["batch_allocations"][0]["unit_cost"] is None
 
         changes = {"stock-1": server.D("1")}
         with pytest.raises(HTTPException) as edit_error:

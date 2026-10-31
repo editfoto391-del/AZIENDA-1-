@@ -354,8 +354,8 @@ export default function InvoiceEditor() {
     }
     saveLockRef.current = true;
     setBusy(true);
+    let customerId = resolvedCustomerId || inv.customer_id;
     try {
-      let customerId = resolvedCustomerId || inv.customer_id;
       if (saveNewEntries && !customerId) {
         const existingCustomer = customers.find((customer) => customer.name.trim().toLowerCase() === inv.customer_name.trim().toLowerCase());
         if (existingCustomer) customerId = existingCustomer.id;

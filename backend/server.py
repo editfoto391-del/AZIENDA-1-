@@ -468,6 +468,8 @@ def is_delegated_company_admin(user):
     )
 
 def can_skip_supervisor_approval(user):
+    if user.get("role") == "owner" and not user.get("is_worker"):
+        return True
     return (
         user.get("role") != "owner"
         and not user.get("is_worker")
@@ -490,6 +492,10 @@ async def require_supervisor_for_company_write(request, user):
         or user.get("role") == "owner"
         or not is_delegated_company_admin(user)
         or user.get("_active_company_id") != DEFAULT_COMPANY_ID
+        or (
+            request.method == "DELETE"
+            and re.fullmatch(r"/api/grvs/[^/]+", request.url.path)
+        )
         or is_supervisor_password_endpoint(request.url.path)
     ):
         return
@@ -2002,8 +2008,8 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
     inv["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
     return inv
 
-async def authenticate_supervisor(password, user):
-    if can_skip_supervisor_approval(user):
+async def authenticate_supervisor(password, user, allow_skip=True):
+    if allow_skip and can_skip_supervisor_approval(user):
         return user["id"], "IQFOAM Wholesalers admin in IQFOAM Manufacturing"
     company_id = user["_active_company_id"]
     company_settings = await db.settings.find_one({"id": "singleton"}, {"_id": 0})
@@ -2073,6 +2079,7 @@ async def consume_invoice_action_authorization(authorization_id, iid, action, us
             "user_id": user["id"],
             "company_id": user["_active_company_id"],
             "action": action,
+            "supervisor_id": user["id"],
             "supervisor_exempt": True,
         }
     query = {
@@ -2125,7 +2132,10 @@ async def restore_invoice_stock(inv, user):
                 direction=1,
                 dedupe_key=f"invoice-archive:{inv['id']}:{inv.get('updated_at') or inv.get('created_at')}:{stock_id}",
                 extra={"invoice_id": inv["id"], "invoice_number": inv.get("number", ""),
-                       "invoice_stock_return": True},
+                       "invoice_stock_return": True,
+                       "batch_allocations": await invoice_return_batch_allocations(
+                           inv["id"], stock_id, quantity,
+                       )},
             )
             await log_audit("stock_movement", movement["id"], "posted", user, after=movement)
     await update_doc("invoices", inv["id"], {"stock_deducted": False, "stock_restored": True})
@@ -3012,6 +3022,177 @@ async def post_movement(stock, mtype, qty, user, reason="", reference="", notes=
         m["dedupe_key"] = dedupe_key
     return await insert("stock_movements", m)
 
+def allocate_fifo_batches(stock_id, opening_quantity, movements, requested_quantity):
+    batches = []
+    deficit = Decimal("0")
+    opening = D(opening_quantity)
+    if opening > 0:
+        batches.append({
+            "batch_id": f"opening:{stock_id}", "remaining": opening,
+            "unit_cost": None, "cost_status": "unavailable",
+            "source_type": "opening_stock",
+        })
+
+    ordered = sorted(
+        movements,
+        key=lambda movement: (str(movement.get("created_at") or movement.get("date") or ""), str(movement.get("id") or "")),
+    )
+
+    def consume(quantity, batch_id=None, source_allocations=None):
+        nonlocal deficit
+        remaining = D(quantity)
+        if source_allocations is not None:
+            for allocation in source_allocations:
+                allocation_quantity = D(allocation.get("quantity", 0))
+                if allocation_quantity <= 0:
+                    continue
+                wanted = min(remaining, allocation_quantity)
+                if wanted <= 0:
+                    break
+                for batch in batches:
+                    if batch["batch_id"] == allocation.get("batch_id"):
+                        take = min(wanted, batch["remaining"])
+                        batch["remaining"] -= take
+                        wanted -= take
+                        remaining -= take
+                        if wanted <= 0:
+                            break
+        for batch in batches:
+            if remaining <= 0:
+                break
+            if batch_id and batch["batch_id"] != batch_id:
+                continue
+            take = min(remaining, batch["remaining"])
+            batch["remaining"] -= take
+            remaining -= take
+        if remaining > 0:
+            deficit += remaining
+        batches[:] = [batch for batch in batches if batch["remaining"] > 0]
+
+    for movement in ordered:
+        quantity = D(movement.get("quantity", 0))
+        if quantity <= 0:
+            continue
+        sign = mov_sign(movement)
+        allocations = movement.get("batch_allocations")
+        if sign < 0:
+            consume(quantity, source_allocations=allocations if isinstance(allocations, list) else None)
+            continue
+
+        if isinstance(allocations, list) and allocations:
+            incoming = [
+                {
+                    "batch_id": allocation.get("batch_id") or f"return:{movement.get('id')}",
+                    "remaining": D(allocation.get("quantity", 0)),
+                    "unit_cost": allocation.get("unit_cost"),
+                    "cost_status": allocation.get("cost_status", "unavailable"),
+                    "source_type": allocation.get("source_type") or movement.get("type", ""),
+                    "source_date": allocation.get("source_date") or movement.get("date"),
+                    "grv_id": allocation.get("grv_id"),
+                    "production_id": allocation.get("production_id"),
+                }
+                for allocation in allocations
+                if D(allocation.get("quantity", 0)) > 0
+            ]
+        else:
+            historical_cost = movement.get("unit_cost")
+            verified = (
+                historical_cost is not None
+                and movement.get("historical_cost_status") != "unavailable"
+                and (movement.get("historical_cost_status") == "verified"
+                     or (movement.get("type") == "purchase" and D(historical_cost) > 0))
+            )
+            incoming = [{
+                "batch_id": movement.get("batch_id") or movement.get("id") or f"movement:{len(batches)}",
+                "remaining": quantity,
+                "unit_cost": r2(historical_cost) if verified else None,
+                "cost_status": "verified" if verified else "unavailable",
+                "source_type": movement.get("type", ""),
+                "source_date": movement.get("batch_date") or movement.get("date"),
+                "grv_id": movement.get("grv_id"),
+                "production_id": movement.get("production_id"),
+            }]
+        for batch in incoming:
+            if deficit > 0:
+                offset = min(deficit, batch["remaining"])
+                deficit -= offset
+                batch["remaining"] -= offset
+            if batch["remaining"] > 0:
+                batches.append(batch)
+
+    remaining = D(requested_quantity)
+    allocations = []
+    for batch in batches:
+        if remaining <= 0:
+            break
+        quantity = min(remaining, batch["remaining"])
+        if quantity <= 0:
+            continue
+        allocations.append({
+            "batch_id": batch["batch_id"],
+            "quantity": float(quantity),
+            "unit_cost": batch["unit_cost"],
+            "cost_status": batch["cost_status"],
+            "source_type": batch["source_type"],
+            "source_date": batch.get("source_date"),
+            "grv_id": batch.get("grv_id"),
+            "production_id": batch.get("production_id"),
+        })
+        remaining -= quantity
+    if remaining > 0:
+        allocations.append({
+            "batch_id": f"unallocated:{stock_id}",
+            "quantity": float(remaining),
+            "unit_cost": None,
+            "cost_status": "unavailable",
+            "source_type": "stock_shortage",
+        })
+    return allocations
+
+async def invoice_return_batch_allocations(invoice_id, stock_id, quantity):
+    movements = await listall("stock_movements", {
+        "invoice_id": invoice_id, "stock_id": stock_id, "type": "invoice",
+    })
+    consumed = {}
+    metadata = {}
+    for movement in sorted(movements, key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or ""))):
+        allocations = movement.get("batch_allocations")
+        if not isinstance(allocations, list):
+            continue
+        sign = -mov_sign(movement)
+        for allocation in allocations:
+            batch_id = allocation.get("batch_id") or f"unavailable:{stock_id}"
+            consumed[batch_id] = max(
+                Decimal("0"),
+                D(consumed.get(batch_id, 0)) + D(allocation.get("quantity", 0)) * sign,
+            )
+            metadata[batch_id] = allocation
+
+    remaining = D(quantity)
+    result = []
+    for batch_id, used in reversed(list(consumed.items())):
+        take = min(remaining, used)
+        if take <= 0:
+            continue
+        original = metadata[batch_id]
+        result.append({
+            "batch_id": batch_id, "quantity": float(take),
+            "unit_cost": original.get("unit_cost"),
+            "cost_status": original.get("cost_status", "unavailable"),
+            "source_type": original.get("source_type", ""),
+            "source_date": original.get("source_date"),
+            "grv_id": original.get("grv_id"),
+            "production_id": original.get("production_id"),
+        })
+        remaining -= take
+    if remaining > 0:
+        result.append({
+            "batch_id": f"unallocated:{stock_id}", "quantity": float(remaining),
+            "unit_cost": None, "cost_status": "unavailable",
+            "source_type": "unallocated_invoice_return",
+        })
+    return result
+
 def invoice_stock_product(item):
     category = (item.get("category") or "").strip()
     if category.casefold() in ("standard", "simple/mix color"):
@@ -3076,7 +3257,14 @@ async def post_invoice_stock_deductions(invoice, deductions, user):
             reason=f"Invoice {invoice['number']}", reference=invoice["number"],
             dedupe_key=key,
             allow_negative=True,
-            extra={"invoice_id": invoice["id"], "invoice_number": invoice["number"]},
+            extra={
+                "invoice_id": invoice["id"], "invoice_number": invoice["number"],
+                "batch_allocations": allocate_fifo_batches(
+                    item["stock_id"], item["stock"].get("opening", 0),
+                    await listall("stock_movements", {"stock_id": item["stock_id"]}),
+                    item["quantity"],
+                ),
+            },
         )
         await log_audit("stock_movement", movement["id"], "posted", user, after=movement)
 
@@ -3134,8 +3322,18 @@ async def post_invoice_stock_changes(invoice, changes, stocks, user):
             direction=-1 if delta > 0 else 1,
             allow_negative=True,
             dedupe_key=f"invoice-edit:{invoice['id']}:{new_id()}:{stock_id}",
-            extra={"invoice_id": invoice["id"], "invoice_number": invoice.get("number", ""),
-                   "invoice_edit": True},
+            extra={
+                "invoice_id": invoice["id"], "invoice_number": invoice.get("number", ""),
+                "invoice_edit": True,
+                "batch_allocations": (
+                    allocate_fifo_batches(
+                        stock_id, stock.get("opening", 0),
+                        await listall("stock_movements", {"stock_id": stock_id}),
+                        delta,
+                    ) if delta > 0 else
+                    await invoice_return_batch_allocations(invoice["id"], stock_id, abs(delta))
+                ),
+            },
         )
         await log_audit("stock_movement", movement["id"], "posted", user, after=movement)
 
@@ -3428,7 +3626,14 @@ async def receive_production(pid: str, body: ReceiveIn, user=Depends(get_current
         raise HTTPException(400, "This production has already been received into stock")
     try:
         m = await post_movement(s, "production", body.quantity, user, f"Production {p['block_ref']}", p["block_ref"],
-                                dedupe_key=f"production:{pid}", extra={"production_id": pid})
+                                dedupe_key=f"production:{pid}", extra={
+                                    "production_id": pid,
+                                    "batch_id": f"production:{pid}",
+                                    "batch_date": p.get("production_date"),
+                                    "batch_quantity": r2(body.quantity),
+                                    "historical_cost_status": "unavailable",
+                                    "historical_cost_reason": "Actual production cost is not recorded on this production receipt.",
+                                })
     except DuplicateKeyError:
         raise HTTPException(400, "This production has already been received into stock")
     except Exception:
@@ -4790,6 +4995,9 @@ class GRVIn(BaseModel):
     notes: Optional[str] = ""
     items: List[GRVLineIn] = Field(default_factory=list)
 
+class GRVDeleteIn(BaseModel):
+    supervisor_password: Optional[str] = None
+
 class MonthlyBusinessPurchaseIn(BaseModel):
     name: str
     supplier_name: Optional[str] = ""
@@ -5019,6 +5227,7 @@ async def consume_monthly_purchase_authorization(authorization_id, purchase_id, 
             "user_id": user["id"],
             "company_id": user["_active_company_id"],
             "action": action,
+            "supervisor_id": user["id"],
             "supervisor_exempt": True,
         }
     query = {
@@ -5554,6 +5763,10 @@ async def confirm_grv(grv_id: str, user=Depends(get_current_user)):
                                 "warehouse": grv.get("warehouse", ""),
                                 "unit_cost": item["unit_cost"],
                                 "total_value": item["total_value"],
+                                "batch_id": f"grv:{grv_id}:{item['stock_id']}",
+                                "batch_date": grv["received_date"],
+                                "batch_quantity": item["quantity"],
+                                "historical_cost_status": "verified" if D(item["unit_cost"]) > 0 else "unavailable",
                             },
                         )
                         await log_audit("stock_movement", movement["id"], "posted", user, after=movement)
@@ -5701,6 +5914,17 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
                         409,
                         f"Cannot reverse {item['product']} {item['size']}: only {stock['current']} remain in stock",
                     )
+                received_movement = await db.stock_movements.find_one(
+                    {"dedupe_key": f"grv:{grv_id}:{item['stock_id']}"},
+                    {"_id": 0},
+                )
+                unit_cost = received_movement.get("unit_cost") if received_movement else item.get("unit_cost")
+                cost_status = (
+                    received_movement.get("historical_cost_status")
+                    if received_movement else None
+                )
+                if not cost_status:
+                    cost_status = "verified" if unit_cost is not None and D(unit_cost) > 0 else "unavailable"
                 movement = await post_movement(
                     stock, "reversal", item["quantity"], user,
                     reason=f"Reversal of {grv['grv_number']}",
@@ -5711,6 +5935,18 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
                         "reverses_grv": True,
                         "reversal_reason": reason,
                         "warehouse": grv.get("warehouse", ""),
+                        "batch_allocations": [{
+                            "batch_id": (
+                                (received_movement.get("batch_id") or received_movement.get("id"))
+                                if received_movement else f"grv:{grv_id}:{item['stock_id']}"
+                            ),
+                            "quantity": item["quantity"],
+                            "unit_cost": unit_cost if cost_status == "verified" else None,
+                            "cost_status": cost_status,
+                            "source_type": "purchase",
+                            "source_date": grv.get("received_date"),
+                            "grv_id": grv_id,
+                        }],
                     },
                 )
                 await log_audit("stock_movement", movement["id"], "posted", user, after=movement,
@@ -5770,6 +6006,37 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
     })
     await log_audit("grv", grv_id, "reversed", user, before=grv, after=updated, reason=reason)
     return updated
+
+@api.delete("/grvs/{grv_id}")
+async def delete_grv(
+    grv_id: str, body: GRVDeleteIn = GRVDeleteIn(),
+    user=Depends(get_current_user),
+):
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    role = user.get("_active_role") or company_role(user, company_id)
+    is_owner = user.get("role") == "owner" or role == "owner"
+    is_worker = user.get("is_worker", False)
+    if role not in ("owner", "admin") and not (
+        is_worker and set(user.get("worker_allowed_sections") or []).intersection({"grv", "costs"})
+    ):
+        raise HTTPException(403, "Administrator or GRV worker access required")
+
+    grv = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
+    if not grv:
+        raise HTTPException(404, "GRV not found")
+    if grv.get("status") not in ("draft", "pending_inspection", "cancelled"):
+        raise HTTPException(409, "Reverse a confirmed GRV before deleting it")
+
+    if company_id != DEFAULT_COMPANY_ID and not is_owner:
+        if not body.supervisor_password:
+            raise HTTPException(428, "Supervisor password is required to delete this GRV")
+        await authenticate_supervisor(body.supervisor_password, user, allow_skip=False)
+
+    await log_audit("grv", grv_id, "deleted", user, before=grv)
+    result = await db.grvs.delete_one({"id": grv_id})
+    if result.deleted_count != 1:
+        raise HTTPException(409, "GRV changed before it could be deleted")
+    return {"ok": True, "deleted": True}
 
 @api.post("/purchase-orders")
 async def add_purchase_order(body: PurchaseOrderIn, user=Depends(get_current_user)):
@@ -5971,6 +6238,7 @@ async def consume_expense_authorization(authorization_id, expense_id, action, us
             "user_id": user["id"],
             "company_id": user["_active_company_id"],
             "action": action,
+            "supervisor_id": user["id"],
             "supervisor_exempt": True,
         }
     query = {
@@ -5999,11 +6267,14 @@ async def authorize_expense_action(eid: str, body: ExpenseActionAuthorizationIn,
         raise HTTPException(400, "Unsupported supervisor action")
     return await create_expense_authorization(eid, body.action, body.password, user)
 
-def _check_expense(body):
+def _check_expense(body, user):
     if body.amount <= 0:
         raise HTTPException(400, "Amount must be greater than 0")
     if not body.description.strip():
         raise HTTPException(400, "Description is required")
+    if body.category in {"Bilal", "Yassine", "Bilal and Yassine", "Personal Car", "Home"}:
+        if user.get("_active_company_id") != DEFAULT_COMPANY_ID:
+            raise HTTPException(400, "Personal expense categories are only available for SUPERIQFOAM")
 
 @api.get("/expenses")
 async def get_expenses(include_voided: bool = False, include_archived: bool = False, user=Depends(get_current_user)):
@@ -6188,9 +6459,427 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
         },
     }
 
+def financial_period_range(period, value):
+    if period == "weekly":
+        try:
+            selected = date.fromisoformat(value)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "Week selector must be a valid YYYY-MM-DD date")
+        start = selected - timedelta(days=selected.weekday())
+        return start, start + timedelta(days=6)
+    if period == "monthly":
+        if not re.fullmatch(r"\d{4}-\d{2}", str(value or "")):
+            raise HTTPException(422, "Month selector must use YYYY-MM format")
+        try:
+            start = date.fromisoformat(f"{value}-01")
+        except ValueError:
+            raise HTTPException(422, "Month selector must be a valid YYYY-MM month")
+        next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return start, next_month - timedelta(days=1)
+    raise HTTPException(422, "Period must be weekly or monthly")
+
+def financial_record_date(record, field="date"):
+    value = record.get(field)
+    if isinstance(value, datetime):
+        parsed = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(TZ).date()
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if len(text) > 10:
+            return parse_dt(text).astimezone(TZ).date()
+        return date.fromisoformat(text[:10])
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+def financial_report_company(user, requested_company_id=None):
+    company_id = requested_company_id or user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    if company_id not in allowed_company_ids(user):
+        raise HTTPException(403, "You do not have access to financial reports for this company")
+    return company_id
+
+async def financial_period_records(collection, start, end, date_field="date", conditions=None):
+    lower_date = (start - timedelta(days=1)).isoformat()
+    upper_date = (end + timedelta(days=2)).isoformat()
+    lower_dt = datetime.combine(start, datetime.min.time(), TZ).astimezone(timezone.utc) - timedelta(days=1)
+    upper_dt = datetime.combine(end + timedelta(days=1), datetime.min.time(), TZ).astimezone(timezone.utc)
+    query = {"$and": [
+        {"$or": [
+            {date_field: {"$gte": lower_date, "$lt": upper_date}},
+            {date_field: {"$gte": lower_dt, "$lt": upper_dt}},
+        ]},
+        conditions or {},
+    ]}
+    records = await db[collection].find(query, {"_id": 0}).to_list(None)
+    return [
+        record for record in records
+        if (record_date := financial_record_date(record, date_field)) is not None
+        and start <= record_date <= end
+    ]
+
+def _financial_transaction(record, category, amount, description=None, supplier=None, reference=None):
+    return {
+        "id": record.get("id"),
+        "date": record.get("date") or record.get("received_date") or "",
+        "category": category,
+        "description": description or record.get("description") or "",
+        "supplier": supplier or "",
+        "amount": r2(amount),
+        "reference": reference or record.get("reference") or record.get("number") or "",
+        "source_record": record,
+    }
+
+def build_financial_report(start, end, mode, *, invoices, payments, linked_payments,
+                           expenses, vehicle_records, buyings, grvs, invoice_movements):
+    payments_by_invoice = {}
+    for payment in linked_payments:
+        if payment.get("reversed") or payment.get("archived"):
+            continue
+        payment_id = payment.get("invoice_id")
+        payments_by_invoice[payment_id] = (
+            D(payments_by_invoice.get(payment_id, 0)) + D(payment.get("amount", 0))
+        )
+
+    issued_invoices = [
+        invoice for invoice in invoices
+        if not invoice.get("archived")
+        and invoice.get("status") not in ("draft", "void")
+        and invoice.get("number")
+    ]
+    invoice_rows = []
+    pending_rows = []
+    revenue_values = []
+    pending_values = []
+    invoices_by_id = {invoice.get("id"): invoice for invoice in issued_invoices}
+    for invoice in issued_invoices:
+        amount = r2(invoice.get("total", 0))
+        revenue_values.append(amount)
+        paid = payments_by_invoice.get(invoice.get("id"))
+        if paid is None:
+            paid = D(invoice.get("amount_paid", 0))
+        outstanding = max(D(amount) - paid, Decimal("0"))
+        pending_values.append(outstanding)
+        invoice_rows.append(_financial_transaction(
+            invoice, "Invoice", amount,
+            description=invoice.get("customer_name") or invoice.get("description") or "",
+            reference=invoice.get("number") or "",
+        ) | {"number": invoice.get("number"), "customer_name": invoice.get("customer_name", ""),
+             "outstanding": r2(outstanding), "status": derive_status(invoice),
+             "items": invoice.get("items") or []})
+        if outstanding > 0:
+            pending_rows.append({
+                "id": invoice.get("id"), "number": invoice.get("number"),
+                "customer_name": invoice.get("customer_name", ""),
+                "due_date": invoice.get("due_date"), "amount": r2(outstanding),
+            })
+
+    payment_rows = [
+        _financial_transaction(
+            payment, "Payment", payment.get("amount", 0),
+            description=payment.get("customer_name") or payment.get("notes") or "",
+            reference=payment.get("reference") or payment.get("invoice_number") or "",
+        ) | {"invoice_id": payment.get("invoice_id"),
+             "invoice_number": payment.get("invoice_number", ""),
+             "method": payment.get("method", ""), "notes": payment.get("notes", "")}
+        for payment in payments
+        if not payment.get("reversed") and not payment.get("archived")
+    ]
+
+    expense_rows = [
+        _financial_transaction(
+            expense, expense.get("category") or "General", expense.get("amount", 0),
+            supplier=expense.get("payee") or "",
+            reference=expense.get("reference") or "",
+        ) | {"source": expense.get("source_key") or "expense"}
+        for expense in expenses
+        if not expense.get("voided") and not expense.get("archived")
+    ]
+    expense_rows.extend(
+        _financial_transaction(
+            record, f"Vehicle {str(record.get('type') or 'expense').title()}",
+            record.get("amount", 0),
+            description=record.get("description") or "",
+            supplier=record.get("payee") or "",
+            reference=record.get("reference") or "",
+        ) | {"source": "fleet"}
+        for record in vehicle_records
+        if record.get("status") in VEHICLE_COST_DONE and D(record.get("amount", 0)) > 0
+    )
+    buying_rows = [
+        _financial_transaction(
+            buying, f"Buying · {buying.get('item_type') or 'purchase'}",
+            buying.get("amount", D(buying.get("quantity", 0)) * D(buying.get("unit_price", 0))),
+            description=buying.get("product") or "",
+            supplier=buying.get("source") or buying.get("supplier_name") or "",
+            reference=buying.get("reference") or buying.get("purchase_order_reference") or "",
+        ) | {"item_type": buying.get("item_type", ""),
+             "quantity": buying.get("quantity"), "unit_price": buying.get("unit_price")}
+        for buying in buyings
+        if not buying.get("voided") and not buying.get("archived")
+    ]
+    grv_rows = []
+    for grv in grvs:
+        if grv.get("status") not in ("completed", "partially_received", "discrepancy"):
+            continue
+        amount = dsum(
+            line.get("total_value", D(line.get("accepted_quantity", 0)) * D(line.get("unit_cost", 0)))
+            for line in grv.get("items", [])
+        )
+        grv_rows.append(_financial_transaction(
+            grv, "GRV · Inventory received", amount,
+            description=grv.get("grv_number") or "",
+            supplier=grv.get("supplier_name") or "",
+            reference=grv.get("delivery_note_number") or grv.get("purchase_order_reference") or "",
+        ) | {"grv_number": grv.get("grv_number", ""),
+             "status": grv.get("status"), "items": grv.get("items") or []})
+
+    movements_by_invoice = {}
+    for movement in invoice_movements:
+        if movement.get("type") == "invoice" and movement.get("invoice_id"):
+            movements_by_invoice.setdefault(movement["invoice_id"], []).append(movement)
+    cogs_rows = []
+    unavailable_rows = []
+    cogs_values = []
+    for invoice in issued_invoices:
+        movements = movements_by_invoice.get(invoice.get("id"), [])
+        if not movements:
+            unavailable_rows.append({
+                "id": invoice.get("id"), "number": invoice.get("number"),
+                "customer_name": invoice.get("customer_name", ""),
+                "status": "Historical Cost Unavailable",
+                "reason": "No sale-to-stock-batch allocation is recorded for this invoice.",
+            })
+            continue
+        invoice_cost = Decimal("0")
+        invoice_batches = []
+        complete_cost = True
+        net_quantity_by_stock = {}
+        net_allocations = {}
+        allocated_quantity_by_stock = {}
+        for movement in movements:
+            allocations = movement.get("batch_allocations")
+            moved_quantity = D(movement.get("quantity", 0))
+            if not isinstance(allocations, list) or not allocations:
+                complete_cost = False
+                break
+            stock_id = movement.get("stock_id") or ""
+            movement_sign = -mov_sign(movement)
+            net_quantity_by_stock[stock_id] = (
+                D(net_quantity_by_stock.get(stock_id, 0)) + moved_quantity * movement_sign
+            )
+            allocated_quantity = Decimal("0")
+            for allocation in allocations:
+                quantity = D(allocation.get("quantity", 0))
+                unit_cost = allocation.get("unit_cost")
+                if quantity <= 0:
+                    complete_cost = False
+                    break
+                allocated_quantity += quantity
+                batch_id = allocation.get("batch_id") or f"unavailable:{stock_id}"
+                allocation_key = (stock_id, batch_id)
+                signed_quantity = quantity * movement_sign
+                previous = net_allocations.get(allocation_key, {})
+                net_allocations[allocation_key] = {
+                    "quantity": D(previous.get("quantity", 0)) + signed_quantity,
+                    "unit_cost": unit_cost,
+                    "cost_status": allocation.get("cost_status", "unavailable"),
+                    "source_type": allocation.get("source_type", ""),
+                    "source_date": allocation.get("source_date"),
+                }
+            if not complete_cost or allocated_quantity != moved_quantity:
+                complete_cost = False
+                break
+        if complete_cost:
+            for key, allocation in net_allocations.items():
+                quantity = allocation["quantity"]
+                if quantity < 0:
+                    complete_cost = False
+                    break
+                if quantity == 0:
+                    continue
+                stock_id = key[0]
+                allocated_quantity_by_stock[stock_id] = (
+                    D(allocated_quantity_by_stock.get(stock_id, 0)) + quantity
+                )
+                if allocation["unit_cost"] is None or allocation["cost_status"] == "unavailable":
+                    complete_cost = False
+                    break
+                invoice_cost += quantity * D(allocation["unit_cost"])
+                invoice_batches.append({
+                    "batch_id": key[1],
+                    "quantity": float(quantity),
+                    "unit_cost": r2(allocation["unit_cost"]),
+                    "source_type": allocation["source_type"],
+                    "source_date": allocation["source_date"],
+                })
+        if complete_cost and any(
+            quantity != D(allocated_quantity_by_stock.get(stock_id, 0))
+            for stock_id, quantity in net_quantity_by_stock.items()
+        ):
+            complete_cost = False
+        if complete_cost:
+            cost = r2(invoice_cost)
+            cogs_values.append(cost)
+            cogs_rows.append({
+                "id": invoice.get("id"), "number": invoice.get("number"),
+                "customer_name": invoice.get("customer_name", ""),
+                "date": invoice.get("date"), "amount": cost, "status": "Verified",
+                "batches": invoice_batches,
+            })
+        else:
+            unavailable_rows.append({
+                "id": invoice.get("id"), "number": invoice.get("number"),
+                "customer_name": invoice.get("customer_name", ""),
+                "status": "Historical Cost Unavailable",
+                "reason": "At least one sold quantity has no complete historical batch cost allocation.",
+            })
+
+    revenue = dsum(revenue_values)
+    payment_total = dsum(row["amount"] for row in payment_rows)
+    pending_total = dsum(pending_values)
+    expense_total = dsum(row["amount"] for row in expense_rows)
+    buying_total = dsum(row["amount"] for row in buying_rows)
+    grv_total = dsum(row["amount"] for row in grv_rows)
+    cogs_total = dsum(cogs_values)
+    cogs_complete = not unavailable_rows
+    gross_profit = r2(D(revenue) - D(cogs_total)) if cogs_complete else None
+    if mode == "expenses_only":
+        final_profit = r2(D(revenue) - D(expense_total))
+        profit_status = "Expenses-only result; COGS and inventory purchases are excluded."
+    elif cogs_complete:
+        final_profit = r2(D(revenue) - D(cogs_total) - D(expense_total))
+        profit_status = "Verified from recorded historical batch allocations and eligible expenses."
+    else:
+        final_profit = None
+        profit_status = "Unverified: historical cost is unavailable for one or more issued invoices."
+
+    daily = {}
+    for offset in range((end - start).days + 1):
+        day = (start + timedelta(days=offset)).isoformat()
+        daily[day] = {
+            "date": day, "invoice_count": 0, "sales_revenue": 0,
+            "payment_count": 0, "payments_received": 0,
+            "expense_count": 0, "expenses": 0, "buyings": 0, "grv": 0,
+        }
+    def add_daily(rows, key, count_key=None, date_field="date"):
+        for row in rows:
+            day = financial_record_date(row, date_field)
+            if day is None or day.isoformat() not in daily:
+                continue
+            bucket = daily[day.isoformat()]
+            bucket[key] = r2(D(bucket[key]) + D(row.get("amount", 0)))
+            if count_key:
+                bucket[count_key] += 1
+    add_daily(issued_invoices, "sales_revenue", "invoice_count")
+    add_daily(payment_rows, "payments_received", "payment_count")
+    add_daily(expense_rows, "expenses", "expense_count")
+    add_daily(buying_rows, "buyings")
+    add_daily(grv_rows, "grv")
+    for day in daily.values():
+        known_cost = sum(
+            D(row["amount"]) for row in cogs_rows
+            if str(row.get("date", ""))[:10] == day["date"]
+        )
+        day["cogs"] = r2(known_cost) if cogs_complete or mode == "expenses_only" else None
+        day["final_profit"] = (
+            r2(D(day["sales_revenue"]) - D(day["expenses"]))
+            if mode == "expenses_only"
+            else r2(D(day["sales_revenue"]) - known_cost - D(day["expenses"]))
+            if cogs_complete else None
+        )
+
+    return {
+        "start": start.isoformat(), "end": end.isoformat(), "mode": mode,
+        "summary": {
+            "invoice_count": len(invoice_rows), "total_invoices": revenue,
+            "payment_count": len(payment_rows), "payments_received": payment_total,
+            "pending_payments": pending_total,
+            "sales_revenue": revenue,
+            "cogs": cogs_total if mode == "full_production_cost" and cogs_complete else None,
+            "known_cogs": cogs_total if mode == "full_production_cost" else None,
+            "gross_profit": gross_profit if mode == "full_production_cost" else None,
+            "buying_count": len(buying_rows), "buyings": buying_total,
+            "expense_count": len(expense_rows), "expenses": expense_total,
+            "grv_count": len(grv_rows), "grv": grv_total,
+            "final_profit": final_profit, "profit_status": profit_status,
+            "historical_cost_unavailable_count": len(unavailable_rows),
+        },
+        "accounting_notes": [
+            "Buyings and confirmed GRVs are shown as purchasing/inventory movements and are not deducted as operating expenses.",
+            "Purchases already represented in an allocated batch cost are never subtracted a second time.",
+            "Only issued, non-void invoices count as sales; payments are reported by payment date and are not added to sales revenue.",
+        ],
+        "transactions": {
+            "invoices": invoice_rows, "payments": payment_rows,
+            "pending_payments": pending_rows, "cogs": cogs_rows,
+            "historical_cost_unavailable": unavailable_rows,
+            "expenses": expense_rows, "buyings": buying_rows, "grvs": grv_rows,
+        },
+        "daily": list(daily.values()),
+    }
+
+@api.get("/reports/financial")
+async def get_financial_report(
+    period: str = "weekly", value: str = "", mode: str = "expenses_only",
+    company_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    if mode not in ("expenses_only", "full_production_cost"):
+        raise HTTPException(422, "Mode must be expenses_only or full_production_cost")
+    start, end = financial_period_range(period, value or today_str())
+    report_company_id = financial_report_company(user, company_id)
+    company_context = active_company_id.set(report_company_id)
+
+    async def load_period(period_start, period_end):
+        invoices, payments, expenses, vehicle_records, buyings, grvs = await asyncio.gather(
+            financial_period_records("invoices", period_start, period_end, conditions={"archived": {"$ne": True}}),
+            financial_period_records("payments", period_start, period_end, conditions={"archived": {"$ne": True}}),
+            financial_period_records("expenses", period_start, period_end, conditions={"archived": {"$ne": True}}),
+            financial_period_records("vehicle_records", period_start, period_end),
+            financial_period_records("buyings", period_start, period_end, conditions={"archived": {"$ne": True}}),
+            financial_period_records("grvs", period_start, period_end, date_field="received_date"),
+        )
+        invoice_ids = [invoice["id"] for invoice in invoices if invoice.get("id")]
+        linked_payments, invoice_movements = await asyncio.gather(
+            db.payments.find({
+                "invoice_id": {"$in": invoice_ids}, "archived": {"$ne": True},
+            }, {"_id": 0}).to_list(None) if invoice_ids else asyncio.sleep(0, result=[]),
+            db.stock_movements.find({
+                "invoice_id": {"$in": invoice_ids}, "type": "invoice",
+            }, {"_id": 0}).to_list(None) if invoice_ids else asyncio.sleep(0, result=[]),
+        )
+        return build_financial_report(
+            period_start, period_end, mode,
+            invoices=invoices, payments=payments, linked_payments=linked_payments,
+            expenses=expenses, vehicle_records=vehicle_records, buyings=buyings,
+            grvs=grvs, invoice_movements=invoice_movements,
+        )
+
+    try:
+        report = await load_period(start, end)
+        previous_end = start - timedelta(days=1)
+        previous_start = previous_end - (end - start)
+        previous = await load_period(previous_start, previous_end)
+    finally:
+        active_company_id.reset(company_context)
+    report["period"] = period
+    report["value"] = value
+    report["company_id"] = report_company_id
+    profile = next(
+        (item for item in COMPANY_PROFILES if item["id"] == report["company_id"]), None,
+    )
+    report["company_name"] = profile["name"] if profile else report["company_id"]
+    report["generated_at"] = now_iso()
+    report["previous_period"] = {
+        "start": previous_start.isoformat(), "end": previous_end.isoformat(),
+        "summary": previous["summary"],
+    }
+    return report
+
 @api.post("/expenses")
 async def add_expense(body: ExpenseIn, user=Depends(get_current_user)):
-    _check_expense(body)
+    _check_expense(body, user)
     authorization = await consume_expense_authorization(
         body.supervisor_authorization, None, "create", user,
     )
@@ -6206,7 +6895,7 @@ async def add_expense(body: ExpenseIn, user=Depends(get_current_user)):
 
 @api.put("/expenses/{eid}")
 async def edit_expense(eid: str, body: ExpenseIn, user=Depends(get_current_user)):
-    _check_expense(body)
+    _check_expense(body, user)
     before = await db.expenses.find_one({"id": eid}, {"_id": 0})
     if not before:
         raise HTTPException(404, "Expense not found")
@@ -6607,6 +7296,7 @@ async def consume_fleet_expense_authorization(authorization_id, resource_type, a
             "action": action,
             "user_id": user["id"],
             "company_id": user["_active_company_id"],
+            "supervisor_id": user["id"],
             "resource_id": resource_id,
             "target_id": target_id,
             "supervisor_exempt": True,

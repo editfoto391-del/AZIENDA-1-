@@ -247,6 +247,17 @@
     font-size: 14px;
 }
 
+.financial-report-paper {
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    background: #f8fafc;
+    padding: 16px;
+}
+
+.financial-report-paper details summary {
+    list-style-position: inside;
+}
+
 @media (max-width: 900px) {
     .daily-report-grid {
         grid-template-columns: minmax(0, 1fr);
@@ -278,9 +289,35 @@
 }
 
 @media print {
-    .daily-report-paper {
+    [data-report-controls],
+    nav[aria-label="Report period"] {
+        display: none !important;
+    }
+
+    .daily-report-paper,
+    .financial-report-paper {
         border: 0;
         box-shadow: none;
         padding: 0;
+    }
+
+    .financial-report-paper {
+        background: #fff !important;
+    }
+
+    .financial-report-paper section,
+    .financial-report-paper header,
+    .financial-report-paper table {
+        break-inside: avoid;
+    }
+
+    .financial-report-paper button {
+        color: #111827 !important;
+        background: #fff !important;
+    }
+
+    .financial-report-paper details > pre {
+        max-height: none !important;
+        max-width: none !important;
     }
 }

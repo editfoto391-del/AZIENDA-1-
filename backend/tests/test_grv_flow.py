@@ -37,6 +37,13 @@ class FakeCollection:
     async def insert_one(self, document):
         self.documents.append(deepcopy(document))
 
+    async def delete_one(self, query):
+        for index, document in enumerate(self.documents):
+            if _matches(document, query):
+                self.documents.pop(index)
+                return type("DeleteResult", (), {"deleted_count": 1})()
+        return type("DeleteResult", (), {"deleted_count": 0})()
+
     async def find_one_and_update(self, query, update, **kwargs):
         for document in self.documents:
             if _matches(document, query):
@@ -189,10 +196,91 @@ def test_partial_grvs_update_po_and_stock_once_without_creating_buyings(monkeypa
         assert len(fake_db.stock_movements.documents) == 2
         assert sum(item["quantity"] for item in fake_db.stock_movements.documents) == 75
         assert len({item["dedupe_key"] for item in fake_db.stock_movements.documents}) == 2
+        assert all(item["batch_id"].startswith("grv:") for item in fake_db.stock_movements.documents)
+        assert all(item["batch_quantity"] == item["quantity"] for item in fake_db.stock_movements.documents)
         assert fake_db.buyings.documents == []
 
         with pytest.raises(HTTPException) as duplicate:
             await server.confirm_grv(second["id"], user)
         assert duplicate.value.status_code == 409
+
+    asyncio.run(scenario())
+
+
+def test_worker_grv_delete_requires_supervisor_except_in_superiqfoam(monkeypatch):
+    fake_db = FakeDatabase()
+    fake_db.grvs.documents.extend([
+        {"id": "other-company-grv", "grv_number": "GRV-OTHER", "status": "draft"},
+        {"id": "manufacturing-grv", "grv_number": "GRV-MFG", "status": "draft"},
+        {"id": "superiqfoam-grv", "grv_number": "GRV-SIQ", "status": "draft"},
+        {"id": "confirmed-grv", "grv_number": "GRV-CONFIRMED", "status": "completed"},
+    ])
+    monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "log_audit", _no_audit)
+    authorized_passwords = []
+
+    async def authenticate_supervisor(password, user, allow_skip=True):
+        authorized_passwords.append((password, allow_skip))
+        if password != "valid-supervisor-password":
+            raise HTTPException(403, "Supervisor password is incorrect")
+        return "supervisor-id", "Supervisor"
+
+    monkeypatch.setattr(server, "authenticate_supervisor", authenticate_supervisor)
+    worker = {
+        "id": "worker", "email": "worker@example.test", "is_worker": True,
+        "_active_role": "user", "_active_company_id": "another-company",
+        "worker_allowed_sections": ["grv"],
+    }
+
+    async def scenario():
+        with pytest.raises(HTTPException) as missing_password:
+            await server.delete_grv("other-company-grv", server.GRVDeleteIn(), worker)
+        assert missing_password.value.status_code == 428
+
+        with pytest.raises(HTTPException) as invalid_password:
+            await server.delete_grv(
+                "other-company-grv",
+                server.GRVDeleteIn(supervisor_password="wrong-password"),
+                worker,
+            )
+        assert invalid_password.value.status_code == 403
+
+        deleted = await server.delete_grv(
+            "other-company-grv",
+            server.GRVDeleteIn(supervisor_password="valid-supervisor-password"),
+            worker,
+        )
+        assert deleted == {"ok": True, "deleted": True}
+        assert await fake_db.grvs.find_one({"id": "other-company-grv"}) is None
+
+        wholesaler_admin = {
+            "id": "wholesaler-admin", "email": "admin@example.test",
+            "role": "user", "_active_role": "admin",
+            "_active_company_id": "iqfoam-manufactoring",
+            "company_roles": {server.WHOLESALERS_COMPANY_ID: "admin"},
+        }
+        assert server.can_skip_supervisor_approval(wholesaler_admin)
+        await server.delete_grv(
+            "manufacturing-grv",
+            server.GRVDeleteIn(supervisor_password="valid-supervisor-password"),
+            wholesaler_admin,
+        )
+
+        superiqfoam_worker = {**worker, "_active_company_id": server.DEFAULT_COMPANY_ID}
+        deleted_without_password = await server.delete_grv(
+            "superiqfoam-grv", server.GRVDeleteIn(), superiqfoam_worker,
+        )
+        assert deleted_without_password == {"ok": True, "deleted": True}
+        assert authorized_passwords == [
+            ("wrong-password", False),
+            ("valid-supervisor-password", False),
+            ("valid-supervisor-password", False),
+        ]
+
+        with pytest.raises(HTTPException) as confirmed:
+            await server.delete_grv(
+                "confirmed-grv", server.GRVDeleteIn(), superiqfoam_worker,
+            )
+        assert confirmed.value.status_code == 409
 
     asyncio.run(scenario())
