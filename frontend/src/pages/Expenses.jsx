@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, fmtDateTime, today } from "@/lib/format";
+import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
 import { Banknote, Eye, Plus, TrendingUp, TrendingDown, Wallet, Trash2, Pencil } from "lucide-react";
 
@@ -37,6 +38,7 @@ function ProfitPanel({ title, p, testid }) {
 }
 
 export default function Expenses() {
+  const { user } = useAuth();
   const [list, setList] = useState(null);
   const [report, setReport] = useState(null);
   const [costs, setCosts] = useState(null);
@@ -66,27 +68,32 @@ export default function Expenses() {
     const reason = modal.id ? window.prompt("Reason for this expense change (required):") : "";
     if (modal.id && reason === null) return;
     if (modal.id && !reason.trim()) return toast.error("A reason is required to edit an expense");
-    setPendingAction({ action: modal.id ? "edit" : "create", expense: { ...modal }, reason: reason?.trim() || "" });
+    const action = { action: modal.id ? "edit" : "create", expense: { ...modal }, reason: reason?.trim() || "" };
+    if (user?.can_skip_supervisor_approval) {
+      await performPendingAction(action);
+    } else {
+      setPendingAction(action);
+    }
   };
 
   const remove = async (e) => {
     const reason = window.prompt(`Void expense "${e.description}" (${fmtMoney(e.amount)})? It stays in history. Reason:`);
     if (reason === null) return;
     if (!reason.trim()) return toast.error("A reason is required");
-    setPendingAction({ action: "void", expense: e, reason: reason.trim() });
+    const action = { action: "void", expense: e, reason: reason.trim() };
+    if (user?.can_skip_supervisor_approval) {
+      await performPendingAction(action);
+    } else {
+      setPendingAction(action);
+    }
   };
 
-  const authorizeAction = async (event) => {
-    event.preventDefault();
-    if (!pendingAction || !supervisorPassword || busy) return;
+  const performPendingAction = async (action = pendingAction, supervisor_authorization = undefined) => {
+    if (!action || busy) return;
     setBusy(true);
     try {
-      const { action, expense, reason } = pendingAction;
-      const approval = action === "create"
-        ? await api.post("/expenses/authorize-create", { password: supervisorPassword })
-        : await api.post(`/expenses/${expense.id}/authorize-action`, { password: supervisorPassword, action });
-      const supervisor_authorization = approval.authorization_id;
-      if (action === "void") {
+      const { action: kind, expense, reason } = action;
+      if (kind === "void") {
         await api.post(`/expenses/${expense.id}/void`, { reason, supervisor_authorization });
         toast.success("Expense voided");
       } else {
@@ -96,7 +103,7 @@ export default function Expenses() {
           edit_reason: reason,
           supervisor_authorization,
         };
-        if (action === "edit") await api.put(`/expenses/${expense.id}`, payload);
+        if (kind === "edit") await api.put(`/expenses/${expense.id}`, payload);
         else await api.post("/expenses", payload);
         toast.success("Expense saved");
         setModal(null);
@@ -104,10 +111,23 @@ export default function Expenses() {
       setPendingAction(null);
       setSupervisorPassword("");
       load();
-    } catch (e) {
-      toast.error(apiError(e));
+    } catch (error) {
+      toast.error(apiError(error));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const authorizeAction = async (event) => {
+    event.preventDefault();
+    if (!pendingAction || !supervisorPassword || busy) return;
+    try {
+      const approval = pendingAction.action === "create"
+        ? await api.post("/expenses/authorize-create", { password: supervisorPassword })
+        : await api.post(`/expenses/${pendingAction.expense.id}/authorize-action`, { password: supervisorPassword, action: pendingAction.action });
+      await performPendingAction(pendingAction, approval.authorization_id);
+    } catch (e) {
+      toast.error(apiError(e));
     }
   };
 

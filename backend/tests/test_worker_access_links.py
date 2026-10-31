@@ -236,3 +236,87 @@ def test_worker_link_auth_scope_dynamic_permissions_and_revocation(worker_accoun
         assert (        await server.worker_access_link_info(reactivated["access_token"], Response()))["username"] == "zeen"
 
     asyncio.run(scenario())
+
+
+def test_company_admin_can_view_add_and_change_worker_roles(worker_accounts):
+    _, database = worker_accounts
+    admin = {
+        "id": "company-admin",
+        "role": "user",
+        "_active_role": "admin",
+        "_active_company_id": "superiqfoam",
+        "company_roles": {"superiqfoam": "admin"},
+    }
+
+    async def scenario():
+        workers = await server.get_workers("superiqfoam", admin)
+        assert [worker["id"] for worker in workers] == ["worker-a"]
+
+        created = await server.create_worker(server.CreateWorkerIn(
+            username="new-worker",
+            name="New Worker",
+            worker_role="Packing",
+            password="secure-pass-123",
+            company_id="superiqfoam",
+            allowed_sections=["invoices"],
+        ), admin)
+        assert created["worker_role"] == "Packing"
+        assert created["company_id"] == "superiqfoam"
+
+        updated = await server.update_worker_access(
+            "worker-a",
+            server.WorkerAccessUpdateIn(
+                worker_role="Senior Invoicing",
+                allowed_sections=["invoices", "stock"],
+            ),
+            "superiqfoam",
+            admin,
+        )
+        assert updated["worker_role"] == "Senior Invoicing"
+        assert updated["allowed_sections"] == ["invoices", "stock"]
+
+        with pytest.raises(HTTPException) as other_company:
+            await server.get_workers("iqfoam-whole-sallers", admin)
+        assert other_company.value.status_code == 403
+
+    asyncio.run(scenario())
+
+
+def test_company_admin_can_reset_worker_password_only_in_their_company(worker_accounts):
+    _, database = worker_accounts
+    admin = {
+        "id": "company-admin",
+        "role": "user",
+        "_active_role": "admin",
+        "_active_company_id": "superiqfoam",
+        "company_roles": {"superiqfoam": "admin"},
+    }
+
+    async def scenario():
+        result = await server.update_worker_password(
+            "worker-a", "superiqfoam",
+            server.ProfilePasswordIn(password="new-secure-pass"),
+            admin,
+        )
+        assert result == {"ok": True}
+        worker = await database.users.find_one({"id": "worker-a"})
+        assert server.verify_pw("new-secure-pass", worker["password_hash"])
+        assert not server.verify_pw("zeen-password", worker["password_hash"])
+
+        with pytest.raises(HTTPException) as wrong_company:
+            await server.update_worker_password(
+                "worker-a", "iqfoam-whole-sallers",
+                server.ProfilePasswordIn(password="new-secure-pass"),
+                admin,
+            )
+        assert wrong_company.value.status_code == 403
+
+        with pytest.raises(HTTPException) as weak_password:
+            await server.update_worker_password(
+                "worker-a", "superiqfoam",
+                server.ProfilePasswordIn(password="short"),
+                admin,
+            )
+        assert weak_password.value.status_code == 400
+
+    asyncio.run(scenario())

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { fmtMoney, fmtDate, today } from "@/lib/format";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal, PageHeader, Empty } from "@/components/common";
 import { Truck, Plus, Wrench, Package, Trash2, Pencil, ArrowRight, Fuel, Settings2, RotateCcw } from "lucide-react";
@@ -47,6 +48,7 @@ function VehicleCard({ v, recs, onOpen, onEdit, onDelete }) {
 }
 
 export default function Fleet() {
+  const { user } = useAuth();
   const [vehicles, setVehicles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [records, setRecords] = useState([]);
@@ -78,7 +80,13 @@ export default function Fleet() {
     try { await api.del(`/vehicles/${v.id}`); toast.success("Vehicle removed from the fleet"); load(); }
     catch (e) { err(e); }
   };
-  const requestApproval = (details) => setApprovalRequest(details);
+  const requestApproval = (details) => {
+    if (user?.can_skip_supervisor_approval) {
+      details.execute(undefined).catch(err);
+      return;
+    }
+    setApprovalRequest(details);
+  };
   const submitApproval = async (event) => {
     event.preventDefault();
     if (!approvalRequest || !supervisorPassword || authorizing) return;

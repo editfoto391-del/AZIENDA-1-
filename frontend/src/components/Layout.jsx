@@ -215,7 +215,7 @@ export default function Layout() {
   useEffect(() => { api.get("/companies/profiles").then(setProfiles).catch(() => {}); }, []);
   const availableProfiles = profiles.filter((profile) =>
     user?.company_ids?.includes(profile.id)
-    && (!dedicatedDomain || user?.is_worker || profile.id === dedicatedDomain.companyId)
+    && (!dedicatedDomain || user?.is_worker || user?.can_switch_company || profile.id === dedicatedDomain.companyId)
   );
   const activeProfile = availableProfiles.find((profile) => profile.id === user?.company_id);
   const activeBrandName = companyBrandName(activeProfile?.id);
@@ -266,7 +266,7 @@ export default function Layout() {
             </div>
           </div>
           <div className="flex-1 sm:hidden" />
-          {user?.is_owner && availableProfiles.length > 1 && (
+          {user?.can_switch_company && availableProfiles.length > 1 && (
             <div className="relative" onMouseEnter={() => setProfileMenuOpen(true)} onMouseLeave={() => setProfileMenuOpen(false)}>
               <button
                 type="button"
@@ -322,7 +322,7 @@ export default function Layout() {
             </motion.div>
             <div className="hidden sm:block leading-tight">
               <div className="text-sm font-semibold text-slate-800">{user?.name || "Admin"}</div>
-              <div className="text-[11px] text-slate-500">{user?.is_worker ? user.worker_role || "Worker" : user?.is_owner ? "Owner" : user?.is_admin || user?.role === "admin" ? "Administrator" : "Team member"}</div>
+              <div className="text-[11px] text-slate-500">{user?.is_worker ? user.worker_role || "Worker" : user?.is_owner || user?.is_company_owner ? "Owner" : user?.is_admin || user?.role === "admin" ? "Administrator" : "Team member"}</div>
             </div>
             <motion.button whileHover={reduceMotion ? undefined : { x: -1, scale: 1.04 }} whileTap={reduceMotion ? undefined : { scale: 0.97 }} transition={{ type: "spring", stiffness: 500, damping: 22 }} onClick={logout} data-testid="logout-btn" className="rounded-full p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 ml-1">
               <LogOut size={18} />

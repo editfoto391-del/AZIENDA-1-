@@ -67,7 +67,7 @@ const svgImage = (svg) => new Promise((resolve, reject) => {
   image.src = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`;
 });
 
-async function productLabelCanvas(bwipjs, product, width, height) {
+async function productCodeCanvas(bwipjs, product, width, height, codeTypes) {
   const scale = 300 / 25.4;
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(width * scale);
@@ -80,31 +80,38 @@ async function productLabelCanvas(bwipjs, product, width, height) {
   context.fillStyle = "#111827";
   context.textBaseline = "alphabetic";
   context.font = "bold 4px Arial";
-  context.fillText(product.company_name, 3, 5, width - 6);
+  context.fillText(product.company_name || "", 3, 5, width - 6);
   context.font = "bold 5px Arial";
-  context.fillText(product.product, 3, 11, width - 6);
+  context.fillText(product.product || "", 3, 11, width - 6);
   context.font = "3px Arial";
-  context.fillText(`${product.dimensions}${product.unit ? ` ${product.unit}` : ""}${product.density ? ` · Density ${product.density}` : ""}`, 3, 16, width - 6);
+  context.fillText(`${product.dimensions || ""}${product.unit ? ` ${product.unit}` : ""}${product.density ? ` · Density ${product.density}` : ""}`, 3, 16, width - 6);
   context.font = "2.6px monospace";
-  context.fillText(`SKU ${product.sku}`, 3, 20, width - 6);
-  context.fillText(product.product_id, 3, 23, width - 6);
+  context.fillText(`SKU ${product.sku || ""}`, 3, 20, width - 6);
+  context.fillText(product.product_id || "", 3, 23, width - 6);
 
-  const qr = await svgImage(codeSvg(bwipjs, "qrcode", product.qr_payload, 4));
-  const qrSize = Math.min(21, (width - 6 - (width * 0.36) - 4) / 2);
-  context.drawImage(qr, 3, 26, qrSize, qrSize);
-  if (product.data_matrix_payload) {
-    const matrix = await svgImage(codeSvg(bwipjs, "datamatrix", product.data_matrix_payload, 4));
-    context.drawImage(matrix, 3 + qrSize + 4, 26, qrSize, qrSize);
-  }
+  const codes = codeTypes.map((type) => ({
+    label: type === "qr" ? "QR Code" : "Data Matrix",
+    svg: codeSvg(
+      bwipjs,
+      type === "qr" ? "qrcode" : "datamatrix",
+      type === "qr" ? product.qr_payload : product.data_matrix_payload,
+      4,
+    ),
+  }));
+  const gap = 4;
+  const codeTop = 26;
+  const codeSize = Math.min(
+    (width - 6 - gap * (codes.length - 1)) / codes.length,
+    height - codeTop - 8,
+  );
+  const totalWidth = codeSize * codes.length + gap * (codes.length - 1);
+  const startX = (width - totalWidth) / 2;
   context.font = "2.5px Arial";
-  context.fillText("QR", 3 + qrSize / 2 - 2, 26 + qrSize + 3);
-  if (product.data_matrix_payload) context.fillText("Data Matrix", 3 + qrSize + 4, 26 + qrSize + 3);
-  if (product.ean13) {
-    const ean = await svgImage(codeSvg(bwipjs, "ean13", product.ean13, 3));
-    const eanWidth = width * 0.36;
-    context.drawImage(ean, width - eanWidth - 3, 27, eanWidth, Math.min(height - 30, 22));
-  } else {
-    context.fillText("No EAN-13", width * 0.68, 35, width * 0.28);
+  for (const [index, code] of codes.entries()) {
+    const image = await svgImage(code.svg);
+    const x = startX + index * (codeSize + gap);
+    context.drawImage(image, x, codeTop, codeSize, codeSize);
+    context.fillText(code.label, x, codeTop + codeSize + 3, codeSize);
   }
   return canvas;
 }
@@ -128,6 +135,7 @@ export default function ProductIdentificationManager({ stock, companyName, onSto
   const [busy, setBusy] = useState(false);
   const [identityLoading, setIdentityLoading] = useState(false);
   const [labelSize, setLabelSize] = useState({ width: 100, height: 60 });
+  const [pdfCodeType, setPdfCodeType] = useState("qr");
   const [scanResult, setScanResult] = useState(null);
 
   const refreshStats = () => api.getUncached("/product-identification-stats")
@@ -329,17 +337,27 @@ export default function ProductIdentificationManager({ stock, companyName, onSto
         import("bwip-js"),
       ]);
       const products = await Promise.all(selectedProducts.map(async (item) => {
-        const detail = await api.getUncached(`/stock/${item.id}/identification`);
+        const stockId = stockIdOf(item);
+        if (!stockId) throw new Error("A selected product is missing its stock identifier. Reload the product list and try again.");
+        const detail = await api.getUncached(`/stock/${stockId}/identification`);
         return { ...detail, currentStock: item.current ?? 0 };
       }));
+      const codeTypes = pdfCodeType === "both" ? ["qr", "dataMatrix"] : [pdfCodeType];
+      if (codeTypes.includes("dataMatrix")) {
+        const missingMatrix = products.filter((product) => !product.data_matrix_payload);
+        if (missingMatrix.length) {
+          const names = missingMatrix.map((product) => `${product.product} ${product.dimensions}`).join(", ");
+          throw new Error(`Data Matrix is not registered for: ${names}. Add the code before downloading.`);
+        }
+      }
       const pdf = new jsPDF({ unit: "mm", format: [width, height] });
       for (const [index, product] of products.entries()) {
         if (index) pdf.addPage([width, height]);
-        const canvas = await productLabelCanvas(bwipjs, product, width, height);
+        const canvas = await productCodeCanvas(bwipjs, product, width, height, codeTypes);
         pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, width, height);
       }
-      pdf.save("iqfoam-product-labels.pdf");
-      toast.success(`${products.length} label${products.length === 1 ? "" : "s"} downloaded`);
+      pdf.save(`iqfoam-${pdfCodeType === "both" ? "qr-and-data-matrix" : pdfCodeType === "qr" ? "qr-codes" : "data-matrix-codes"}.pdf`);
+      toast.success(`${products.length} product code label${products.length === 1 ? "" : "s"} downloaded`);
     } catch (error) {
       toast.error(error?.message || apiError(error));
     } finally {
@@ -366,7 +384,7 @@ export default function ProductIdentificationManager({ stock, companyName, onSto
       const codeSize = Math.min(21, (width - 6 - (width * 0.36) - 4) / 2);
       const eanWidth = width * 0.36;
       const products = await Promise.all(selectedProducts.map((item) =>
-        api.getUncached(`/stock/${item.id}/identification`)
+        api.getUncached(`/stock/${stockIdOf(item)}/identification`)
       ));
       popup.document.write(`<!doctype html><html><head><title>IQFOAM Product Labels</title><style>
         @page{size:${width}mm ${height}mm;margin:0}*{box-sizing:border-box}
@@ -458,7 +476,22 @@ export default function ProductIdentificationManager({ stock, companyName, onSto
               </div>
               <div className="flex flex-wrap gap-2">
                 <Btn variant="outline" disabled={!selectedProducts.length || busy} onClick={printLabels}><Printer size={15} /> Print {selectedProducts.length || ""}</Btn>
-                <Btn disabled={!selectedProducts.length || busy} onClick={downloadLabels}><Download size={15} /> Download PDF</Btn>
+                <label className="flex items-center gap-2 rounded-md border border-border bg-white px-3 py-1.5 text-xs font-semibold text-slate-600">
+                  PDF codes
+                  <select
+                    aria-label="Codes to include in the PDF"
+                    data-testid="product-code-pdf-type"
+                    value={pdfCodeType}
+                    onChange={(event) => setPdfCodeType(event.target.value)}
+                    disabled={busy}
+                    className="bg-transparent text-sm text-slate-800 outline-none"
+                  >
+                    <option value="qr">QR Code</option>
+                    <option value="dataMatrix">Data Matrix</option>
+                    <option value="both">Both codes</option>
+                  </select>
+                </label>
+                <Btn disabled={!selectedProducts.length || busy} onClick={downloadLabels}><Download size={15} /> Download codes PDF</Btn>
               </div>
             </div>
 

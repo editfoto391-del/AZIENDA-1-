@@ -143,13 +143,16 @@ export default function Dashboard() {
   const [workerLinkInfo, setWorkerLinkInfo] = useState(null);
   const [workerLinkLoading, setWorkerLinkLoading] = useState(false);
   const [workerLinkSaving, setWorkerLinkSaving] = useState(false);
+  const [workerPassword, setWorkerPassword] = useState("");
+  const [workerPasswordSaved, setWorkerPasswordSaved] = useState(false);
   const [workerDraft, setWorkerDraft] = useState({
     name: "", username: "", email: "", worker_role: "", password: "",
     company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
   });
+  const canManageWorkers = !!(user?.is_owner || user?.is_admin);
 
   useEffect(() => {
-    if (!user?.is_owner) return;
+    if (!canManageWorkers) return;
     api.get("/companies/profiles")
       .then((companyList) => {
         const accessibleCompanies = companyList.filter((company) =>
@@ -160,15 +163,15 @@ export default function Dashboard() {
         setWorkerCompanyId((current) => dedicatedDomain?.companyId || current || user.company_id || accessibleCompanies[0]?.id || "");
       })
       .catch((error) => toast.error(apiError(error)));
-  }, [user]);
+  }, [user, canManageWorkers]);
 
   useEffect(() => {
-    if (!user?.is_owner || !workerCompanyId) return;
+    if (!canManageWorkers || !workerCompanyId) return;
     setWorkers([]);
     api.get("/access/workers", { company_id: workerCompanyId })
       .then(setWorkers)
       .catch((error) => toast.error(apiError(error)));
-  }, [user, workerCompanyId]);
+  }, [user, workerCompanyId, canManageWorkers]);
 
   useEffect(() => {
     let active = true;
@@ -296,6 +299,8 @@ export default function Dashboard() {
   const openWorkerLink = async (worker) => {
     setWorkerLinkOpen(true);
     setWorkerLinkInfo(null);
+    setWorkerPassword("");
+    setWorkerPasswordSaved(false);
     setWorkerLinkLoading(true);
     try {
       const params = `?company_id=${encodeURIComponent(worker.company_id)}`;
@@ -309,6 +314,36 @@ export default function Dashboard() {
       setWorkerLinkOpen(false);
     } finally {
       setWorkerLinkLoading(false);
+    }
+  };
+  const saveWorkerPassword = async (event) => {
+    event.preventDefault();
+    if (!workerLinkInfo || workerLinkSaving) return;
+    if (workerPassword.length < 8) {
+      toast.error("Password must contain at least 8 characters");
+      return;
+    }
+    setWorkerLinkSaving(true);
+    try {
+      await api.put(
+        `/access/workers/${workerLinkInfo.id}/password?company_id=${encodeURIComponent(workerLinkInfo.company_id)}`,
+        { password: workerPassword },
+      );
+      setWorkerPasswordSaved(true);
+      toast.success("Worker password updated");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setWorkerLinkSaving(false);
+    }
+  };
+  const copyWorkerPassword = async () => {
+    if (!workerPasswordSaved || !workerPassword) return;
+    try {
+      await navigator.clipboard.writeText(workerPassword);
+      toast.success("Worker password copied");
+    } catch (error) {
+      toast.error(apiError(error));
     }
   };
   const regenerateWorkerLink = async () => {
@@ -364,10 +399,10 @@ export default function Dashboard() {
         <h1 className="text-3xl sm:text-4xl font-normal text-slate-900 font-display mt-1">Business overview</h1>
         <p className="text-sm text-slate-500 mt-1">Performance, cash flow and daily operations</p>
         </div>
-        {user?.is_owner && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
+        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
 
-      {user?.is_owner && <Section title="Workers" icon={UserPlus} action={<div className="flex items-center gap-3">
+      {canManageWorkers && <Section title="Workers" icon={UserPlus} action={<div className="flex items-center gap-3">
         <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">Company
           <select value={workerCompanyId} onChange={(event) => setWorkerCompanyId(event.target.value)} className="rounded-md border border-input bg-white px-2 py-1.5 text-sm" data-testid="worker-company-filter">
             {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
@@ -399,7 +434,7 @@ export default function Dashboard() {
         )}
       </Section>}
 
-      {user?.is_owner && <Modal open={workerModalOpen} onClose={() => !workerSaving && setWorkerModalOpen(false)} title={workerDraft.id ? "Edit Worker Access" : "Add Worker"} wide>
+      {canManageWorkers && <Modal open={workerModalOpen} onClose={() => !workerSaving && setWorkerModalOpen(false)} title={workerDraft.id ? "Edit Worker Access" : "Add Worker"} wide>
         <form onSubmit={saveWorker} className="space-y-4" data-testid="add-worker-form">
           <div className="grid gap-3 sm:grid-cols-2">
             {workerDraft.id ? <>
@@ -446,7 +481,7 @@ export default function Dashboard() {
         </form>
       </Modal>}
 
-      {user?.is_owner && <Modal
+      {canManageWorkers && <Modal
         open={workerLinkOpen}
         onClose={() => !workerLinkSaving && setWorkerLinkOpen(false)}
         title="Personal worker access"
@@ -486,6 +521,32 @@ export default function Dashboard() {
               </p>}
               <p className="text-xs text-slate-500">The link identifies the worker but does not replace their password. Access always follows the current company and section permissions.</p>
             </div>
+            <form onSubmit={saveWorkerPassword} className="space-y-2 border-t border-border/70 pt-4">
+              <label htmlFor="worker-password" className="text-xs font-bold uppercase tracking-[0.12em] text-slate-500">
+                {workerPasswordSaved ? "Worker password" : "Set worker password"}
+              </label>
+              <div className="flex gap-2">
+                <input
+                  id="worker-password"
+                  type="text"
+                  autoComplete="new-password"
+                  minLength={8}
+                  required
+                  value={workerPassword}
+                  onChange={(event) => {
+                    setWorkerPassword(event.target.value);
+                    setWorkerPasswordSaved(false);
+                  }}
+                  placeholder="Enter a new password (at least 8 characters)"
+                  className="min-w-0 flex-1 rounded-lg border border-border bg-slate-50 px-3 py-2.5 text-sm text-slate-700 outline-none"
+                  data-testid="worker-password-input"
+                />
+                {workerPasswordSaved
+                  ? <Btn type="button" variant="outline" onClick={copyWorkerPassword} data-testid="worker-copy-password"><Copy size={15} /> Copy</Btn>
+                  : <Btn type="submit" disabled={workerLinkSaving || workerPassword.length < 8} data-testid="worker-save-password">Set Password</Btn>}
+              </div>
+              <p className="text-xs text-slate-500">Existing passwords cannot be viewed. Setting a new password will sign the worker out of active sessions.</p>
+            </form>
             <div className="flex flex-wrap justify-end gap-2 border-t border-border/70 pt-4">
               {workerLinkInfo.link_active && <Btn type="button" variant="danger" onClick={revokeWorkerLink} disabled={workerLinkSaving} data-testid="worker-revoke-access">
                 <ShieldOff size={15} /> Revoke Access

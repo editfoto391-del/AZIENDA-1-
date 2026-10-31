@@ -5,6 +5,15 @@ const client = axios.create({ baseURL: BASE, withCredentials: true });
 const pendingGets = new Map();
 const cachedGets = new Map();
 const GET_CACHE_MS = 30_000;
+let supervisorPromptQueue = Promise.resolve();
+
+function requestSupervisorPassword() {
+  const prompt = supervisorPromptQueue.then(() => new Promise((resolve) => {
+    window.dispatchEvent(new CustomEvent("erp:supervisor-password-required", { detail: { resolve } }));
+  }));
+  supervisorPromptQueue = prompt.then(() => undefined, () => undefined);
+  return prompt;
+}
 
 export function invalidateGetCache() {
   cachedGets.clear();
@@ -21,10 +30,29 @@ client.interceptors.request.use((cfg) => {
 
 client.interceptors.response.use(
   (r) => r,
-  (err) => {
+  async (err) => {
     if (err.response?.status === 401 && !err.config.url.includes("/auth/")) {
       localStorage.removeItem("token");
       if (window.location.pathname !== "/login") window.location.href = "/login";
+    }
+    if (
+      err.response?.status === 428
+      && err.config
+      && !err.config._supervisorRetried
+      && !err.config.url.includes("/settings/supervisor-password/authorize")
+      && String(err.response.data?.detail || "").toLowerCase().includes("supervisor")
+    ) {
+      const password = await requestSupervisorPassword();
+      if (!password) {
+        throw new Error("Change cancelled: the Supervisor Password is required.");
+      }
+      const authorization = await client.post("/settings/supervisor-password/authorize", { password });
+      err.config._supervisorRetried = true;
+      err.config.headers = {
+        ...err.config.headers,
+        "X-Supervisor-Authorization": authorization.data.authorization,
+      };
+      return client.request(err.config);
     }
     return Promise.reject(err);
   }

@@ -74,6 +74,8 @@ COMPANY_PROFILES = [
     {"id": "iqfoam-whole-sallers", "name": "IQFOAM WHOLESALERS", "username": "IQFOAM WHOLESALERS"},
 ]
 
+WHOLESALERS_COMPANY_ID = "iqfoam-whole-sallers"
+
 COMPANY_INVOICE_DETAILS = {
     "iqfoam-manufactoring": {
         "company_name": "iQ Foam Manufacturer",
@@ -90,10 +92,25 @@ COMPANY_INVOICE_DETAILS = {
 def company_role(user, company_id):
     if user.get("role") == "owner":
         return "owner"
+    if not user.get("is_worker") and any(
+        role == "owner" for role in (user.get("company_roles") or {}).values()
+    ):
+        return "owner"
+    if (
+        not user.get("is_worker")
+        and (user.get("company_roles") or {}).get(WHOLESALERS_COMPANY_ID) == "admin"
+    ):
+        return "admin"
     return (user.get("company_roles") or {}).get(company_id)
 
 def allowed_company_ids(user):
-    if user.get("role") == "owner":
+    if user.get("role") == "owner" or (
+        not user.get("is_worker")
+        and any(role == "owner" for role in (user.get("company_roles") or {}).values())
+    ) or (
+        not user.get("is_worker")
+        and (user.get("company_roles") or {}).get(WHOLESALERS_COMPANY_ID) == "admin"
+    ):
         return [profile["id"] for profile in COMPANY_PROFILES]
     return [company_id for company_id, role in (user.get("company_roles") or {}).items()
             if role in ("user", "admin", "owner")]
@@ -436,6 +453,70 @@ def enforce_worker_api_access(request, user):
         return
     raise HTTPException(403, "This worker account cannot access this section")
 
+def is_delegated_company_owner(user):
+    return (
+        user.get("role") != "owner"
+        and not user.get("is_worker")
+        and any(role == "owner" for role in (user.get("company_roles") or {}).values())
+    )
+
+def is_delegated_company_admin(user):
+    return (
+        user.get("role") != "owner"
+        and not user.get("is_worker")
+        and any(role in ("owner", "admin") for role in (user.get("company_roles") or {}).values())
+    )
+
+def can_skip_supervisor_approval(user):
+    return (
+        user.get("role") != "owner"
+        and not user.get("is_worker")
+        and (user.get("company_roles") or {}).get(WHOLESALERS_COMPANY_ID) == "admin"
+        and user.get("_active_company_id") == "iqfoam-manufactoring"
+    )
+
+def is_supervisor_password_endpoint(path):
+    return (
+        path == "/api/settings/supervisor-password/authorize"
+        or path == "/api/auth/switch-company"
+        or path == "/api/auth/device"
+        or path == "/api/fleet-expense-authorizations"
+        or bool(re.search(r"/authorize(?:-|$)", path))
+    )
+
+async def require_supervisor_for_company_write(request, user):
+    if (
+        request.method in ("GET", "HEAD", "OPTIONS")
+        or user.get("role") == "owner"
+        or not is_delegated_company_admin(user)
+        or user.get("_active_company_id") != DEFAULT_COMPANY_ID
+        or is_supervisor_password_endpoint(request.url.path)
+    ):
+        return
+
+    encoded_grant = request.headers.get("X-Supervisor-Authorization", "")
+    try:
+        grant = jwt.decode(encoded_grant, JWT_SECRET, algorithms=[JWT_ALGO])
+    except jwt.InvalidTokenError:
+        raise HTTPException(428, "Supervisor password is required for changes to this company")
+    if (
+        grant.get("scope") != "supervisor_company_write"
+        or grant.get("sub") != user.get("id")
+        or grant.get("company_id") != DEFAULT_COMPANY_ID
+        or grant.get("sid") != user.get("_session_id")
+    ):
+        raise HTTPException(428, "Supervisor password is required for changes to this company")
+
+    consumed = await base_db.supervisor_action_grants.delete_one({
+        "id": grant.get("jti"),
+        "user_id": user["id"],
+        "company_id": DEFAULT_COMPANY_ID,
+        "session_id": user.get("_session_id"),
+        "expires_at": {"$gt": datetime.now(timezone.utc)},
+    })
+    if not consumed.deleted_count:
+        raise HTTPException(428, "Supervisor approval has expired or was already used")
+
 async def get_current_user(request: Request):
     cookie = request.cookies.get("session_token")
     if cookie:
@@ -444,6 +525,7 @@ async def get_current_user(request: Request):
             user = await authorize_company(user, user.get("_active_company_id") or DEFAULT_COMPANY_ID,
                                            user.get("_session_id"))
             enforce_worker_api_access(request, user)
+            await require_supervisor_for_company_write(request, user)
             return user
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
@@ -457,6 +539,7 @@ async def get_current_user(request: Request):
         user = await user_from_session(token)
         if user:
             enforce_worker_api_access(request, user)
+            await require_supervisor_for_company_write(request, user)
             return user
         raise HTTPException(401, "Invalid token")
     user = await db.users.find_one({"id": payload["sub"]}, USER_PROJ)
@@ -477,6 +560,7 @@ async def get_current_user(request: Request):
             raise HTTPException(401, "Worker session has expired")
     user = await authorize_company(user, payload.get("company_id") or DEFAULT_COMPANY_ID, payload.get("sid"))
     enforce_worker_api_access(request, user)
+    await require_supervisor_for_company_write(request, user)
     return user
 
 class LoginIn(BaseModel):
@@ -545,6 +629,9 @@ class OwnerPromotionIn(BaseModel):
 class SupervisorPasswordIn(BaseModel):
     password: str
 
+class SupervisorWriteAuthorizationIn(BaseModel):
+    password: str
+
 class BackupRestoreIn(BaseModel):
     key: str
 
@@ -554,19 +641,39 @@ class SwitchCompanyIn(BaseModel):
 def public_user(u):
     company_id = u.get("_active_company_id") or DEFAULT_COMPANY_ID
     role = u.get("_active_role") or company_role(u, company_id) or u.get("role", "user")
+    admin_company_ids = [
+        managed_company_id
+        for managed_company_id in allowed_company_ids(u)
+        if company_role(u, managed_company_id) in ("owner", "admin")
+    ]
+    is_company_owner = (
+        u.get("role") != "owner"
+        and not u.get("is_worker")
+        and any(assigned_role == "owner" for assigned_role in (u.get("company_roles") or {}).values())
+    )
     return {"id": u["id"], "email": u.get("email", ""), "username": u.get("username", ""),
             "name": u.get("name") or u.get("username") or "User", "role": role,
             "is_owner": u.get("role") == "owner", "is_admin": role in ("owner", "admin"),
             "is_company_owner": role == "owner",
+            "can_switch_company": (
+                u.get("role") == "owner"
+                or is_company_owner
+                or (
+                    not u.get("is_worker")
+                    and len(allowed_company_ids(u)) > 1
+                    and any(
+                        assigned_role == "admin"
+                        for assigned_role in (u.get("company_roles") or {}).values()
+                    )
+                )
+            ),
+            "can_skip_supervisor_approval": can_skip_supervisor_approval(u),
             "is_primary_owner": canonical_email(u.get("email")) == canonical_email(os.environ["ADMIN_EMAIL"]),
             "is_worker": u.get("is_worker", False),
             "is_stock_only_worker": u.get("is_worker", False) and u.get("worker_stock_only", False),
             "worker_role": u.get("worker_role", ""),
             "allowed_sections": u.get("worker_allowed_sections", []),
-            "admin_company_ids": allowed_company_ids(u) if u.get("role") == "owner" else [
-                company_id for company_id, company_role_value in (u.get("company_roles") or {}).items()
-                if company_role_value in ("admin", "owner")
-            ],
+            "admin_company_ids": admin_company_ids,
             "company_id": company_id, "company_ids": allowed_company_ids(u), "picture": u.get("picture", "")}
 
 def require_owner(user):
@@ -692,22 +799,28 @@ async def access_profiles(user=Depends(get_current_user)):
         owner_account = await base_db.users.find_one({
             "profile_id": profile_id, "profile_login": "owner",
         }, {"_id": 0, "id": 1})
-        user_account = await base_db.users.find_one({
-            "profile_id": profile_id, "profile_login": "user",
+        admin_account = await base_db.users.find_one({
+            "profile_id": profile_id, "profile_login": "admin",
         }, {"_id": 0, "id": 1})
-        if not user_account:
-            user_account = await base_db.users.find_one({
+        if not admin_account:
+            admin_account = await base_db.users.find_one({
+                "profile_id": profile_id, "profile_login": "user",
+                f"company_roles.{profile_id}": {"$ne": "owner"},
+            }, {"_id": 0, "id": 1})
+        if not admin_account:
+            admin_account = await base_db.users.find_one({
                 "profile_id": profile_id,
                 "is_worker": {"$ne": True},
                 "role": {"$ne": "owner"},
+                f"company_roles.{profile_id}": {"$ne": "owner"},
             }, {"_id": 0, "id": 1})
         result.append({
             "id": profile_id,
             "name": profile["name"],
             "username": profile["username"],
-            "configured": owner_account is not None or user_account is not None,
+            "configured": owner_account is not None or admin_account is not None,
             "owner_configured": owner_account is not None,
-            "user_configured": user_account is not None,
+            "admin_configured": admin_account is not None,
         })
     return result
 
@@ -720,22 +833,37 @@ async def update_profile_password(
     profile = next((item for item in COMPANY_PROFILES if item["id"] == profile_id), None)
     if not profile:
         raise HTTPException(404, "Profile not found")
-    if account_type not in ("user", "owner"):
+    if account_type not in ("admin", "user", "owner"):
         raise HTTPException(404, "Profile account type not found")
+    account_type = "admin" if account_type == "user" else account_type
     if len(body.password) < 8:
         raise HTTPException(400, "Password must contain at least 8 characters")
 
     account = await base_db.users.find_one({
         "profile_id": profile_id, "profile_login": account_type,
     }, {"_id": 0})
-    if not account and account_type == "user":
+    if not account and account_type == "admin":
+        account = await base_db.users.find_one({
+            "profile_id": profile_id, "profile_login": "user",
+            f"company_roles.{profile_id}": {"$ne": "owner"},
+        }, {"_id": 0})
+    if not account and account_type == "admin":
         account = await base_db.users.find_one({
             "profile_id": profile_id,
             "is_worker": {"$ne": True},
             "role": {"$ne": "owner"},
+            f"company_roles.{profile_id}": {"$ne": "owner"},
         }, {"_id": 0})
     account_id = account["id"] if account else new_id()
-    company_role_value = "owner" if account_type == "owner" else "user"
+    company_role_value = "owner" if account_type == "owner" else "admin"
+    previous_role = (account.get("company_roles") or {}).get(profile_id) if account else None
+    adding_admin = (
+        account_type == "admin"
+        and previous_role != "admin"
+        and (account or {}).get("active", True) is not False
+    )
+    if adding_admin:
+        await reserve_company_admin(profile_id)
     updates = {
         "username": profile["username"],
         "name": (account or {}).get("name") or profile["name"],
@@ -750,9 +878,16 @@ async def update_profile_password(
         "profile_login": account_type,
     }
     if account:
-        await base_db.users.update_one({"id": account_id}, {"$set": updates})
+        result = await base_db.users.update_one({"id": account_id}, {"$set": updates})
+        if result.matched_count != 1:
+            if adding_admin:
+                await release_company_admin(profile_id)
+            raise HTTPException(409, "Profile account changed; reload and try again")
     else:
         await base_db.users.insert_one({"id": account_id, "created_at": now_iso(), **updates})
+    if adding_admin and account_type == "admin":
+        await log_audit("user", account_id, "profile_admin_assigned", user,
+                        after={"profile_id": profile_id, "role": "admin"})
     await log_audit("user", account_id, "profile_password_updated", user,
                     after={"profile_id": profile_id, "account_type": account_type})
     return {"profile_id": profile_id, "account_type": account_type, "configured": True}
@@ -774,11 +909,17 @@ async def update_access_profile(profile_id: str, body: ProfileCredentialsIn, use
         raise HTTPException(400, "Enter a username or a new password")
 
     account = await base_db.users.find_one({
-        "profile_id": profile_id, "profile_login": "user",
+        "profile_id": profile_id, "profile_login": "admin",
     }, {"_id": 0})
     if not account:
         account = await base_db.users.find_one({
+            "profile_id": profile_id, "profile_login": "user",
+            f"company_roles.{profile_id}": {"$ne": "owner"},
+        }, {"_id": 0})
+    if not account:
+        account = await base_db.users.find_one({
             "profile_id": profile_id, "is_worker": {"$ne": True}, "role": {"$ne": "owner"},
+            f"company_roles.{profile_id}": {"$ne": "owner"},
         }, {"_id": 0})
     if account and account.get("role") == "owner":
         raise HTTPException(409, "Global owner credentials must be changed through the owner account")
@@ -797,7 +938,7 @@ async def update_access_profile(profile_id: str, body: ProfileCredentialsIn, use
         if duplicate:
             allowed_profile_pair = (
                 duplicate.get("profile_id") == profile_id and
-                duplicate.get("profile_login") in ("owner", "user") and
+                duplicate.get("profile_login") in ("owner", "admin", "user") and
                 duplicate.get("profile_login") != (account or {}).get("profile_login")
             )
             if not allowed_profile_pair:
@@ -806,9 +947,20 @@ async def update_access_profile(profile_id: str, body: ProfileCredentialsIn, use
     if password:
         updates["password_hash"] = hash_pw(password)
     updates["profile_id"] = profile_id
-    updates["profile_login"] = "user"
+    previous_role = (account.get("company_roles") or {}).get(profile_id) if account else None
+    active_account = (account or {}).get("active", True) is not False
+    adding_admin = account is None or (previous_role != "admin" and active_account)
+    if adding_admin and active_account:
+        await reserve_company_admin(profile_id)
+    updates["profile_login"] = "admin"
+    updates["company_roles"] = {profile_id: "admin"}
+    updates["company_ids"] = [profile_id]
     if account:
-        await base_db.users.update_one({"id": account["id"]}, {"$set": updates})
+        result = await base_db.users.update_one({"id": account["id"]}, {"$set": updates})
+        if result.matched_count != 1:
+            if adding_admin and active_account:
+                await release_company_admin(profile_id)
+            raise HTTPException(409, "Profile account changed; reload and try again")
         account_id = account["id"]
         before_username = account.get("username", "")
     else:
@@ -816,7 +968,7 @@ async def update_access_profile(profile_id: str, body: ProfileCredentialsIn, use
         before_username = ""
         await base_db.users.insert_one({
             "id": account_id, "name": username, "email": "", "created_at": now_iso(),
-            "role": "user", "company_roles": {profile_id: "user"}, "company_ids": [profile_id],
+            "role": "user", "company_roles": {profile_id: "admin"}, "company_ids": [profile_id],
             "active": True, "auth_provider": "password", **updates,
         })
 
@@ -828,7 +980,18 @@ async def update_access_profile(profile_id: str, body: ProfileCredentialsIn, use
 
 @api.post("/auth/switch-company")
 async def switch_company(body: SwitchCompanyIn, user=Depends(get_current_user)):
-    require_owner(user)
+    has_company_owner_access = (
+        user.get("role") == "owner"
+        or (
+            not user.get("is_worker")
+            and any(
+                assigned_role == "owner"
+                for assigned_role in (user.get("company_roles") or {}).values()
+            )
+        )
+    )
+    if not has_company_owner_access and not is_delegated_company_admin(user):
+        raise HTTPException(403, "Company admin access required")
     selected = await authorize_company(user, body.company_id, user.get("_session_id"))
     session_id = user.get("_session_id") or new_id()
     await base_db.user_sessions.update_one({"id": session_id}, {"$set": {
@@ -860,7 +1023,6 @@ def require_admin(user):
 
 @api.get("/access/workers")
 async def get_workers(company_id: str = "", user=Depends(get_current_user)):
-    require_owner(user)
     company_id = company_id or user["_active_company_id"]
     if company_role(user, company_id) not in ("owner", "admin"):
         raise HTTPException(403, "Administrator access required for this company")
@@ -880,7 +1042,6 @@ async def get_workers(company_id: str = "", user=Depends(get_current_user)):
     } for worker in workers]
 
 async def worker_access_details(worker_id, company_id, user):
-    require_owner(user)
     if company_role(user, company_id) not in ("owner", "admin"):
         raise HTTPException(403, "You can only manage workers in a company you administer")
     worker = await base_db.users.find_one({
@@ -973,6 +1134,30 @@ async def revoke_worker_personal_link(
                     before={"company_id": company_id}, after={"active": False})
     return {**details, "active": False, "can_regenerate": True, "link_active": False, "access_token": None}
 
+@api.put("/access/workers/{worker_id}/password")
+async def update_worker_password(
+    worker_id: str, company_id: str, body: ProfilePasswordIn,
+    user=Depends(get_current_user),
+):
+    if company_role(user, company_id) not in ("owner", "admin"):
+        raise HTTPException(403, "You can only manage workers in a company you administer")
+    if len(body.password) < 8:
+        raise HTTPException(400, "Password must contain at least 8 characters")
+    worker = await base_db.users.find_one({
+        "id": worker_id, "is_worker": True,
+        f"company_roles.{company_id}": {"$in": ["user", "admin", "owner"]},
+    }, {"_id": 0, "id": 1})
+    if not worker:
+        raise HTTPException(404, "Worker not found in this company")
+    await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": {
+        "password_hash": hash_pw(body.password),
+        "auth_provider": "password",
+    }})
+    await base_db.user_sessions.delete_many({"user_id": worker_id})
+    await log_audit("user", worker_id, "worker_password_updated", user,
+                    after={"company_id": company_id})
+    return {"ok": True}
+
 @api.get("/worker-access/{token}")
 async def worker_access_link_info(token: str, response: Response):
     response.headers["Cache-Control"] = "no-store"
@@ -997,7 +1182,6 @@ async def worker_access_link_info(token: str, response: Response):
 
 @api.post("/access/workers")
 async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
-    require_owner(user)
     company_id = body.company_id
     if company_role(user, company_id) not in ("owner", "admin"):
         raise HTTPException(403, "You can only add workers to a company you administer")
@@ -1064,7 +1248,6 @@ async def update_worker_access(
     worker_id: str, body: WorkerAccessUpdateIn, company_id: str,
     user=Depends(get_current_user),
 ):
-    require_owner(user)
     if company_role(user, company_id) not in ("owner", "admin"):
         raise HTTPException(403, "You can only manage workers in a company you administer")
     worker = await base_db.users.find_one({
@@ -1099,7 +1282,6 @@ async def update_worker_access(
 
 @api.delete("/access/workers/{worker_id}")
 async def remove_worker(worker_id: str, company_id: str, user=Depends(get_current_user)):
-    require_owner(user)
     if company_role(user, company_id) not in ("owner", "admin"):
         raise HTTPException(403, "You can only manage workers in a company you administer")
     worker = await base_db.users.find_one({
@@ -1190,25 +1372,34 @@ async def create_access_user(body: CreateAccessUserIn, user=Depends(get_current_
         )
         if not is_owner_profile_username:
             raise HTTPException(409, "Username already exists")
-        if await base_db.users.find_one({"profile_login": "user"}, {"_id": 0}):
-            raise HTTPException(409, "A user login for this profile already exists")
+        existing_profile_admin = await base_db.users.find_one({
+            "profile_id": COMPANY_PROFILES[0]["id"],
+            "profile_login": {"$in": ["admin", "user"]},
+        }, {"_id": 0})
+        if existing_profile_admin:
+            raise HTTPException(409, "An admin login for this profile already exists")
         profile_login = True
     email = (body.email or "").strip().lower()
     if email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         raise HTTPException(400, "Enter a valid email address")
+    company_roles = {cid: "user" for cid in dict.fromkeys(body.company_ids)}
+    if profile_login:
+        company_roles[COMPANY_PROFILES[0]["id"]] = "admin"
+        await reserve_company_admin(COMPANY_PROFILES[0]["id"])
     account = {"id": new_id(), "username": username, "email": email, "name": name,
         "password_hash": hash_pw(body.password), "role": "user",
-        "company_roles": {cid: "user" for cid in dict.fromkeys(body.company_ids)},
+        "company_roles": company_roles,
         "company_ids": list(dict.fromkeys(body.company_ids)), "active": True,
         "auth_provider": "password", "created_at": now_iso()}
     if profile_login:
         account["profile_id"] = COMPANY_PROFILES[0]["id"]
-        account["profile_login"] = "user"
+        account["profile_login"] = "admin"
     await base_db.users.insert_one(dict(account))
     await log_audit("user", account["id"], "account_created", user,
         after={"username": username, "company_roles": account["company_roles"]})
     return {"id": account["id"], "username": username, "email": email, "name": name,
-        "role": "user", "company_roles": account["company_roles"], "company_ids": account["company_ids"], "active": True}
+        "role": "admin" if profile_login else "user", "company_roles": account["company_roles"],
+        "company_ids": account["company_ids"], "active": True}
 
 async def reserve_company_admin(company_id):
     result = await base_db.company_admin_counts.update_one(
@@ -1719,6 +1910,7 @@ class InvoiceIn(BaseModel):
     edit_reason: Optional[str] = ""
     opening_balance: Optional[bool] = None
     deduct_stock: bool = False
+    allow_negative_stock: bool = False
     supervisor_authorization: Optional[str] = None
 
 class InvoiceEditAuthorizationIn(BaseModel):
@@ -1734,6 +1926,7 @@ class BuyingEditAuthorizationIn(BaseModel):
 
 class InvoiceIssueIn(BaseModel):
     deduct_stock: bool = False
+    allow_negative_stock: bool = False
 
 INV_DIFF_FIELDS = ("customer_name", "date", "due_date", "zone", "payment_terms", "reference", "destination", "notes", "discount", "extra_charges", "tax_enabled", "total")
 
@@ -1810,6 +2003,8 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
     return inv
 
 async def authenticate_supervisor(password, user):
+    if can_skip_supervisor_approval(user):
+        return user["id"], "IQFOAM Wholesalers admin in IQFOAM Manufacturing"
     company_id = user["_active_company_id"]
     company_settings = await db.settings.find_one({"id": "singleton"}, {"_id": 0})
     supervisor_hash = (company_settings or {}).get("supervisor_password_hash")
@@ -1871,6 +2066,15 @@ async def create_invoice_action_authorization(iid, action, password, user, targe
     return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
 
 async def consume_invoice_action_authorization(authorization_id, iid, action, user, target_id=None):
+    if can_skip_supervisor_approval(user):
+        return {
+            "id": authorization_id,
+            "invoice_id": iid,
+            "user_id": user["id"],
+            "company_id": user["_active_company_id"],
+            "action": action,
+            "supervisor_exempt": True,
+        }
     query = {
         "id": authorization_id,
         "invoice_id": iid,
@@ -2011,6 +2215,7 @@ async def _prepare_invoice(body: InvoiceIn):
         raise HTTPException(400, "Customer name is required")
     inv = body.model_dump()
     inv.pop("deduct_stock", None)
+    inv.pop("allow_negative_stock", None)
     inv.pop("supervisor_authorization", None)
     inv["customer_id"] = customer_id
     if inv.get("opening_balance") is None or inv.get("opening_balance") is False:
@@ -2048,7 +2253,7 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
         return await insert("invoices", inv)
     deductions = await invoice_stock_deductions(inv)
     async with StockLock([item["stock_id"] for item in deductions]):
-        await validate_invoice_stock(deductions)
+        await validate_invoice_stock(deductions, body.allow_negative_stock)
         rec = await insert("invoices", inv)
         await post_invoice_stock_deductions(rec, deductions, user)
         rec = await update_doc("invoices", rec["id"], {"stock_deducted": True})
@@ -2099,7 +2304,7 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
     else:
         stock_changes = await invoice_stock_changes({**inv, "id": iid})
         async with StockLock(stock_changes):
-            stocks = await validate_invoice_stock_changes(stock_changes)
+            stocks = await validate_invoice_stock_changes(stock_changes, body.allow_negative_stock)
             rec = await update_doc("invoices", iid, inv)
             await post_invoice_stock_changes(rec, stock_changes, stocks, user)
             rec = await update_doc("invoices", iid, {"stock_deducted": True, "stock_restored": False})
@@ -2136,7 +2341,7 @@ async def issue_invoice(iid: str, body: InvoiceIssueIn = InvoiceIssueIn(), user=
         return await update_doc("invoices", iid, upd)
     deductions = await invoice_stock_deductions(inv)
     async with StockLock([item["stock_id"] for item in deductions]):
-        await validate_invoice_stock(deductions)
+        await validate_invoice_stock(deductions, body.allow_negative_stock)
         rec = await update_doc("invoices", iid, upd)
         await post_invoice_stock_deductions(rec, deductions, user)
         return await update_doc("invoices", iid, {"stock_deducted": True})
@@ -2838,19 +3043,27 @@ async def invoice_stock_deductions(invoice, allow_empty=False):
         raise HTTPException(400, "No invoice products match stock items to deduct")
     return list(quantities.values())
 
-async def validate_invoice_stock(deductions):
+async def validate_invoice_stock(deductions, allow_negative_stock=False):
+    shortages = []
     for item in deductions:
         stock = await db.stock.find_one({"id": item["stock_id"]}, {"_id": 0})
         if not stock:
             raise HTTPException(409, f"Stock item no longer exists: {item['product']} {item['size']}")
         await stock_current(stock)
         if item["quantity"] > D(stock["current"]):
-            raise HTTPException(
-                400,
-                f"Insufficient stock for {item['product']} {item['size']}: "
-                f"available {stock['current']}, requested {r2(item['quantity'])}",
-            )
+            shortages.append({
+                "product": item["product"],
+                "size": item["size"],
+                "available": float(stock["current"]),
+                "requested": float(item["quantity"]),
+                "stock_after": float(D(stock["current"]) - item["quantity"]),
+            })
         item["stock"] = stock
+    if shortages and not allow_negative_stock:
+        raise HTTPException(409, {
+            "code": "INSUFFICIENT_STOCK",
+            "items": shortages,
+        })
 
 async def post_invoice_stock_deductions(invoice, deductions, user):
     for item in deductions:
@@ -2862,6 +3075,7 @@ async def post_invoice_stock_deductions(invoice, deductions, user):
             item["stock"], "invoice", item["quantity"], user,
             reason=f"Invoice {invoice['number']}", reference=invoice["number"],
             dedupe_key=key,
+            allow_negative=True,
             extra={"invoice_id": invoice["id"], "invoice_number": invoice["number"]},
         )
         await log_audit("stock_movement", movement["id"], "posted", user, after=movement)
@@ -2883,8 +3097,9 @@ async def invoice_stock_changes(invoice):
             changes[stock_id] = delta
     return changes
 
-async def validate_invoice_stock_changes(changes):
+async def validate_invoice_stock_changes(changes, allow_negative_stock=False):
     stocks = {}
+    shortages = []
     for stock_id, delta in changes.items():
         stock = await db.stock.find_one({"id": stock_id}, {"_id": 0})
         if not stock:
@@ -2892,12 +3107,19 @@ async def validate_invoice_stock_changes(changes):
         if delta > 0:
             await stock_current(stock)
             if delta > D(stock["current"]):
-                raise HTTPException(
-                    400,
-                    f"Insufficient stock for {stock['product']} {stock['size']}: "
-                    f"available {stock['current']}, additional quantity requested {r2(delta)}",
-                )
+                shortages.append({
+                    "product": stock["product"],
+                    "size": stock["size"],
+                    "available": float(stock["current"]),
+                    "requested": float(delta),
+                    "stock_after": float(D(stock["current"]) - delta),
+                })
         stocks[stock_id] = stock
+    if shortages and not allow_negative_stock:
+        raise HTTPException(409, {
+            "code": "INSUFFICIENT_STOCK",
+            "items": shortages,
+        })
     return stocks
 
 async def post_invoice_stock_changes(invoice, changes, stocks, user):
@@ -2910,6 +3132,7 @@ async def post_invoice_stock_changes(invoice, changes, stocks, user):
             reason=f"Stock reconciled for edited invoice {invoice.get('number') or invoice['id']}",
             reference=invoice.get("number") or invoice["id"],
             direction=-1 if delta > 0 else 1,
+            allow_negative=True,
             dedupe_key=f"invoice-edit:{invoice['id']}:{new_id()}:{stock_id}",
             extra={"invoice_id": invoice["id"], "invoice_number": invoice.get("number", ""),
                    "invoice_edit": True},
@@ -4103,6 +4326,44 @@ async def get_supervisor_password_status(user=Depends(get_current_user)):
     settings = await db.settings.find_one({"id": "singleton"}, {"_id": 0, "supervisor_password_hash": 1})
     return {"configured": bool((settings or {}).get("supervisor_password_hash"))}
 
+@api.post("/settings/supervisor-password/authorize")
+async def authorize_supervisor_company_change(
+    body: SupervisorWriteAuthorizationIn,
+    user=Depends(get_current_user),
+):
+    if not is_delegated_company_admin(user) or user.get("_active_company_id") != DEFAULT_COMPANY_ID:
+        raise HTTPException(403, "This authorization is only available to company owners in SUPERIQFOAM")
+    settings = await db.settings.find_one({"id": "singleton"}, {"_id": 0, "supervisor_password_hash": 1})
+    password_hash = (settings or {}).get("supervisor_password_hash")
+    if not password_hash:
+        raise HTTPException(403, "Set a Supervisor Password for SUPERIQFOAM before making changes")
+    if not verify_pw(body.password, password_hash):
+        raise HTTPException(403, "Supervisor password is incorrect")
+
+    await base_db.supervisor_action_grants.delete_many({
+        "expires_at": {"$lte": datetime.now(timezone.utc)},
+    })
+    grant_id = new_id()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=2)
+    await base_db.supervisor_action_grants.insert_one({
+        "id": grant_id,
+        "user_id": user["id"],
+        "company_id": DEFAULT_COMPANY_ID,
+        "session_id": user.get("_session_id"),
+        "expires_at": expires_at,
+    })
+    authorization = jwt.encode({
+        "sub": user["id"],
+        "company_id": DEFAULT_COMPANY_ID,
+        "sid": user.get("_session_id"),
+        "scope": "supervisor_company_write",
+        "jti": grant_id,
+        "exp": expires_at,
+    }, JWT_SECRET, algorithm=JWT_ALGO)
+    await log_audit("auth", user["id"], "supervisor_write_authorized", user,
+                    after={"company_id": DEFAULT_COMPANY_ID, "expires_at": expires_at.isoformat()})
+    return {"authorization": authorization}
+
 @api.put("/settings/supervisor-password")
 async def update_supervisor_password(body: SupervisorPasswordIn, user=Depends(get_current_user)):
     require_profile_owner(user)
@@ -4364,15 +4625,17 @@ async def add_buying(body: BuyingIn, user=Depends(get_current_user)):
 
 @api.put("/buyings/{bid}")
 async def edit_buying(bid: str, body: BuyingIn, user=Depends(get_current_user)):
-    authorization = await db.buying_edit_authorizations.find_one({
-        "id": body.supervisor_authorization,
-        "buying_id": bid,
-        "user_id": user["id"],
-        "company_id": user["_active_company_id"],
-        "expires_at": {"$gt": datetime.now(timezone.utc)},
-    })
-    if not authorization:
-        raise HTTPException(403, "Supervisor approval is required to edit this buying")
+    authorization = None
+    if not can_skip_supervisor_approval(user):
+        authorization = await db.buying_edit_authorizations.find_one({
+            "id": body.supervisor_authorization,
+            "buying_id": bid,
+            "user_id": user["id"],
+            "company_id": user["_active_company_id"],
+            "expires_at": {"$gt": datetime.now(timezone.utc)},
+        })
+        if not authorization:
+            raise HTTPException(403, "Supervisor approval is required to edit this buying")
     source, product, size = await _check_buying(body)
     before = await db.buyings.find_one({"id": bid, "voided": {"$ne": True}}, {"_id": 0})
     if not before:
@@ -4388,7 +4651,8 @@ async def edit_buying(bid: str, body: BuyingIn, user=Depends(get_current_user)):
     data["amount"] = buying_amount(data["quantity"], data["unit_price"])
     rec = await update_doc("buyings", bid, data)
     await log_audit("buying", bid, "updated", user, before=before, after=rec)
-    await db.buying_edit_authorizations.delete_one({"id": authorization["id"]})
+    if authorization:
+        await db.buying_edit_authorizations.delete_one({"id": authorization["id"]})
     return rec
 
 @api.post("/buyings/{bid}/authorize-edit")
@@ -4748,6 +5012,15 @@ async def create_monthly_purchase_authorization(purchase_id, action, password, u
     return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
 
 async def consume_monthly_purchase_authorization(authorization_id, purchase_id, action, user):
+    if can_skip_supervisor_approval(user):
+        return {
+            "id": authorization_id,
+            "purchase_id": purchase_id,
+            "user_id": user["id"],
+            "company_id": user["_active_company_id"],
+            "action": action,
+            "supervisor_exempt": True,
+        }
     query = {
         "id": authorization_id,
         "user_id": user["id"],
@@ -5691,6 +5964,15 @@ async def create_expense_authorization(expense_id, action, password, user):
     return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
 
 async def consume_expense_authorization(authorization_id, expense_id, action, user):
+    if can_skip_supervisor_approval(user):
+        return {
+            "id": authorization_id,
+            "expense_id": expense_id,
+            "user_id": user["id"],
+            "company_id": user["_active_company_id"],
+            "action": action,
+            "supervisor_exempt": True,
+        }
     query = {
         "id": authorization_id,
         "user_id": user["id"],
@@ -6318,6 +6600,17 @@ async def create_fleet_expense_authorization(body, user):
     return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
 
 async def consume_fleet_expense_authorization(authorization_id, resource_type, action, user, resource_id=None, target_id=None):
+    if can_skip_supervisor_approval(user):
+        return {
+            "id": authorization_id,
+            "resource_type": resource_type,
+            "action": action,
+            "user_id": user["id"],
+            "company_id": user["_active_company_id"],
+            "resource_id": resource_id,
+            "target_id": target_id,
+            "supervisor_exempt": True,
+        }
     query = {
         "id": authorization_id,
         "resource_type": resource_type,
@@ -7220,11 +7513,22 @@ async def initialize_multi_company():
         roles = account.get("company_roles") or {
             DEFAULT_COMPANY_ID: "admin" if account.get("role") == "admin" else "user"
         }
-        await base_db.users.update_one({"id": account["id"]}, {"$set": {
+        profile_id = account.get("profile_id")
+        is_legacy_profile_admin = (
+            account.get("profile_login") == "user"
+            and profile_id in {profile["id"] for profile in COMPANY_PROFILES}
+            and roles.get(profile_id) != "owner"
+        )
+        if is_legacy_profile_admin:
+            roles[profile_id] = "admin"
+        updates = {
             "role": "user", "company_roles": roles,
             "company_ids": list(dict.fromkeys([*account.get("company_ids", []), *roles.keys()])),
             "active": account.get("active", True),
-        }})
+        }
+        if is_legacy_profile_admin:
+            updates["profile_login"] = "admin"
+        await base_db.users.update_one({"id": account["id"]}, {"$set": updates})
 
     for profile in COMPANY_PROFILES:
         company_id = profile["id"]

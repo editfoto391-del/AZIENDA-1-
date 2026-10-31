@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { Building2, Pencil, Plus, Search, ShoppingCart, Trash2 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtMoney, today } from "@/lib/format";
+import { useAuth } from "@/context/AuthContext";
 import { Btn, Card, Empty, Input, Modal, PageHeader, Select, Textarea } from "@/components/common";
 
 const blankBuying = () => ({
@@ -22,6 +23,7 @@ const blankBuying = () => ({
 });
 
 export default function Buyings() {
+  const { user } = useAuth();
   const [buyings, setBuyings] = useState(null);
   const [stock, setStock] = useState(null);
   const [suppliers, setSuppliers] = useState(null);
@@ -124,6 +126,24 @@ export default function Buyings() {
     }
   };
 
+  const editBuying = (buying) => {
+    const draft = {
+      ...buying,
+      product_mode: buying.stock_id ? "stock" : "manual",
+      stock_category: buying.product,
+      supplier_id: buying.supplier_id || "",
+      quantity: String(buying.quantity),
+      unit_price: String(buying.unit_price),
+      item_type: buying.item_type || "raw_material",
+    };
+    if (user?.can_skip_supervisor_approval) {
+      setModal(draft);
+      return;
+    }
+    setEditCandidate(buying);
+    setSupervisorPassword("");
+  };
+
   const voidBuying = async (buying) => {
     const reason = window.prompt(`Void purchase "${formatBuyingProduct(buying)}" (${fmtMoney(buying.amount)})? Reason:`);
     if (reason === null) return;
@@ -194,7 +214,7 @@ export default function Buyings() {
                     <td className="px-4 py-3 text-right">
                       <button
                         type="button"
-                        onClick={() => { setEditCandidate(buying); setSupervisorPassword(""); }}
+                        onClick={() => editBuying(buying)}
                         aria-label={`Edit ${formatBuyingProduct(buying)}`}
                         data-testid={`edit-buying-${buying.id}`}
                         className="rounded p-1.5 text-slate-400 hover:text-primary"

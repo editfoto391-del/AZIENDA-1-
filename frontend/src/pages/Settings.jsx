@@ -197,7 +197,7 @@ export default function Settings() {
         .then((profiles) => {
         setProfileAccounts(profiles);
         setProfileDrafts(Object.fromEntries(profiles.map((profile) => [
-          profile.id, { userPassword: "", ownerPassword: "" },
+          profile.id, { adminPassword: "", ownerPassword: "" },
         ])));
         })
         .catch((e) => toast.error(apiError(e)))
@@ -302,12 +302,12 @@ export default function Settings() {
 
   const saveProfileCredentials = async (profile, accountType) => {
     const draft = profileDrafts[profile.id];
-    if (!draft || !["owner", "user"].includes(accountType)) return;
+    if (!draft || !["owner", "admin"].includes(accountType)) return;
     const savingId = `${profile.id}-${accountType}`;
     setProfileSavingId(savingId);
     try {
       await api.put(`/access/profiles/${profile.id}/password/${accountType}`, {
-        password: accountType === "user" ? draft.userPassword : draft.ownerPassword,
+        password: accountType === "admin" ? draft.adminPassword : draft.ownerPassword,
       });
       setProfileAccounts((current) => current.map((item) => item.id === profile.id
         ? { ...item, [`${accountType}_configured`]: true }
@@ -316,7 +316,7 @@ export default function Settings() {
         ...current,
         [profile.id]: { ...current[profile.id], [`${accountType}Password`]: "" },
       }));
-      toast.success(`${accountType === "owner" ? "Owner" : "User"} password updated`);
+      toast.success(`${accountType === "owner" ? "Owner" : "Admin"} password updated`);
     } catch (e) { toast.error(apiError(e)); }
     finally { setProfileSavingId(""); }
   };
@@ -620,16 +620,16 @@ export default function Settings() {
             </Btn>
           </Card>
           {user?.is_owner && (profilesLoading ? <p className="text-sm text-slate-400 py-4">Loading profiles...</p> : profileAccounts.map((profile) => {
-            const draft = profileDrafts[profile.id] || { userPassword: "", ownerPassword: "" };
+            const draft = profileDrafts[profile.id] || { adminPassword: "", ownerPassword: "" };
             return (
               <Card key={profile.id} className="p-5 space-y-5" data-testid={`profile-credentials-${profile.id}`}>
                 <div>
                   <h3 className="font-bold text-slate-800 font-display">{profile.name}</h3>
-                  <p className="text-sm text-slate-500 mt-1">Owner and User sign in independently using username <b>{profile.username}</b>. The owner account has owner access only to this profile.</p>
+                  <p className="text-sm text-slate-500 mt-1">Owner and Admin sign in independently using username <b>{profile.username}</b>.</p>
                 </div>
                 {[
                   { type: "owner", label: "Owner", configured: profile.owner_configured, password: draft.ownerPassword },
-                  { type: "user", label: "User", configured: profile.user_configured, password: draft.userPassword },
+                  { type: "admin", label: "Admin", configured: profile.admin_configured, password: draft.adminPassword },
                 ].map(({ type, label, configured, password }) => {
                   const savingId = `${profile.id}-${type}`;
                   return <div key={type} className="space-y-3 rounded-lg border border-border p-4">

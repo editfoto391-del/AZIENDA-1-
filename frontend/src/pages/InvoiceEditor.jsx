@@ -46,6 +46,7 @@ export default function InvoiceEditor() {
   const [nextNum, setNextNum] = useState("");
   const [pendingSave, setPendingSave] = useState(null);
   const [pendingStockSubmit, setPendingStockSubmit] = useState(null);
+  const [pendingNegativeStock, setPendingNegativeStock] = useState(null);
   const [downloadIssuedDraft, setDownloadIssuedDraft] = useState(false);
   const docRef = useRef(null);
   const saveLockRef = useRef(false);
@@ -80,12 +81,19 @@ export default function InvoiceEditor() {
       })) };
       setInv(loaded); setPayRecords(d.payment_records || []);
       if (sp.get("edit") && d.status !== "void") {
-        setEditAuthOpen(true);
+        if (user?.can_skip_supervisor_approval) {
+          setSnapshot(loaded);
+          setInv(prepareForEdit(loaded));
+          setEditAuthorization("");
+          setEditing(true);
+        } else {
+          setEditAuthOpen(true);
+        }
         setSp({}, { replace: true });
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, user?.can_skip_supervisor_approval]);
 
   useEffect(() => {
     if (!id && /^\d{4}-/.test(inv.date)) {
@@ -95,7 +103,40 @@ export default function InvoiceEditor() {
     }
   }, [id, inv.date]);
 
-  const startEdit = () => setEditAuthOpen(true);
+  const startEdit = () => {
+    if (user?.can_skip_supervisor_approval) {
+      setSnapshot(inv);
+      setInv(prepareForEdit(inv));
+      setEditAuthorization("");
+      setEditing(true);
+      return;
+    }
+    setEditAuthOpen(true);
+  };
+  const performInvoiceAction = async (action, supervisor_authorization) => {
+    try {
+      if (action.action === "void") {
+        const result = await api.post(`/invoices/${id}/void`, {
+          reason: action.reason,
+          supervisor_authorization,
+        });
+        setInv({ ...inv, status: result.status, void_reason: action.reason });
+        toast.success("Invoice voided");
+      } else {
+        await api.post(`/payments/${action.paymentId}/reverse`, {
+          reason: action.reason,
+          supervisor_authorization,
+        });
+        await reloadInv();
+        toast.success("Payment reversed");
+      }
+      setPendingInvoiceAction(null);
+      setEditAuthOpen(false);
+      setSupervisorPassword("");
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
   const authorizeEdit = async (event) => {
     event.preventDefault();
     if (!supervisorPassword || authorizingEdit) return;
@@ -107,24 +148,7 @@ export default function InvoiceEditor() {
           action: pendingInvoiceAction.action,
           target_id: pendingInvoiceAction.paymentId,
         });
-        if (pendingInvoiceAction.action === "void") {
-          const res = await api.post(`/invoices/${id}/void`, {
-            reason: pendingInvoiceAction.reason,
-            supervisor_authorization: approval.authorization_id,
-          });
-          setInv({ ...inv, status: res.status, void_reason: pendingInvoiceAction.reason });
-          toast.success("Invoice voided");
-        } else {
-          await api.post(`/payments/${pendingInvoiceAction.paymentId}/reverse`, {
-            reason: pendingInvoiceAction.reason,
-            supervisor_authorization: approval.authorization_id,
-          });
-          await reloadInv();
-          toast.success("Payment reversed");
-        }
-        setPendingInvoiceAction(null);
-        setEditAuthOpen(false);
-        setSupervisorPassword("");
+        await performInvoiceAction(pendingInvoiceAction, approval.authorization_id);
         return;
       }
       const approval = await api.post(`/invoices/${id}/authorize-edit`, { password: supervisorPassword });
@@ -310,7 +334,7 @@ export default function InvoiceEditor() {
     return true;
   };
 
-  const save = async (status, saveNewEntries = null, downloadAfterSave = false, deductStock = null) => {
+  const save = async (status, saveNewEntries = null, downloadAfterSave = false, deductStock = null, allowNegativeStock = false, resolvedCustomerId = null) => {
     if (!validate(status) || busy || saveLockRef.current) return;
     if (status !== "draft" && deductStock === null) {
       setPendingStockSubmit({ action: "save", status, downloadAfterSave });
@@ -331,7 +355,7 @@ export default function InvoiceEditor() {
     saveLockRef.current = true;
     setBusy(true);
     try {
-      let customerId = inv.customer_id;
+      let customerId = resolvedCustomerId || inv.customer_id;
       if (saveNewEntries && !customerId) {
         const existingCustomer = customers.find((customer) => customer.name.trim().toLowerCase() === inv.customer_name.trim().toLowerCase());
         if (existingCustomer) customerId = existingCustomer.id;
@@ -346,8 +370,9 @@ export default function InvoiceEditor() {
           setCustomers((current) => [...current, createdCustomer]);
         }
       }
-      if (saveNewEntries && pendingSave?.newProducts.length) {
-        const savedPrices = await Promise.all(pendingSave.newProducts.map((item) => {
+      const newProductsToSave = saveNewEntries ? (pendingSave?.newProducts || []) : [];
+      if (newProductsToSave.length) {
+        const savedPrices = await Promise.all(newProductsToSave.map((item) => {
           const price = Number(item.unit_price);
           return api.post("/prices", {
             zone: unifiedPriceList ? 1 : inv.zone,
@@ -360,14 +385,23 @@ export default function InvoiceEditor() {
         }));
         if (savedPrices.length) setPrices((current) => [...current, ...savedPrices]);
       }
-      const payload = { ...buildPayload(status), customer_id: customerId, customer_name: inv.customer_name.trim(), deduct_stock: !!deductStock };
+      setPendingSave(null);
+      const payload = { ...buildPayload(status), customer_id: customerId, customer_name: inv.customer_name.trim(), deduct_stock: !!deductStock, allow_negative_stock: allowNegativeStock };
       const res = id ? await api.put(`/invoices/${id}`, { ...payload, supervisor_authorization: editAuthorization }) : await api.post("/invoices", payload);
       const submitted = !id && status !== "draft";
       toast.success(submitted ? "INVOICE SUBMITTED" : status === "draft" ? "Saved as draft" : "Invoice saved");
       setPendingSave(null);
       nav(submitted && !downloadAfterSave ? "/invoices" : `/invoices/${res.id}${downloadAfterSave ? "?pdf=1" : ""}`);
       if (id) { setInv(res); setEditAuthorization(""); }
-    } catch (e) { toast.error(apiError(e)); } finally { saveLockRef.current = false; setBusy(false); }
+    } catch (e) {
+      const detail = e.response?.data?.detail;
+      if (detail?.code === "INSUFFICIENT_STOCK") {
+        setPendingNegativeStock({
+          items: detail.items || [],
+          retry: () => save(status, false, downloadAfterSave, deductStock, true, customerId),
+        });
+      } else toast.error(apiError(e));
+    } finally { saveLockRef.current = false; setBusy(false); }
   };
 
   const saveEdit = async () => {
@@ -382,7 +416,7 @@ export default function InvoiceEditor() {
     await submitEdit(false, reason);
   };
 
-  const submitEdit = async (deductStock, reason) => {
+  const submitEdit = async (deductStock, reason, allowNegativeStock = false) => {
     if (busy || saveLockRef.current) return;
     saveLockRef.current = true;
     setBusy(true);
@@ -391,14 +425,50 @@ export default function InvoiceEditor() {
         ...buildPayload(inv.status === "draft" ? "draft" : "issued"),
         edit_reason: reason,
         deduct_stock: deductStock,
+        allow_negative_stock: allowNegativeStock,
         supervisor_authorization: editAuthorization,
       });
       setInv(res); setPayRecords(res.payment_records || []); setEditing(false); setEditAuthorization("");
       toast.success("Invoice updated");
-    } catch (e) { toast.error(apiError(e)); } finally { saveLockRef.current = false; setBusy(false); }
+    } catch (e) {
+      const detail = e.response?.data?.detail;
+      if (detail?.code === "INSUFFICIENT_STOCK") {
+        setPendingNegativeStock({
+          items: detail.items || [],
+          retry: () => submitEdit(deductStock, reason, true),
+        });
+      } else toast.error(apiError(e));
+    } finally { saveLockRef.current = false; setBusy(false); }
   };
 
   const issueExisting = () => setPendingStockSubmit({ action: "issue" });
+
+  const issueWithStock = async (deductStock, action, allowNegativeStock = false) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const res = await api.post(`/invoices/${id}/issue`, {
+        deduct_stock: deductStock,
+        allow_negative_stock: allowNegativeStock,
+      });
+      setInv(res);
+      if (action === "download") {
+        setDownloadIssuedDraft(true);
+        toast.success("Invoice issued");
+      } else {
+        toast.success("Invoice issued");
+        nav("/invoices");
+      }
+    } catch (e) {
+      const detail = e.response?.data?.detail;
+      if (detail?.code === "INSUFFICIENT_STOCK") {
+        setPendingNegativeStock({
+          items: detail.items || [],
+          retry: () => issueWithStock(deductStock, action, true),
+        });
+      } else toast.error(apiError(e));
+    } finally { setBusy(false); }
+  };
 
   const chooseStockDeduction = async (deductStock) => {
     const pending = pendingStockSubmit;
@@ -412,29 +482,17 @@ export default function InvoiceEditor() {
       submitEdit(deductStock, pending.reason);
       return;
     }
-    if (busy) return;
-    setBusy(true);
-    try {
-      const res = await api.post(`/invoices/${id}/issue`, { deduct_stock: deductStock });
-      setInv(res);
-      if (pending.action === "download") {
-        setDownloadIssuedDraft(true);
-        toast.success("Invoice issued");
-      } else {
-        toast.success("Invoice issued");
-        nav("/invoices");
-      }
-    }
-    catch (e) { toast.error(apiError(e)); }
-    finally { setBusy(false); }
+    await issueWithStock(deductStock, pending.action);
   };
 
   const voidInvoice = async () => {
     const reason = window.prompt("Reason for voiding this invoice (required):");
     if (reason === null) return;
     if (!reason.trim()) return toast.error("A reason is required to void an invoice");
-    setPendingInvoiceAction({ action: "void", reason: reason.trim() });
-    setEditAuthOpen(true);
+    const action = { action: "void", reason: reason.trim() };
+    setPendingInvoiceAction(action);
+    if (user?.can_skip_supervisor_approval) await performInvoiceAction(action);
+    else setEditAuthOpen(true);
   };
 
   const archiveDraft = async () => {
@@ -463,8 +521,10 @@ export default function InvoiceEditor() {
     const reason = window.prompt(`Reverse payment of ${fmtMoney(p.amount)}? Enter a reason:`);
     if (reason === null) return;
     if (!reason.trim()) return toast.error("A reason is required");
-    setPendingInvoiceAction({ action: "reverse_payment", paymentId: p.id, reason: reason.trim() });
-    setEditAuthOpen(true);
+    const action = { action: "reverse_payment", paymentId: p.id, reason: reason.trim() };
+    setPendingInvoiceAction(action);
+    if (user?.can_skip_supervisor_approval) await performInvoiceAction(action);
+    else setEditAuthOpen(true);
   };
 
   const invoiceText = () => {
@@ -881,13 +941,42 @@ export default function InvoiceEditor() {
           </div>
           <p className="text-xs text-slate-500">
             {pendingStockSubmit.action === "edit"
-              ? "Choosing no saves the invoice but leaves stock unchanged. If additional stock is insufficient, the edit will not be saved."
-              : "Choosing no will submit the invoice without changing stock. If stock is insufficient, the invoice will not be issued."}
+              ? "Choosing no saves the invoice but leaves stock unchanged. If an added quantity exceeds available stock, you can confirm whether to allow negative stock."
+              : "Choosing no will issue the invoice without changing stock. If you choose to deduct stock and a size is unavailable, you can confirm whether to allow negative stock."}
           </p>
           <div className="flex flex-wrap justify-end gap-2">
             <Btn variant="outline" disabled={busy} onClick={() => chooseStockDeduction(false)} data-testid="invoice-submit-without-stock">No, keep stock unchanged</Btn>
             <Btn disabled={busy} onClick={() => chooseStockDeduction(true)} data-testid="invoice-submit-deduct-stock">
               {pendingStockSubmit.action === "edit" ? "Yes, update stock" : "Yes, deduct from stock"}
+            </Btn>
+          </div>
+        </div>}
+      </Modal>
+      <Modal open={!!pendingNegativeStock} onClose={() => setPendingNegativeStock(null)} title="Insufficient stock">
+        {pendingNegativeStock && <div className="space-y-4">
+          <p className="text-sm text-slate-700">
+            Attention: Some sizes are currently unavailable. Proceeding will make their stock negative. Do you want to continue?
+          </p>
+          <ul className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-border p-3 text-sm">
+            {pendingNegativeStock.items.map((item) => (
+              <li key={`${item.product}-${item.size}`} className="text-slate-700">
+                <span className="font-semibold">{item.product} · {item.size}</span>
+                <span className="block text-xs text-slate-500">
+                  Available: {Number(item.available).toFixed(2)} · Requested: {Number(item.requested).toFixed(2)} · After invoice: {Number(item.stock_after).toFixed(2)}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <div className="flex justify-end gap-2">
+            <Btn variant="outline" disabled={busy} onClick={() => setPendingNegativeStock(null)} data-testid="invoice-cancel-negative-stock">
+              No, cancel
+            </Btn>
+            <Btn disabled={busy} onClick={() => {
+              const retry = pendingNegativeStock.retry;
+              setPendingNegativeStock(null);
+              retry();
+            }} data-testid="invoice-confirm-negative-stock">
+              Yes, proceed
             </Btn>
           </div>
         </div>}

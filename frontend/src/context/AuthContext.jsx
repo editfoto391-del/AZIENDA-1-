@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { api, apiError } from "@/lib/api";
 import { dedicatedCompanyDomain } from "@/lib/company";
+import { Btn, Input, Modal } from "@/components/common";
 
 const AuthCtx = createContext(null);
 export const useAuth = () => useContext(AuthCtx);
@@ -30,6 +31,17 @@ async function deviceInfo(shareLocation) {
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null); // null=loading, false=unauth, obj=auth
   const [booting, setBooting] = useState(true);
+  const [supervisorPrompt, setSupervisorPrompt] = useState(null);
+  const [supervisorPassword, setSupervisorPassword] = useState("");
+
+  useEffect(() => {
+    const showSupervisorPrompt = (event) => {
+      setSupervisorPrompt({ resolve: event.detail.resolve });
+      setSupervisorPassword("");
+    };
+    window.addEventListener("erp:supervisor-password-required", showSupervisorPrompt);
+    return () => window.removeEventListener("erp:supervisor-password-required", showSupervisorPrompt);
+  }, []);
 
   useEffect(() => {
     // Returning from Google OAuth: AuthCallback exchanges session_id first
@@ -42,7 +54,8 @@ export function AuthProvider({ children }) {
     }
     const dedicatedDomain = dedicatedCompanyDomain();
     api.get("/auth/me").then((authenticatedUser) => {
-      if (dedicatedDomain && !authenticatedUser.is_worker && authenticatedUser.company_id !== dedicatedDomain.companyId) {
+      if (dedicatedDomain && !authenticatedUser.is_worker && !authenticatedUser.can_switch_company
+        && authenticatedUser.company_id !== dedicatedDomain.companyId) {
         localStorage.removeItem("token");
         setUser(false);
         return;
@@ -97,5 +110,40 @@ export function AuthProvider({ children }) {
     window.location.href = "/login";
   };
 
-  return <AuthCtx.Provider value={{ user, setUser, booting, login, register, completeGoogle, switchCompany, logout, apiError }}>{children}</AuthCtx.Provider>;
+  const closeSupervisorPrompt = (password = null) => {
+    supervisorPrompt?.resolve(password);
+    setSupervisorPrompt(null);
+    setSupervisorPassword("");
+  };
+
+  return (
+    <AuthCtx.Provider value={{ user, setUser, booting, login, register, completeGoogle, switchCompany, logout, apiError }}>
+      {children}
+      <Modal
+        open={!!supervisorPrompt}
+        onClose={() => closeSupervisorPrompt()}
+        title="Supervisor Password required"
+      >
+        <form className="space-y-4" onSubmit={(event) => {
+          event.preventDefault();
+          closeSupervisorPrompt(supervisorPassword);
+        }}>
+          <p className="text-sm text-slate-600">Changes to SUPERIQFOAM require approval with its Supervisor Password.</p>
+          <Input
+            autoFocus
+            label="SUPERIQFOAM Supervisor Password"
+            type="password"
+            autoComplete="current-password"
+            value={supervisorPassword}
+            onChange={(event) => setSupervisorPassword(event.target.value)}
+            data-testid="company-supervisor-password"
+          />
+          <div className="flex justify-end gap-2">
+            <Btn type="button" variant="outline" onClick={() => closeSupervisorPrompt()}>Cancel</Btn>
+            <Btn type="submit" disabled={!supervisorPassword}>Authorize change</Btn>
+          </div>
+        </form>
+      </Modal>
+    </AuthCtx.Provider>
+  );
 }
