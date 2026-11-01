@@ -14,9 +14,13 @@ const Dashboard = lazy(pageLoaders["/"]);
 const Customers = lazy(pageLoaders["/customers"]);
 const Suppliers = lazy(pageLoaders["/suppliers"]);
 const ClientPayments = lazy(pageLoaders["/client-payments"]);
+const ExpressClientPayments = lazy(pageLoaders["/express-client-payments"]);
 const Buyings = lazy(pageLoaders["/buyings"]);
+const Intercompany = lazy(pageLoaders["/intercompany"]);
 const InvoiceList = lazy(pageLoaders["/invoices"]);
 const InvoiceEditor = lazy(pageLoaders["/invoices/new"]);
+const ExpressInvoiceList = lazy(pageLoaders["/express-invoices"]);
+const ExpressInvoiceEditor = lazy(pageLoaders["/express-invoices/new"]);
 const Orders = lazy(pageLoaders["/orders"]);
 const Stock = lazy(pageLoaders["/stock"]);
 const Production = lazy(pageLoaders["/production"]);
@@ -28,6 +32,7 @@ const Costs = lazy(pageLoaders["/costs"]);
 const GRV = lazy(pageLoaders["/grv"]);
 const DailyReport = lazy(pageLoaders["/daily-report"]);
 const Settings = lazy(pageLoaders["/settings"]);
+const WorkflowBuilder = lazy(pageLoaders["/workflow-builder"]);
 
 function Protected({ children }) {
   const { user, booting } = useAuth();
@@ -35,7 +40,9 @@ function Protected({ children }) {
   if (booting || user === null) return <RouteLoading />;
   if (!user) return <Navigate to="/login" replace />;
   if (user.is_worker) {
-    const section = location.pathname.startsWith("/invoices") ? "invoices"
+    const section = location.pathname.startsWith("/express-invoices") ? "invoices"
+      : location.pathname.startsWith("/express-client-payments") ? "client-payments"
+        : location.pathname.startsWith("/invoices") ? "invoices"
       : location.pathname.startsWith("/customers") ? "customers"
         : location.pathname.startsWith("/suppliers") ? "suppliers"
           : location.pathname.startsWith("/buyings") ? "buyings"
@@ -77,6 +84,15 @@ function Protected({ children }) {
   }
   if (user.is_owner && user.company_id === "superiqfoam") {
     return <OwnerWelcome key={localStorage.getItem("token")} user={user}>{children}</OwnerWelcome>;
+  }
+  return children;
+}
+
+function GlobalOwnerOnly({ children }) {
+  const { user, booting } = useAuth();
+  if (booting || user === null) return <RouteLoading />;
+  if (!user || !user.is_primary_owner || !user.is_owner || user.is_worker) {
+    return <Navigate to="/" replace />;
   }
   return children;
 }
@@ -263,10 +279,15 @@ function AppRouter() {
             <Route path="/customers" element={<Customers />} />
             <Route path="/suppliers" element={<Suppliers />} />
             <Route path="/client-payments" element={<ClientPayments />} />
+            <Route path="/express-client-payments" element={<ExpressClientPayments express />} />
             <Route path="/buyings" element={<Buyings />} />
+            <Route path="/intercompany" element={<Intercompany />} />
             <Route path="/invoices" element={<InvoiceList />} />
             <Route path="/invoices/new" element={<InvoiceEditor />} />
             <Route path="/invoices/:id" element={<InvoiceEditor />} />
+            <Route path="/express-invoices" element={<ExpressInvoiceList express />} />
+            <Route path="/express-invoices/new" element={<ExpressInvoiceEditor express />} />
+            <Route path="/express-invoices/:id" element={<ExpressInvoiceEditor express />} />
             <Route path="/orders" element={<Orders />} />
             <Route path="/stock" element={<Stock />} />
             <Route path="/production" element={<Production />} />
@@ -278,6 +299,7 @@ function AppRouter() {
             <Route path="/grv" element={<GRV />} />
             <Route path="/daily-report" element={<DailyReport />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/workflow-builder" element={<GlobalOwnerOnly><WorkflowBuilder /></GlobalOwnerOnly>} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

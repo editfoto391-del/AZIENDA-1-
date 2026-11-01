@@ -7,9 +7,13 @@ export const pageLoaders = {
   "/customers": () => import("@/pages/Customers"),
   "/suppliers": () => import("@/pages/Suppliers"),
   "/client-payments": () => import("@/pages/ClientPayments"),
+  "/express-client-payments": () => import("@/pages/ClientPayments"),
   "/buyings": () => import("@/pages/Buyings"),
+  "/intercompany": () => import("@/pages/Intercompany"),
   "/invoices": () => import("@/pages/InvoiceList"),
   "/invoices/new": invoiceEditor,
+  "/express-invoices": () => import("@/pages/InvoiceList"),
+  "/express-invoices/new": invoiceEditor,
   "/orders": () => import("@/pages/Orders"),
   "/stock": () => import("@/pages/Stock"),
   "/production": () => import("@/pages/Production"),
@@ -21,6 +25,7 @@ export const pageLoaders = {
   "/grv": () => import("@/pages/GRV"),
   "/daily-report": () => import("@/pages/DailyReport"),
   "/settings": () => import("@/pages/Settings"),
+  "/workflow-builder": () => import("@/pages/WorkflowBuilder"),
 };
 
 const pageData = {
@@ -28,9 +33,13 @@ const pageData = {
   "/customers": ["/customers"],
   "/suppliers": ["/suppliers"],
   "/client-payments": ["/customers"],
+  "/express-client-payments": ["/customers", "/invoices?express=true"],
   "/buyings": ["/buyings"],
+  "/intercompany": ["/intercompany/requests"],
   "/invoices": ["/invoices"],
   "/invoices/new": ["/customers", "/prices", "/settings"],
+  "/express-invoices": ["/invoices?express=true"],
+  "/express-invoices/new": ["/customers", "/prices", "/settings"],
   "/orders": ["/orders", "/customers", "/vehicles", "/stock", "/settings"],
   "/stock": ["/stock", "/stock/movements"],
   "/production": ["/production/daily"],
@@ -41,11 +50,14 @@ const pageData = {
   "/costs": ["/reports/costs"],
   "/grv": ["/grvs", "/grvs/dashboard", "/grvs/purchase-orders", "/suppliers", "/stock", "/settings"],
   "/settings": ["/settings", "/prices", "/drivers"],
+  "/workflow-builder": [],
 };
 
 export function preloadPage(path) {
   const pathname = path.split("?")[0];
-  const route = pathname.startsWith("/invoices/") ? "/invoices/new" : pathname;
+  const route = pathname.startsWith("/express-invoices/")
+    ? "/express-invoices/new"
+    : pathname.startsWith("/invoices/") ? "/invoices/new" : pathname;
   pageLoaders[route]?.().catch(() => {});
   pageData[route]?.forEach((endpoint) => api.get(endpoint).catch(() => {}));
 }

@@ -69,6 +69,15 @@ def test_cross_company_filter_cannot_match_another_tenant():
     finally:
         active_company_id.reset(token)
 
+def test_aggregations_are_scoped_to_the_active_company():
+    token = active_company_id.set("iqfoam-whole-sallers")
+    try:
+        collection = ScopedCollection(FakeCollection(), company_scoped=True)
+        _, args, _ = collection.aggregate([{"$group": {"_id": None}}])
+        assert args[0][0] == {"$match": {"company_id": "iqfoam-whole-sallers"}}
+    finally:
+        active_company_id.reset(token)
+
 
 def test_cross_company_write_is_rejected():
     token = active_company_id.set("iqfoam-manufactoring")

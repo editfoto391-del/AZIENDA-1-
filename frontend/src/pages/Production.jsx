@@ -5,13 +5,17 @@ import { fmtDate, fmtDateTime, today } from "@/lib/format";
 import { Card, Btn, Input, Select, Modal, PageHeader, Empty, Badge } from "@/components/common";
 import { Factory, Plus, Save, Trash2, Pencil, RotateCcw } from "lucide-react";
 import BarcodeScanner from "@/components/BarcodeScanner";
+import { useAuth } from "@/context/AuthContext";
 
 export default function Production() {
+  const { user } = useAuth();
+  const canPermanentlyDelete = user?.is_admin || user?.role === "admin" || user?.is_owner;
   const [data, setData] = useState(null);
   const emptyForm = () => ({ date: today(), blocks: [{ block: "White", quantity: "" }], notes: "" });
   const [form, setForm] = useState(emptyForm);
   const [stock, setStock] = useState([]);
   const [blockCuttings, setBlockCuttings] = useState([]);
+  const [showArchivedCuttings, setShowArchivedCuttings] = useState(false);
   const [cutOpen, setCutOpen] = useState(false);
   const [cutForm, setCutForm] = useState({ block: "", size: "" });
   const [cutScanProduct, setCutScanProduct] = useState(null);
@@ -19,10 +23,11 @@ export default function Production() {
   const [cutBusy, setCutBusy] = useState(false);
   const load = () => {
     api.get("/production/daily").then(setData).catch((e) => toast.error(apiError(e)));
-    api.get("/production/block-cutting").then(setBlockCuttings).catch((e) => toast.error(apiError(e)));
+    api.get(showArchivedCuttings ? "/production/block-cutting?include_archived=true" : "/production/block-cutting")
+      .then(setBlockCuttings).catch((e) => toast.error(apiError(e)));
     api.get("/stock").then(setStock).catch((e) => toast.error(apiError(e)));
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [showArchivedCuttings]);
 
   const availableSizes = [...new Set(stock.map((item) => item.size).filter(Boolean))].sort();
 
@@ -49,7 +54,8 @@ export default function Production() {
       toast.success(cutForm.id ? "Block cutting updated" : "Block cutting recorded");
       setCutOpen(false);
       setCutForm({ block: "", size: "" });
-      api.get("/production/block-cutting").then(setBlockCuttings).catch((e) => toast.error(apiError(e)));
+      api.get(showArchivedCuttings ? "/production/block-cutting?include_archived=true" : "/production/block-cutting")
+        .then(setBlockCuttings).catch((e) => toast.error(apiError(e)));
     } catch (e) {
       toast.error(apiError(e));
     } finally {
@@ -74,7 +80,20 @@ export default function Production() {
     try {
       await api.del(`/production/block-cutting/${record.id}`);
       toast.success("Block cutting archived");
-      setBlockCuttings((current) => current.map((item) => item.id === record.id ? { ...item, archived: true } : item));
+      setBlockCuttings((current) => showArchivedCuttings
+        ? current.map((item) => item.id === record.id ? { ...item, archived: true } : item)
+        : current.filter((item) => item.id !== record.id));
+    } catch (e) {
+      toast.error(apiError(e));
+    }
+  };
+  const permanentlyDeleteBlockCutting = async (record) => {
+    if (!record.archived) return;
+    if (!window.confirm(`Permanently delete the ${record.block} ${record.size} block cutting record? This cannot be undone.`)) return;
+    try {
+      await api.del(`/production/block-cutting/${record.id}/permanent`);
+      toast.success("Block cutting permanently deleted");
+      setBlockCuttings((current) => current.filter((item) => item.id !== record.id));
     } catch (e) {
       toast.error(apiError(e));
     }
@@ -83,7 +102,9 @@ export default function Production() {
     try {
       await api.post(`/production/block-cutting/${record.id}/restore`);
       toast.success("Block cutting restored");
-      setBlockCuttings((current) => current.map((item) => item.id === record.id ? { ...item, archived: false } : item));
+      setBlockCuttings((current) => showArchivedCuttings
+        ? current.filter((item) => item.id !== record.id)
+        : current.map((item) => item.id === record.id ? { ...item, archived: false } : item));
     } catch (e) { toast.error(apiError(e)); }
   };
   const del = async (r) => { if (!window.confirm(`Archive production of ${fmtDate(r.date)}? The record will be retained.`)) return; await api.del(`/production/daily/${r.id}`); load(); };
@@ -123,16 +144,25 @@ export default function Production() {
       <Card className="p-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div><h2 className="font-semibold text-slate-800">Block Cutting</h2><p className="text-sm text-slate-500">Record cut block type and size without changing stock quantities.</p></div>
-          <Btn onClick={() => { setCutForm({ block: "", size: "" }); setCutScanProduct(null); setCutOpen(true); }} data-testid="add-block-cutting-btn"><Plus size={16} /> Add Block Cutted</Btn>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-slate-600">
+              <input type="checkbox" checked={showArchivedCuttings} onChange={(event) => setShowArchivedCuttings(event.target.checked)} data-testid="show-archived-block-cuttings" />
+              Show archived
+            </label>
+            <Btn onClick={() => { setCutForm({ block: "", size: "" }); setCutScanProduct(null); setCutOpen(true); }} data-testid="add-block-cutting-btn"><Plus size={16} /> Add Block Cutted</Btn>
+          </div>
         </div>
-        {blockCuttings.length === 0 ? <p className="text-sm text-slate-400">No block cutting records yet.</p> : (
+        {blockCuttings.length === 0 ? <p className="text-sm text-slate-400">{showArchivedCuttings ? "No archived block cutting records." : "No block cutting records yet."}</p> : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[640px] text-sm">
               <thead><tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500"><th className="px-3 py-2">Block</th><th className="px-3 py-2">Size</th><th className="px-3 py-2">Date and Time</th><th className="px-3 py-2 text-right">Actions</th></tr></thead>
               <tbody>{blockCuttings.map((record) => <tr key={record.id} className="border-b border-border/70" data-testid={`block-cutting-row-${record.id}`}>
                 <td className="px-3 py-2 font-semibold">{record.block}{record.archived && <Badge cls="ml-2 bg-amber-50 text-amber-700 border-amber-200">Archived</Badge>}</td><td className="px-3 py-2">{record.size}</td><td className="px-3 py-2 text-slate-500">{fmtDateTime(record.created_at)}</td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
-                  {record.archived ? <button onClick={() => restoreBlockCutting(record)} className="text-emerald-700 hover:text-emerald-900" aria-label={`Restore ${record.block} ${record.size}`} data-testid={`restore-block-cutting-${record.id}`}><RotateCcw size={15} /></button> : <>
+                  {record.archived ? <>
+                    <button onClick={() => restoreBlockCutting(record)} className="mr-3 text-emerald-700 hover:text-emerald-900" aria-label={`Restore ${record.block} ${record.size}`} data-testid={`restore-block-cutting-${record.id}`}><RotateCcw size={15} /></button>
+                    {canPermanentlyDelete && <button onClick={() => permanentlyDeleteBlockCutting(record)} className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50" aria-label={`Permanently delete ${record.block} ${record.size}`} data-testid={`permanently-delete-block-cutting-${record.id}`}><Trash2 size={12} /><span>Delete permanently</span></button>}
+                  </> : <>
                     <button onClick={() => { setCutForm({ id: record.id, block: record.block, size: record.size }); setCutScanProduct(null); setCutOpen(true); }} className="mr-3 text-slate-400 hover:text-primary" aria-label={`Edit ${record.block} ${record.size}`} data-testid={`edit-block-cutting-${record.id}`}><Pencil size={15} /></button>
                     <button onClick={() => deleteBlockCutting(record)} className="text-slate-400 hover:text-red-600" aria-label={`Archive ${record.block} ${record.size}`} data-testid={`delete-block-cutting-${record.id}`}><Trash2 size={15} /></button>
                   </>}

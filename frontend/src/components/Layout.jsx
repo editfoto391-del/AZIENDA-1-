@@ -22,10 +22,15 @@ const NAV_GROUPS = [
     { to: "/invoices", label: "Invoice", icon: ReceiptText, section: "invoices" },
     { to: "/client-payments", label: "Clients payment and balances", icon: HandCoins, section: "client-payments" },
   ] },
+  { label: "Express Websites - Old Invoices and Payments", items: [
+    { to: "/express-invoices", label: "Express Website Invoices", icon: ReceiptText, section: "invoices" },
+    { to: "/express-client-payments", label: "Express Website Payments and Balances", icon: HandCoins, section: "client-payments" },
+  ] },
   { label: "Fulfilment", items: [
     { to: "/deliveries", label: "Deliveries", icon: Truck, section: "deliveries" },
   ] },
   { label: "Purchasing", items: [
+    { to: "/intercompany", label: "Intercompany", icon: Building2, section: "orders" },
     { to: "/grv", label: "GRV", icon: ClipboardCheck, section: "grv" },
     { to: "/suppliers", label: "Suppliers", icon: Handshake, section: "suppliers" },
     { to: "/buyings", label: "Buyings", icon: ShoppingCart, section: "buyings" },
@@ -45,98 +50,12 @@ const NAV_GROUPS = [
   ] },
 ];
 
-const WHATSAPP_POSITION_KEY = "whatsapp-floating-position";
-const WHATSAPP_BUTTON_SIZE = 56;
-const WHATSAPP_EDGE_GAP = 8;
-
-function clampWhatsAppPosition(position) {
-  return {
-    x: Math.max(WHATSAPP_EDGE_GAP, Math.min(position.x, window.innerWidth - WHATSAPP_BUTTON_SIZE - WHATSAPP_EDGE_GAP)),
-    y: Math.max(WHATSAPP_EDGE_GAP, Math.min(position.y, window.innerHeight - WHATSAPP_BUTTON_SIZE - WHATSAPP_EDGE_GAP)),
-  };
-}
-
 function WhatsAppFloatingButton() {
-  const [position, setPosition] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(WHATSAPP_POSITION_KEY) || "null");
-      return saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)
-        ? clampWhatsAppPosition(saved)
-        : null;
-    } catch {
-      return null;
-    }
-  });
-  const drag = useRef(null);
-  const suppressClick = useRef(false);
-
-  useEffect(() => {
-    const keepInViewport = () => {
-      setPosition((current) => current ? clampWhatsAppPosition(current) : current);
-    };
-    window.addEventListener("resize", keepInViewport);
-    return () => window.removeEventListener("resize", keepInViewport);
-  }, []);
-
-  const startDrag = (event) => {
-    if (event.button !== 0) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    drag.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      originX: rect.left,
-      originY: rect.top,
-      position: { x: rect.left, y: rect.top },
-      moved: false,
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  };
-
-  const moveDrag = (event) => {
-    const active = drag.current;
-    if (!active || active.pointerId !== event.pointerId) return;
-    const dx = event.clientX - active.startX;
-    const dy = event.clientY - active.startY;
-    if (!active.moved && Math.hypot(dx, dy) < 4) return;
-    active.moved = true;
-    active.position = clampWhatsAppPosition({
-      x: active.originX + dx,
-      y: active.originY + dy,
-    });
-    setPosition(active.position);
-  };
-
-  const endDrag = (event) => {
-    moveDrag(event);
-    const active = drag.current;
-    if (!active || active.pointerId !== event.pointerId) return;
-    if (active.moved) {
-      suppressClick.current = true;
-      try {
-        localStorage.setItem(WHATSAPP_POSITION_KEY, JSON.stringify(active.position));
-      } catch {
-        toast.error("Could not save the WhatsApp button position");
-      }
-    }
-    drag.current = null;
-  };
-
   return (
     <a href="https://web.whatsapp.com/" target="_blank" rel="noreferrer"
-      aria-label="Open WhatsApp Web" title="Drag to move · click to open WhatsApp Web"
+      aria-label="Open WhatsApp Web" title="Open WhatsApp Web"
       data-testid="whatsapp-floating-button"
-      onPointerDown={startDrag}
-      onPointerMove={moveDrag}
-      onPointerUp={endDrag}
-      onPointerCancel={endDrag}
-      onClick={(event) => {
-        if (!suppressClick.current) return;
-        event.preventDefault();
-        suppressClick.current = false;
-      }}
-      style={position ? { left: position.x, top: position.y, right: "auto", bottom: "auto" } : undefined}
-      className={`fixed z-40 flex h-14 w-14 touch-none items-center justify-center rounded-full bg-[#25D366] text-white shadow-lg transition-transform hover:scale-105 hover:bg-[#20bd5a] focus:outline-none focus:ring-4 focus:ring-[#25D366]/30 ${position ? "" : "right-5 bottom-5"} cursor-grab active:cursor-grabbing`}
+      className="fixed left-5 top-5 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-[#25D366] text-white shadow-lg transition-transform hover:scale-105 hover:bg-[#20bd5a] focus:outline-none focus:ring-4 focus:ring-[#25D366]/30"
     >
       <svg viewBox="0 0 32 32" className="pointer-events-none h-8 w-8" aria-hidden="true">
         <path fill="currentColor" d="M16.02 3.2A12.7 12.7 0 0 0 5.08 22.35L3.3 28.8l6.6-1.73A12.8 12.8 0 1 0 16.02 3.2Zm0 23.3c-1.94 0-3.84-.52-5.5-1.5l-.4-.24-3.92 1.03 1.05-3.82-.26-.42a10.48 10.48 0 1 1 9.03 4.95Zm5.75-7.85c-.31-.16-1.84-.91-2.12-1.02-.28-.1-.49-.15-.69.16-.21.31-.8 1.02-.98 1.23-.18.21-.36.23-.67.08-.31-.16-1.3-.48-2.48-1.52-.92-.82-1.54-1.84-1.72-2.15-.18-.31-.02-.48.14-.64.14-.14.31-.36.46-.54.15-.18.21-.31.31-.52.1-.2.05-.39-.03-.54-.08-.15-.69-1.66-.94-2.28-.25-.6-.5-.51-.69-.52h-.59c-.2 0-.54.08-.82.39-.28.31-1.08 1.05-1.08 2.56s1.1 2.97 1.26 3.18c.15.2 2.17 3.32 5.25 4.66.73.32 1.3.51 1.74.65.73.23 1.4.2 1.93.12.59-.09 1.84-.75 2.1-1.48.26-.72.26-1.33.18-1.46-.08-.13-.28-.2-.59-.36Z" />
@@ -147,10 +66,12 @@ function WhatsAppFloatingButton() {
 
 function SidebarContent({ onNav, companyName, companyId, user }) {
   const reduceMotion = useReducedMotion();
+  const [oldExpressOpen, setOldExpressOpen] = useState(false);
   const navGroups = NAV_GROUPS.map((group) => ({
     ...group,
     items: group.items.filter((item) =>
       (!item.companyId || item.companyId === companyId)
+      && (!item.globalOwnerOnly || (user?.is_primary_owner && user?.is_owner && !user?.is_worker))
       && (!user?.is_worker
         || user.allowed_sections?.includes(item.section)
         || (item.section === "grv" && user.allowed_sections?.includes("costs")))
@@ -170,8 +91,24 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
       <nav className="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
         {navGroups.map((group) => (
           <div key={group.label} className="mb-2">
-            <p className="px-3 pt-3 pb-1 text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-100/40">{group.label}</p>
-            {group.items.map((n) => (
+            {group.label === "Express Websites - Old Invoices and Payments" ? (
+              <button
+                type="button"
+                onClick={() => setOldExpressOpen((current) => !current)}
+                aria-expanded={oldExpressOpen}
+                aria-controls="old-express-navigation"
+                data-testid="old-express-navigation-toggle"
+                className="flex w-full items-center justify-between px-3 pt-3 pb-1 text-left text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-100/55 hover:text-emerald-50"
+              >
+                <span>{group.label}</span>
+                <ChevronDown size={13} className={`shrink-0 transition-transform ${oldExpressOpen ? "rotate-180" : ""}`} />
+              </button>
+            ) : (
+              <p className="px-3 pt-3 pb-1 text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-100/40">{group.label}</p>
+            )}
+            {(group.label !== "Express Websites - Old Invoices and Payments" || oldExpressOpen) && (
+              <div id={group.label === "Express Websites - Old Invoices and Payments" ? "old-express-navigation" : undefined}>
+                {group.items.map((n) => (
               user?.is_worker
               && !user.allowed_sections?.includes(n.section)
               && !(n.section === "grv" && user.allowed_sections?.includes("costs"))
@@ -189,7 +126,9 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
                     <span className="relative z-10">{n.label}</span>
                   </>}
                 </NavLink>
-            ))}
+                ))}
+              </div>
+            )}
           </div>
         ))}
       </nav>
@@ -209,10 +148,49 @@ export default function Layout() {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [profiles, setProfiles] = useState([]);
   const [switching, setSwitching] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [dismissingNotificationIds, setDismissingNotificationIds] = useState([]);
   const nav = useNavigate();
   const dedicatedDomain = dedicatedCompanyDomain();
 
   useEffect(() => { api.get("/companies/profiles").then(setProfiles).catch(() => {}); }, []);
+  const loadNotifications = async (uncached = false) => {
+    try {
+      const response = await (uncached ? api.getUncached("/notifications") : api.get("/notifications"));
+      setNotifications(response.items || []);
+      setUnreadNotifications(response.unread || 0);
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
+  useEffect(() => { if (user?.company_id) loadNotifications(); }, [user?.company_id]);
+  const dismissNotification = async (event, notification) => {
+    event.stopPropagation();
+    if (dismissingNotificationIds.includes(notification.id)) return;
+    setDismissingNotificationIds((current) => [...current, notification.id]);
+    try {
+      await api.post(`/notifications/${notification.id}/dismiss`, {
+        request_id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${notification.id}`,
+      });
+      await loadNotifications(true);
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setDismissingNotificationIds((current) => current.filter((id) => id !== notification.id));
+    }
+  };
+  const openNotification = async (notification) => {
+    setNotificationsOpen(false);
+    try {
+      await api.post(`/notifications/${notification.id}/read`, {});
+      if (notification.action_path) nav(notification.action_path);
+      await loadNotifications(true);
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
   const availableProfiles = profiles.filter((profile) =>
     user?.company_ids?.includes(profile.id)
     && (!dedicatedDomain || user?.is_worker || user?.can_switch_company || profile.id === dedicatedDomain.companyId)
@@ -313,9 +291,46 @@ export default function Layout() {
               </AnimatePresence>
             </div>
           )}
-          <motion.button whileHover={reduceMotion ? undefined : { scale: 1.06, y: -1 }} whileTap={reduceMotion ? undefined : { scale: 0.96 }} transition={{ type: "spring", stiffness: 480, damping: 24 }} className="relative rounded-full p-2 text-slate-500 hover:text-slate-800 hover:bg-white/40" data-testid="notifications-btn">
-            <Bell size={20} />
-          </motion.button>
+          <div className="relative">
+            <motion.button
+              type="button"
+              whileHover={reduceMotion ? undefined : { scale: 1.06, y: -1 }}
+              whileTap={reduceMotion ? undefined : { scale: 0.96 }}
+              transition={{ type: "spring", stiffness: 480, damping: 24 }}
+              onClick={() => {
+                const nextOpen = !notificationsOpen;
+                setNotificationsOpen(nextOpen);
+                if (nextOpen) loadNotifications(true);
+              }}
+              aria-expanded={notificationsOpen}
+              aria-label={`Notifications${unreadNotifications ? `, ${unreadNotifications} unread` : ""}`}
+              className="relative rounded-full p-2 text-slate-500 hover:text-slate-800 hover:bg-white/40"
+              data-testid="notifications-btn"
+            >
+              <Bell size={20} />
+              {unreadNotifications > 0 && <span className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-red-600 px-1 text-center text-[10px] font-bold leading-4 text-white" data-testid="notification-unread-count">{unreadNotifications > 9 ? "9+" : unreadNotifications}</span>}
+            </motion.button>
+            {notificationsOpen && <div className="absolute right-0 top-full z-50 mt-2 w-[min(24rem,calc(100vw-1.5rem))] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl" role="dialog" aria-label="Notifications">
+              <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                <h2 className="font-bold text-slate-900">Notifications</h2>
+                <button type="button" onClick={() => setNotificationsOpen(false)} className="text-xs font-semibold text-slate-500 hover:text-slate-900">Close</button>
+              </div>
+              <div className="max-h-[min(65vh,28rem)] overflow-y-auto">
+                {notifications.length === 0 ? <p className="px-4 py-7 text-center text-sm text-slate-500">You are all caught up.</p> : notifications.map((notification) => (
+                  <div key={notification.id} className={`border-b border-slate-100 px-4 py-3 ${notification.read ? "" : "bg-blue-50/50"}`} data-testid={`notification-${notification.id}`}>
+                    <button type="button" onClick={() => openNotification(notification)} className="block w-full text-left">
+                      <p className="text-sm font-bold text-slate-900">{notification.title}</p>
+                      <p className="mt-1 text-xs text-slate-600">{notification.message}</p>
+                    </button>
+                    <div className="mt-2 flex items-center justify-between">
+                      <span className="text-[10px] text-slate-400">{notification.dismiss_count === 1 ? "Reminder will return in the next daily cycle" : notification.type === "fleet_licence_expiry" ? "Fleet alert" : "ERP alert"}</span>
+                      <button type="button" onClick={(event) => dismissNotification(event, notification)} disabled={dismissingNotificationIds.includes(notification.id)} className="text-xs font-semibold text-slate-500 hover:text-red-600 disabled:opacity-50" data-testid={`dismiss-notification-${notification.id}`}>Dismiss</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>}
+          </div>
           <div className="flex items-center gap-3">
             <motion.div whileHover={reduceMotion ? undefined : { scale: 1.05, y: -1 }} whileTap={reduceMotion ? undefined : { scale: 0.98 }} transition={{ type: "spring", stiffness: 500, damping: 22 }} className="h-9 w-9 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-sm">
               {(user?.name || "A")[0]}

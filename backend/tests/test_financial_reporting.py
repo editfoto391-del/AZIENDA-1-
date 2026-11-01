@@ -18,6 +18,20 @@ import server
 def test_financial_period_ranges(period, value, expected_start, expected_end):
     assert server.financial_period_range(period, value) == (expected_start, expected_end)
 
+@pytest.mark.parametrize(
+    ("period", "start", "end", "expected_start", "expected_end"),
+    [
+        ("monthly", date(2026, 10, 1), date(2026, 10, 31), date(2026, 9, 1), date(2026, 9, 30)),
+        ("monthly", date(2024, 3, 1), date(2024, 3, 31), date(2024, 2, 1), date(2024, 2, 29)),
+        ("weekly", date(2026, 10, 26), date(2026, 11, 1), date(2026, 10, 19), date(2026, 10, 25)),
+    ],
+)
+def test_financial_previous_period_ranges(period, start, end, expected_start, expected_end):
+    assert server.financial_previous_period_range(period, start, end) == (
+        expected_start,
+        expected_end,
+    )
+
 
 @pytest.mark.parametrize(
     ("period", "value"),
@@ -43,6 +57,73 @@ def test_financial_record_dates_use_the_company_reporting_timezone():
         {"date": "2026-10-31T23:30:00+00:00"},
     ) == date(2026, 11, 1)
 
+def test_dashboard_period_ranges_include_full_previous_month_and_custom_bounds(monkeypatch):
+    monkeypatch.setattr(server, "local_today", lambda: date(2026, 11, 30))
+    assert server.dashboard_period_ranges("month") == (
+        ("2026-11-01", "2026-11-30"),
+        ("2026-10-01", "2026-10-31"),
+    )
+    assert server.dashboard_period_ranges(
+        "custom", "2026-11-01", "2026-11-30",
+    ) == (
+        ("2026-11-01", "2026-11-30"),
+        ("2026-10-02", "2026-10-31"),
+    )
+
+def test_dashboard_custom_period_rejects_reversed_and_invalid_dates():
+    with pytest.raises(HTTPException):
+        server.dashboard_period_ranges("custom", "2026-11-30", "2026-11-01")
+    with pytest.raises(HTTPException):
+        server.dashboard_period_ranges("custom", "2026-02-30", "2026-03-01")
+
+@pytest.mark.parametrize(
+    ("period", "expected"),
+    [
+        ("today", (("2026-03-04", "2026-03-04"), ("2026-03-03", "2026-03-03"))),
+        ("week", (("2026-03-02", "2026-03-04"), ("2026-02-23", "2026-02-25"))),
+        ("month", (("2026-03-01", "2026-03-04"), ("2026-02-01", "2026-02-04"))),
+        ("year", (("2026-01-01", "2026-03-04"), ("2025-01-01", "2025-03-04"))),
+    ],
+)
+def test_dashboard_standard_period_ranges_use_equivalent_local_date_windows(
+    monkeypatch, period, expected,
+):
+    monkeypatch.setattr(server, "local_today", lambda: date(2026, 3, 4))
+    assert server.dashboard_period_ranges(period) == expected
+
+def test_dashboard_compare_returns_all_five_financial_metrics(monkeypatch):
+    async def financial_period(start, end):
+        return {
+            "total_invoiced": 100,
+            "revenue": 60,
+            "buyings": 10,
+            "expenses": 5,
+            "profit": 45,
+        }
+
+    monkeypatch.setattr(server, "dashboard_financial_period", financial_period)
+    result = asyncio.run(server.compare_dashboard_periods(
+        "month", "2024-02", "2024-03", user={},
+    ))
+
+    assert (result["first"]["start"], result["first"]["end"]) == (
+        "2024-02-01", "2024-02-29",
+    )
+    assert (result["second"]["start"], result["second"]["end"]) == (
+        "2024-03-01", "2024-03-31",
+    )
+    for period_result in (result["first"], result["second"]):
+        assert {
+            key: period_result[key]
+            for key in ("total_invoiced", "revenue", "buyings", "expenses", "profit")
+        } == {
+            "total_invoiced": 100,
+            "revenue": 60,
+            "buyings": 10,
+            "expenses": 5,
+            "profit": 45,
+        }
+
 
 def report_data(mode):
     start, end = date(2026, 10, 26), date(2026, 11, 1)
@@ -66,11 +147,24 @@ def report_data(mode):
             {"id": "void", "number": "102", "date": "2026-10-28", "status": "void", "total": 999},
         ],
         payments=[
-            {"id": "payment-active", "invoice_id": "invoice-known", "date": "2026-10-29", "amount": 25},
+            {
+                "id": "payment-active", "invoice_id": "invoice-known",
+                "invoice_number": "100", "customer_name": "Customer A",
+                "date": "2026-10-29", "amount": 25, "method": "Cash",
+            },
             {"id": "payment-reversed", "invoice_id": "invoice-known", "date": "2026-10-29", "amount": 90, "reversed": True},
         ],
         linked_payments=[
-            {"invoice_id": "invoice-known", "amount": 50},
+            {
+                "id": "payment-old", "invoice_id": "invoice-known",
+                "date": "2026-10-20", "created_at": "2026-10-20T09:00:00",
+                "amount": 25, "method": "Bank Transfer",
+            },
+            {
+                "id": "payment-active", "invoice_id": "invoice-known",
+                "date": "2026-10-29", "created_at": "2026-10-29T09:00:00",
+                "amount": 25, "method": "Cash",
+            },
             {"invoice_id": "invoice-known", "amount": 90, "reversed": True},
         ],
         expenses=[
@@ -119,6 +213,62 @@ def test_expenses_only_uses_accrual_sales_and_does_not_double_count_inventory():
     assert [row["id"] for row in report["transactions"]["invoices"]] == [
         "invoice-known", "invoice-unknown",
     ]
+    invoice = report["transactions"]["invoices"][0]
+    assert invoice["customer_name"] == "Customer A"
+    assert invoice["number"] == "100"
+    assert invoice["amount_paid"] == 50
+    assert invoice["balance_remaining"] == 150
+    assert [
+        (payment["date"], payment["method"], payment["amount"], payment["balance_remaining"])
+        for payment in invoice["payment_records"]
+    ] == [
+        ("2026-10-20", "Bank Transfer", 25, 175),
+        ("2026-10-29", "Cash", 25, 150),
+    ]
+    period_payment = report["transactions"]["payments"][0]
+    assert period_payment["invoice_number"] == "100"
+    assert period_payment["customer_name"] == "Customer A"
+    assert period_payment["method"] == "Cash"
+    assert period_payment["balance_remaining"] == 150
+
+
+def test_payment_report_links_payment_to_invoice_outside_period_and_shows_remaining_balance():
+    report = server.build_financial_report(
+        date(2026, 10, 26),
+        date(2026, 11, 1),
+        "expenses_only",
+        invoices=[],
+        payments=[{
+            "id": "payment-current", "invoice_id": "invoice-prior",
+            "date": "2026-10-30", "amount": 40, "method": "Bank Transfer",
+        }],
+        linked_payments=[
+            {
+                "id": "payment-before", "invoice_id": "invoice-prior",
+                "date": "2026-10-15", "amount": 20,
+            },
+            {
+                "id": "payment-current", "invoice_id": "invoice-prior",
+                "date": "2026-10-30", "amount": 40,
+            },
+        ],
+        expenses=[],
+        vehicle_records=[],
+        buyings=[],
+        grvs=[],
+        invoice_movements=[],
+        payment_invoices=[{
+            "id": "invoice-prior", "number": "OLD-100",
+            "customer_name": "Customer from previous month", "total": 100,
+            "items": [{"description": "Foam", "qty": 1}],
+        }],
+    )
+    payment = report["transactions"]["payments"][0]
+    assert payment["invoice_number"] == "OLD-100"
+    assert payment["customer_name"] == "Customer from previous month"
+    assert payment["invoice_total"] == 100
+    assert payment["balance_remaining"] == 40
+    assert payment["invoice_items"] == [{"description": "Foam", "qty": 1}]
 
 
 def test_full_production_cost_never_fills_missing_cost_from_current_stock():

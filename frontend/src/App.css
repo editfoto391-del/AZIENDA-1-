@@ -171,6 +171,16 @@
     --report-tint: #e7e3f2;
 }
 
+.daily-report-home-paper .daily-report-section {
+    --report-accent: #438d8a;
+    --report-tint: #dcefed;
+}
+
+.daily-report-home-paper {
+    break-before: page;
+    page-break-before: always;
+}
+
 .daily-report-section-title {
     display: flex;
     min-height: 34px;

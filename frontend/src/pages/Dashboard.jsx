@@ -99,12 +99,12 @@ function DashboardSkeleton() {
         <SkeletonBlock className="h-3 w-72 max-w-full" />
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">{cards(5)}</div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">{cards(4)}</div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">{cards(3)}</div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">{cards(5, "!p-3")}</div>
       <div className="luxury-card rounded-lg border border-border bg-white p-5">
         <SkeletonBlock className="mb-5 h-4 w-32" />
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
-          {Array.from({ length: 7 }, (_, index) => (
+          {Array.from({ length: 9 }, (_, index) => (
             <div key={index} className="flex flex-col items-center gap-2 rounded-lg border border-border bg-white/70 p-4">
               <SkeletonBlock className="h-5 w-5 rounded-full" />
               <SkeletonBlock className="h-3 w-20 max-w-full" />
@@ -123,6 +123,8 @@ export default function Dashboard() {
   const dedicatedDomain = dedicatedCompanyDomain();
   const [d, setD] = useState(null);
   const [period, setPeriod] = useState("month");
+  const [customStart, setCustomStart] = useState(`${currentMonth}-01`);
+  const [customEnd, setCustomEnd] = useState(today());
   const [loadingError, setLoadingError] = useState("");
   const [reload, setReload] = useState(0);
   const [compareOpen, setCompareOpen] = useState(false);
@@ -177,11 +179,19 @@ export default function Dashboard() {
     let active = true;
     setD(null);
     setLoadingError("");
-    api.get("/dashboard", { period })
+    const params = period === "custom"
+      ? { period, start_date: customStart, end_date: customEnd }
+      : { period };
+    api.getUncached("/dashboard", params)
       .then((data) => { if (active) setD(data); })
       .catch((error) => { if (active) setLoadingError(apiError(error)); });
-    return () => { active = false; };
-  }, [period, reload]);
+    const refreshOnChange = () => setReload((value) => value + 1);
+    window.addEventListener("erp:data-changed", refreshOnChange);
+    return () => {
+      active = false;
+      window.removeEventListener("erp:data-changed", refreshOnChange);
+    };
+  }, [period, customStart, customEnd, reload]);
 
   if (!d && loadingError) return (
     <div className="rounded-xl border border-red-200 bg-red-50 p-5" role="alert">
@@ -201,7 +211,7 @@ export default function Dashboard() {
     if (difference === 0) return "No change vs previous period";
     return `${fmtMoney(Math.abs(difference))} ${difference > 0 ? "higher" : "lower"} vs previous period`;
   };
-  const periodLabels = { today: "Today", week: "This Week", month: "This Month", year: "This Year" };
+  const periodLabels = { today: "Today", week: "This Week", month: "This Month", year: "This Year", custom: "Custom Period" };
   const periodLabel = periodLabels[period];
   const periodRange = `${fmtDate(d.period_start)} – ${fmtDate(d.period_end)}`;
   const previousRange = `${fmtDate(d.previous_period_start)} – ${fmtDate(d.previous_period_end)}`;
@@ -573,13 +583,24 @@ export default function Dashboard() {
                 {Object.entries(periodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
+            {period === "custom" && <>
+              <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                From <input type="date" value={customStart} onChange={(event) => setCustomStart(event.target.value)}
+                  data-testid="dashboard-custom-start" className="rounded-lg border border-border bg-white px-2 py-2 text-sm" />
+              </label>
+              <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                To <input type="date" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)}
+                  data-testid="dashboard-custom-end" className="rounded-lg border border-border bg-white px-2 py-2 text-sm" />
+              </label>
+            </>}
             <button onClick={() => setCompareOpen(true)} data-testid="dashboard-compare-open"
               className="rounded-lg border border-primary/30 bg-white px-3 py-2 text-sm font-semibold text-primary hover:bg-primary/5">
               Compare periods
             </button>
           </div>
         </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+          <KPI title="Total Invoiced" value={fmtMoney(periodProfit.total_invoiced)} comparison={comparison(periodProfit.total_invoiced, previousProfit.total_invoiced)} icon={Receipt} tint="bg-blue-50 text-blue-600" onClick={() => nav("/invoices")} />
           <KPI title="Revenue" value={fmtMoney(periodProfit.revenue)} comparison={comparison(periodProfit.revenue, previousProfit.revenue)} icon={TrendingUp} tint="bg-emerald-50 text-emerald-600" onClick={() => nav("/invoices")} />
           <KPI title="Buyings" value={fmtMoney(periodProfit.buyings)} comparison={comparison(periodProfit.buyings, previousProfit.buyings)} icon={Boxes} tint="bg-violet-50 text-violet-600" onClick={() => nav("/buyings")} />
           <KPI title="Expenses" value={fmtMoney(periodProfit.expenses)} comparison={comparison(periodProfit.expenses, previousProfit.expenses)} icon={Banknote} tint="bg-orange-50 text-orange-600" onClick={() => nav("/expenses")} />
@@ -590,18 +611,39 @@ export default function Dashboard() {
 
       <section data-testid="dashboard-business-balances">
         <h2 className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Business Balances &amp; Stock</h2>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <KPI title="Total Invoiced" value={fmtMoney(d.total_invoiced)} icon={Receipt} tint="bg-blue-50 text-blue-600" onClick={() => nav("/invoices")} />
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <KPI title="Payments Received · All Time" value={fmtMoney(d.payments_received)} icon={Wallet} tint="bg-emerald-50 text-emerald-600" onClick={() => nav("/invoices")} />
           <KPI title="Outstanding Balances" value={fmtMoney(d.outstanding)} icon={AlertTriangle} tint="bg-red-50 text-red-600" onClick={() => nav("/client-payments")} />
           <KPI title="Total Stock" value={d.finished_stock} icon={Boxes} tint="bg-amber-50 text-amber-600" onClick={() => nav("/stock")} />
         </div>
       </section>
 
+      {(!user?.is_worker || user.allowed_sections?.includes("fleet")) && (
+        <section data-testid="dashboard-fleet-alerts" aria-labelledby="dashboard-fleet-alerts-heading">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 id="dashboard-fleet-alerts-heading" className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Fleet Alerts</h2>
+            <button type="button" onClick={() => nav("/fleet")} className="flex items-center gap-1 text-xs font-semibold text-primary" data-testid="dashboard-fleet-alerts-view">View Fleet <ArrowRight size={12} /></button>
+          </div>
+          <Card className="p-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div><p className="text-[10px] font-semibold uppercase text-slate-500">Licence discs expiring soon</p><p className="mt-1 text-xl font-bold font-mono text-amber-700">{d.fleet_alerts?.expiring_soon || 0}</p></div>
+              <div><p className="text-[10px] font-semibold uppercase text-slate-500">Expired licence discs</p><p className="mt-1 text-xl font-bold font-mono text-red-700">{d.fleet_alerts?.expired || 0}</p></div>
+              <div><p className="text-[10px] font-semibold uppercase text-slate-500">Vehicles requiring maintenance</p><p className="mt-1 text-xl font-bold font-mono text-blue-700">{d.fleet_alerts?.maintenance_required_count || 0}</p></div>
+            </div>
+            {!!d.fleet_alerts?.items?.length && <div className="mt-3 divide-y divide-slate-100 border-t border-slate-100">
+              {d.fleet_alerts.items.map((alert) => <button key={alert.vehicle_id} type="button" onClick={() => nav(`/fleet?vehicleId=${encodeURIComponent(alert.vehicle_id)}&section=licence`)} className="flex w-full items-center justify-between gap-3 py-2 text-left" data-testid={`dashboard-licence-alert-${alert.vehicle_id}`}>
+                <span className="min-w-0"><span className="block truncate text-sm font-semibold text-slate-800">{alert.registration || alert.vehicle_name}</span><span className="text-xs text-slate-500">Expires {fmtDate(alert.expiry_date)}</span></span>
+                <Badge cls={alert.status === "EXPIRED" ? "bg-red-50 text-red-700 border-red-200" : "bg-amber-50 text-amber-700 border-amber-200"}>{alert.status === "EXPIRED" ? "Expired" : `${alert.days_remaining} days left`}</Badge>
+              </button>)}
+            </div>}
+          </Card>
+        </section>
+      )}
+
       <section aria-labelledby="dashboard-operations-heading">
         <h2 id="dashboard-operations-heading" className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Operations at a Glance</h2>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-          {[["Done Today", d.completed_today, "/production"],
+          {[["Done Today", d.completed_today, "/orders"],
             ["Orders to Send", d.orders_open_count, "/orders"], ["Urgent Orders", d.urgent_orders, "/orders"], ["Vehicles Free", `${d.vehicles_available}/${d.vehicles_total}`, "/fleet"],
             ["Maintenance Due", d.maintenance_due, "/fleet"]].map(([l, v, to]) => (
             <motion.button key={l} whileHover={{ y: -2, scale: 1.01 }} whileTap={{ scale: 0.99 }} transition={{ type: "spring", stiffness: 420, damping: 24, mass: 0.5 }} onClick={() => nav(to)} className="premium-button rounded-lg border border-border bg-white/85 p-3 text-left hover:border-primary/50 hover:bg-white transition-colors" data-testid={`op-kpi-${l.toLowerCase().replace(/\s/g, "-")}`}>
@@ -764,6 +806,7 @@ export default function Dashboard() {
                     <h3 className="font-bold text-slate-800">{compareLabel(entry, comparisonResult.kind)}</h3>
                     <p className="mt-1 text-xs text-slate-500">{fmtDate(entry.start)} – {fmtDate(entry.end)}</p>
                     <dl className="mt-3 space-y-2 text-sm">
+                      <div className="flex justify-between gap-2"><dt className="text-slate-500">Total Invoiced</dt><dd className="font-mono font-semibold">{fmtMoney(entry.total_invoiced)}</dd></div>
                       <div className="flex justify-between gap-2"><dt className="text-slate-500">Revenue</dt><dd className="font-mono font-semibold">{fmtMoney(entry.revenue)}</dd></div>
                       <div className="flex justify-between gap-2"><dt className="text-slate-500">Buyings</dt><dd className="font-mono">{fmtMoney(entry.buyings)}</dd></div>
                       <div className="flex justify-between gap-2"><dt className="text-slate-500">Expenses</dt><dd className="font-mono">{fmtMoney(entry.expenses)}</dd></div>
@@ -774,6 +817,7 @@ export default function Dashboard() {
               </div>
               <div className="rounded-lg border border-primary/15 bg-primary/5 px-4 py-3 text-sm">
                 <span className="font-semibold text-slate-700">Difference (second − first): </span>
+                Total Invoiced {comparisonDifference(comparisonResult.second.total_invoiced, comparisonResult.first.total_invoiced)} ·
                 Revenue {comparisonDifference(comparisonResult.second.revenue, comparisonResult.first.revenue)} ·
                 Buyings {comparisonDifference(comparisonResult.second.buyings, comparisonResult.first.buyings)} ·
                 Expenses {comparisonDifference(comparisonResult.second.expenses, comparisonResult.first.expenses)} ·

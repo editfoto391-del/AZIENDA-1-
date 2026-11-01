@@ -6,6 +6,7 @@ import { companyProfileName, usesUnifiedPriceList } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
 import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2 } from "lucide-react";
+import { listViewState, loadListRequest } from "@/lib/listRequest.mjs";
 
 const ProductIdentificationManager = lazy(() => import("@/components/ProductIdentificationManager"));
 
@@ -17,8 +18,9 @@ const MOVE_TYPES = [
 ];
 const TYPE_LABEL = { production: "Production Received", production_consumption: "Production Material Used", purchase: "Purchase Received", dispatch: "Delivery Dispatched", invoice: "Invoice Submitted", adjustment_in: "Adjustment In", adjustment_out: "Adjustment Out", return: "Return", damage: "Damage/Waste", reversal: "Reversal" };
 const sign = (m) => (m.direction ? m.direction : ["production", "purchase", "adjustment_in", "return"].includes(m.type) ? 1 : -1);
-const CATEGORIES = ["Simple", "Ribbon Balck", "Ribbon Pink", "Candy", "Uncovered", "Strong Boy"];
+const CATEGORIES = ["Simple", "Ribbon Black", "Ribbon Pink", "Candy", "Uncovered", "Strong Boy"];
 const STOCK_CATEGORY = {
+  "Ribbon Black": ["Ribbon Black", "Ribbon Balck", "Black"],
   "Ribbon Balck": ["Ribbon Black", "Black"],
   "Ribbon Pink": ["Ribbon Pink", "Ribbon"],
 };
@@ -30,23 +32,43 @@ export default function Stock() {
   const [prices, setPrices] = useState([]);
   const [costDrafts, setCostDrafts] = useState({});
   const [category, setCategory] = useState("");
-  const [movements, setMovements] = useState([]);
+  const [summaryCategory, setSummaryCategory] = useState("");
+  const [summarySize, setSummarySize] = useState("");
+  const [summaryZone, setSummaryZone] = useState("1");
+  const [movementRequest, setMovementRequest] = useState({ items: [], loading: true, error: "" });
   const [addModal, setAddModal] = useState(null);
   const [moveModal, setMoveModal] = useState(null);
   const [showHist, setShowHist] = useState(false);
   const [showProductIds, setShowProductIds] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  const loadMovements = () => loadListRequest({
+    request: () => api.get("/stock/movements"),
+    setState: setMovementRequest,
+    errorMessage: apiError,
+  });
+
   const load = () => {
     api.get("/stock").then(setList).catch((e) => { toast.error(apiError(e)); setList([]); });
     api.get("/prices").then(setPrices).catch((e) => toast.error(apiError(e)));
-    api.get("/stock/movements").then(setMovements).catch(() => {});
+    void loadMovements();
   };
   useEffect(() => { load(); }, []);
 
   const filteredList = (list || []).filter((item) =>
     !category || (STOCK_CATEGORY[category] || [category]).includes(item.product)
   );
+  const knownProducts = new Set(Object.values(STOCK_CATEGORY).flat().concat(CATEGORIES));
+  const summaryCategories = [
+    ...CATEGORIES.filter((item) =>
+    (STOCK_CATEGORY[item] || [item]).some((product) => (list || []).some((stock) => stock.product === product))
+    ),
+    ...new Set((list || []).map((stock) => stock.product).filter((product) => !knownProducts.has(product))),
+  ];
+  const summarySizes = [...new Set((list || [])
+    .filter((stock) => !summaryCategory || (STOCK_CATEGORY[summaryCategory] || [summaryCategory]).includes(stock.product))
+    .map((stock) => stock.size)
+  )].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
   const run = async (fn, ok) => {
     if (busy) return; setBusy(true);
@@ -58,18 +80,46 @@ export default function Stock() {
     if (await run(() => api.post("/stock", addModal), "Stock item added")) setAddModal(null);
   };
 
-  const getSellingPrice = (stock, zone) => {
+  const findSellingPrice = (stock, zone) => {
     let priceCategory = stock.product;
     if (stock.product === "Simple") priceCategory = unifiedPriceList ? "Simple" : "Standard";
     if (stock.product === "Candy") priceCategory = "Ribbon Black";
-    const price = prices.find((item) =>
+    return prices.find((item) =>
       item.zone === (unifiedPriceList ? 1 : zone)
       && item.category === priceCategory
       && item.size === stock.size
       && item.active
     );
+  };
+
+  const getSellingPrice = (stock, zone) => {
+    const price = findSellingPrice(stock, zone);
     return price?.price != null && price.confirmed ? fmtMoney(price.price) : "Not set";
   };
+  const summaryItems = (list || []).filter((stock) =>
+    (!summaryCategory || (STOCK_CATEGORY[summaryCategory] || [summaryCategory]).includes(stock.product))
+    && (!summarySize || stock.size === summarySize)
+  );
+  const summaryQuantity = summaryItems.reduce((total, stock) => total + Number(stock.current || 0), 0);
+  const summaryValue = summaryItems.reduce((total, stock) => {
+    const price = findSellingPrice(stock, Number(summaryZone));
+    return total + (price?.price != null && price.confirmed ? Number(stock.current || 0) * Number(price.price) : 0);
+  }, 0);
+  const unpricedItems = summaryItems.filter((stock) => {
+    const price = findSellingPrice(stock, Number(summaryZone));
+    return price?.price == null || !price.confirmed;
+  });
+  const summaryRows = [...summaryItems]
+    .sort((a, b) => a.product.localeCompare(b.product) || a.size.localeCompare(b.size, undefined, { numeric: true }))
+    .map((stock) => {
+      const price = findSellingPrice(stock, Number(summaryZone));
+      const hasPrice = price?.price != null && price.confirmed;
+      return {
+        ...stock,
+        unitPrice: hasPrice ? Number(price.price) : null,
+        stockValue: hasPrice ? Number(stock.current || 0) * Number(price.price) : null,
+      };
+    });
 
   const saveCost = async (stock) => {
     const draft = costDrafts[stock.id] ?? (stock.unit_cost ?? "");
@@ -116,6 +166,8 @@ export default function Stock() {
     await run(() => api.post(`/stock/movements/${m.id}/reverse`, { reason }), "Movement reversed");
   };
 
+  const movementState = listViewState(movementRequest);
+
   return (
     <div>
       <PageHeader title="Finished Stock" subtitle="Calculated from the stock movement ledger">
@@ -131,15 +183,80 @@ export default function Stock() {
         </Select>
       </div>
 
+      <Card className="mb-4 space-y-4 p-4" data-testid="stock-value-summary">
+        <div>
+          <h2 className="font-semibold text-slate-800">Stock quantity and value</h2>
+          <p className="mt-1 text-xs text-slate-500">The value is estimated using confirmed selling prices for the selected zone.</p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Select label={unifiedPriceList ? "Price list" : "Zone"} value={summaryZone} onChange={(event) => setSummaryZone(event.target.value)} data-testid="stock-summary-zone">
+            {unifiedPriceList
+              ? <option value="1">Unified price</option>
+              : <><option value="1">Zone 1</option><option value="2">Zone 2</option></>}
+          </Select>
+          <Select label="Category" value={summaryCategory} onChange={(event) => {
+            setSummaryCategory(event.target.value);
+            setSummarySize("");
+          }} data-testid="stock-summary-category">
+            <option value="">All categories</option>
+            {summaryCategories.map((item) => <option key={item} value={item}>{item}</option>)}
+          </Select>
+          <Select label="Measure" value={summarySize} onChange={(event) => setSummarySize(event.target.value)} data-testid="stock-summary-size">
+            <option value="">All measures</option>
+            {summarySizes.map((item) => <option key={item} value={item}>{item}</option>)}
+          </Select>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-lg border border-border bg-slate-50 p-3">
+            <p className="text-xs font-semibold uppercase text-slate-500">Pieces in stock</p>
+            <p className="mt-1 font-mono text-xl font-bold text-slate-800" data-testid="stock-summary-quantity">{summaryQuantity}</p>
+          </div>
+          <div className="rounded-lg border border-border bg-slate-50 p-3">
+            <p className="text-xs font-semibold uppercase text-slate-500">Estimated value · {unifiedPriceList ? "Unified prices" : `Zone ${summaryZone}`}</p>
+            <p className="mt-1 font-mono text-xl font-bold text-slate-800" data-testid="stock-summary-value">{fmtMoney(summaryValue)}</p>
+            {unpricedItems.length > 0 && <p className="mt-1 text-xs text-amber-700">{unpricedItems.length} stock item(s) have no confirmed price in this zone; their value is excluded.</p>}
+          </div>
+        </div>
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className="w-full min-w-[520px] text-sm" data-testid="stock-summary-breakdown">
+            <thead>
+              <tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500">
+                <th className="px-3 py-2 font-semibold">Category</th>
+                <th className="px-3 py-2 font-semibold">Measure</th>
+                <th className="px-3 py-2 text-right font-semibold">Pieces in stock</th>
+                <th className="px-3 py-2 text-right font-semibold">Price / piece</th>
+                <th className="px-3 py-2 text-right font-semibold">Stock value (ZAR)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaryRows.length === 0
+                ? <tr><td colSpan={5} className="px-3 py-4 text-center text-sm text-slate-400">No stock for this category and measure.</td></tr>
+                : summaryRows.map((stock) => (
+                  <tr key={stock.id} className="border-b border-border/60 last:border-0" data-testid={`stock-summary-row-${stock.id}`}>
+                    <td className="px-3 py-2 font-medium text-slate-700">{stock.product}</td>
+                    <td className="px-3 py-2 font-mono text-slate-500">{stock.size}</td>
+                    <td className="px-3 py-2 text-right font-mono font-semibold" data-testid={`stock-summary-item-quantity-${stock.id}`}>{stock.current || 0}</td>
+                    <td className="px-3 py-2 text-right font-mono">{stock.unitPrice === null ? "Not set" : fmtMoney(stock.unitPrice)}</td>
+                    <td className="px-3 py-2 text-right font-mono font-semibold">{stock.stockValue === null ? "Not set" : fmtMoney(stock.stockValue)}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
       <Card className="overflow-hidden">
         {list === null ? <p className="p-6 text-sm text-slate-400">Loading stock...</p> : filteredList.length === 0 ? <Empty icon={Boxes} title={category ? "No stock items in this category" : "No stock records"} /> : (
           <div className="overflow-x-auto">
             <table className={`w-full text-sm ${user?.is_worker ? "min-w-[760px]" : "min-w-[960px]"}`}>
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                <th className="px-4 py-3 font-semibold">Size</th><th className="px-4 font-semibold">Product</th><th className="px-4 font-semibold text-right">Other</th><th className="px-4 font-semibold text-right">Invoiced</th><th className="px-4 font-semibold text-right">Current Stock</th>{!user?.is_worker && <th className="px-4 font-semibold text-right">Cost (R)</th>}{unifiedPriceList ? <th className="px-4 font-semibold text-right">Selling Price</th> : <><th className="px-4 font-semibold text-right">Sell Zone 1</th><th className="px-4 font-semibold text-right">Sell Zone 2</th></>}<th className="px-4 font-semibold text-right">Actions</th>
+                <th className="sticky left-0 z-20 bg-slate-50 px-3 py-3 font-semibold">Adjust</th><th className="px-4 py-3 font-semibold">Size</th><th className="px-4 font-semibold">Product</th><th className="px-4 font-semibold text-right">Other</th><th className="px-4 font-semibold text-right">Invoiced</th><th className="px-4 font-semibold text-right">Current Stock</th>{!user?.is_worker && <th className="px-4 font-semibold text-right">Cost (R)</th>}{unifiedPriceList ? <th className="px-4 font-semibold text-right">Selling Price</th> : <><th className="px-4 font-semibold text-right">Sell Zone 1</th><th className="px-4 font-semibold text-right">Sell Zone 2</th></>}<th className="sticky right-0 z-20 bg-slate-50 px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{filteredList.map((s) => (
                 <tr key={s.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`stock-row-${s.id}`}>
+                  <td className="sticky left-0 z-10 bg-white px-3 whitespace-nowrap">
+                    <button type="button" onClick={() => setMoveModal({ stock_id: s.id, label: `${s.product} ${s.size}`, current: s.current, type: "adjustment_in", quantity: 1, reason: "", reference: "", notes: "" })} className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-xs font-semibold text-primary hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1" aria-label={`Adjust ${s.product} ${s.size}`} data-testid={`move-stock-${s.id}`}><ArrowUpDown size={13} /> Adjust</button>
+                  </td>
                   <td className="px-4 py-3 text-slate-500 font-mono">{s.size}</td>
                   <td className="px-4 font-semibold text-slate-800">{s.product}</td>
                   <td className="px-4 text-right font-mono text-slate-500">{s.adjustments || 0}</td>
@@ -154,8 +271,7 @@ export default function Stock() {
                   {unifiedPriceList
                     ? <td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td>
                     : <><td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td><td className="px-4 text-right font-mono">{getSellingPrice(s, 2)}</td></>}
-                  <td className="px-4 text-right whitespace-nowrap">
-                    <button onClick={() => setMoveModal({ stock_id: s.id, label: `${s.product} ${s.size}`, current: s.current, type: "adjustment_in", quantity: 1, reason: "", reference: "", notes: "" })} className="text-primary hover:underline text-xs font-semibold inline-flex items-center gap-1" data-testid={`move-stock-${s.id}`}><ArrowUpDown size={13} /> Adjust</button>
+                  <td className="sticky right-0 z-10 bg-white px-4 text-right whitespace-nowrap">
                     {!user?.is_stock_only_worker && <button type="button" onClick={() => deleteStock(s)} disabled={busy} title="Permanently delete stock and movements" aria-label={`Permanently delete ${s.product} ${s.size}`} className="ml-2 rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50" data-testid={`delete-stock-${s.id}`}><Trash2 size={15} /></button>}
                   </td>
                 </tr>))}</tbody>
@@ -191,8 +307,22 @@ export default function Stock() {
       </Modal>
 
       <Modal open={showHist} onClose={() => setShowHist(false)} title="Stock Movement Ledger" wide>
-        {movements.length === 0 ? <p className="text-sm text-slate-400">No movements yet.</p> : (
-          <div className="space-y-1.5 max-h-[28rem] overflow-y-auto">{movements.map((m) => (
+        {movementState === "loading" && (
+          <p className="py-8 text-center text-sm text-slate-400" role="status">Loading stock movements...</p>
+        )}
+        {movementState === "error" && (
+          <div className="space-y-3 rounded-lg border border-red-200 bg-red-50 p-4" role="alert">
+            <p className="text-sm text-red-700">Stock movements could not be loaded: {movementRequest.error}</p>
+            <Btn variant="outline" onClick={() => { void loadMovements(); }} data-testid="stock-movements-retry">
+              Retry
+            </Btn>
+          </div>
+        )}
+        {movementState === "empty" && (
+          <p className="text-sm text-slate-400" data-testid="stock-movements-empty">No movements yet.</p>
+        )}
+        {(movementState === "items" || (movementState === "error" && movementRequest.items.length > 0)) && (
+          <div className="space-y-1.5 max-h-[28rem] overflow-y-auto">{movementRequest.items.map((m) => (
             <div key={m.id} className={`grid grid-cols-12 items-center gap-2 text-sm border border-border rounded-lg px-3 py-2 ${m.reversed ? "opacity-50" : ""}`} data-testid={`movement-row-${m.id}`}>
               <span className="col-span-3 font-semibold text-slate-700">{m.product} <span className="font-mono text-xs text-slate-400">{m.size}</span></span>
               <span className="col-span-2 text-xs"><Badge>{TYPE_LABEL[m.type] || m.type}</Badge></span>

@@ -6,6 +6,7 @@ import { Card, Btn, Input, Select, Badge, Modal, PageHeader } from "@/components
 import { Building2, Receipt, Tag, Truck, Save, Pencil, Plus, ShieldCheck, Fuel, MapPin, Smartphone, Trash2, UserPlus, CirclePause, CirclePlay, KeyRound, Database, RotateCcw } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { usesUnifiedPriceList } from "@/lib/company";
+import shop2shopQr from "@/assets/shop2shop-n29rxh.png";
 
 const TABS = [
   { k: "company", l: "Company", icon: Building2 },
@@ -153,6 +154,7 @@ export default function Settings() {
   const [dieselPrice, setDieselPrice] = useState("");
   const [dieselSaving, setDieselSaving] = useState(false);
   const [prices, setPrices] = useState([]);
+  const [showUnpricedPrices, setShowUnpricedPrices] = useState(false);
   const [drivers, setDrivers] = useState([]);
   const [accessUsers, setAccessUsers] = useState([]);
   const [companies, setCompanies] = useState([]);
@@ -423,7 +425,10 @@ export default function Settings() {
   };
 
   if (!s) return <div className="text-slate-400">Loading...</div>;
+  const showShop2Shop = /super/i.test(s.company_name || "") && /iq\s*[- ]?foam/i.test(s.company_name || "");
   const zonePrices = prices.filter((p) => p.zone === (unifiedPriceList ? 1 : zone));
+  const unpricedZonePrices = zonePrices.filter((price) => price.price == null || price.confirmed === false);
+  const visibleZonePrices = showUnpricedPrices ? unpricedZonePrices : zonePrices;
   const priceProductName = (category) => ["Standard", "Simple"].includes(category) ? "Simple/Mix color" : category;
 
   return (
@@ -448,6 +453,10 @@ export default function Settings() {
           </div>
           <label className="block"><span className="block text-xs font-semibold text-slate-500 mb-1.5">Banking Details</span>
             <textarea rows={3} value={s.banking_details} onChange={(e) => setS({ ...s, banking_details: e.target.value })} className="w-full rounded-lg border border-input px-3 py-2.5 text-sm" /></label>
+          {showShop2Shop && <div className="flex items-center gap-3 rounded-lg border border-border bg-slate-50 p-3" data-testid="shop2shop-banking-details">
+            <img src={shop2shopQr} alt="Shop2Shop QR code for N29RXH" className="h-20 w-20 border border-border bg-white p-1" />
+            <div><p className="text-xs font-semibold text-slate-500">SHOP2SHOP</p><p className="font-mono text-lg font-bold text-slate-800">N29RXH</p></div>
+          </div>}
           <Input label="Tax Number (optional)" value={s.tax_number} onChange={(e) => setS({ ...s, tax_number: e.target.value })} />
           <Btn onClick={saveSettings} data-testid="save-settings-btn"><Save size={16} /> Save Settings</Btn>
         </Card>
@@ -484,13 +493,32 @@ export default function Settings() {
             <Btn onClick={() => setPModal({ zone: unifiedPriceList ? 1 : zone, category: "Simple/Mix color", size: "", price: "", active: true })} data-testid="add-price-btn"><Plus size={16} /> Add Price</Btn>
           </div>
           <p className="mb-3 text-sm text-slate-500">Add a product with a name and price to make it immediately selectable in invoice product lists.</p>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4">
+            <div>
+              <p className="font-semibold text-amber-900">Measures without a configured price</p>
+              <p className="mt-1 text-sm text-amber-800">View categories and sizes with a missing or unconfirmed price for the selected zone.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowUnpricedPrices((current) => !current)}
+              aria-pressed={showUnpricedPrices}
+              className={`rounded-lg px-4 py-2.5 text-sm font-bold shadow-sm ${showUnpricedPrices ? "bg-amber-700 text-white" : "bg-amber-500 text-white hover:bg-amber-600"}`}
+              data-testid="toggle-unpriced-prices"
+            >
+              {showUnpricedPrices ? "Show all measures" : `Show missing prices (${unpricedZonePrices.length})`}
+            </button>
+          </div>
           <Card className="overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
                   <th className="px-4 py-3 font-semibold">Product / Category</th><th className="px-4 font-semibold">Size / Unit</th><th className="px-4 font-semibold text-right">Unit Price</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
                 </tr></thead>
-                <tbody>{zonePrices.map((p) => (
+                <tbody>{visibleZonePrices.length === 0
+                  ? <tr><td colSpan={5} className="px-4 py-6 text-center text-sm text-slate-500">
+                    {showUnpricedPrices ? "All measures in this zone have a confirmed price." : "No prices configured for this zone."}
+                  </td></tr>
+                  : visibleZonePrices.map((p) => (
                   <tr key={p.id} className="border-b border-border/60 hover:bg-slate-50">
                     <td className="px-4 py-2.5 font-semibold text-slate-700">{priceProductName(p.category)}</td>
                     <td className="px-4 font-mono text-slate-600">{p.size}</td>

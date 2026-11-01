@@ -302,11 +302,16 @@ export default function Orders() {
               </table>{viewInvoiceItems.length > visibleInvoiceItems && <button onClick={() => setVisibleInvoiceItems((current) => current + 50)} className="w-full border-t border-border px-3 py-2 text-xs font-semibold text-primary hover:bg-slate-50">Show next {Math.min(50, viewInvoiceItems.length - visibleInvoiceItems)} invoice items ({viewInvoiceItems.length - visibleInvoiceItems} remaining)</button>}
             </div>}
             <dl className="ml-auto mt-3 grid max-w-sm grid-cols-2 gap-x-4 gap-y-2 rounded-lg bg-slate-50 p-4 text-sm">
-              {[["Subtotal", viewInvoice.subtotal], ["Discount", viewInvoice.discount], ["Additional Charges", viewInvoice.extra_charges],
+              {[["Subtotal", viewInvoice.subtotal], ["Discount", viewInvoice.discount], ...(Number(viewInvoice.delivery_fee) ? [["Delivery Fee", viewInvoice.delivery_fee]] : []), ["Additional Charges", viewInvoice.extra_charges],
                 ...(viewInvoice.tax_enabled ? [["Tax", viewInvoice.tax_amount]] : []),
                 ["Total", viewInvoice.total], ["Amount Paid", viewInvoice.amount_paid], ["Outstanding Balance", viewInvoice.outstanding],
               ].map(([label, value]) => <div key={label} className="contents"><dt className="font-semibold text-slate-600">{label}</dt><dd className="text-right font-mono">{fmtMoney(value)}</dd></div>)}
             </dl>
+            {(viewInvoice.made_by || viewInvoice.client_number || viewInvoice.assigned_driver_name) && <div className="mt-3 grid gap-2 text-sm sm:grid-cols-3">
+              {viewInvoice.made_by && <p><span className="font-semibold text-slate-600">Made By:</span> {viewInvoice.made_by}</p>}
+              {viewInvoice.client_number && <p><span className="font-semibold text-slate-600">Client Number:</span> {viewInvoice.client_number}</p>}
+              {viewInvoice.assigned_driver_name && <p><span className="font-semibold text-slate-600">Assigned Driver:</span> {viewInvoice.assigned_driver_name}</p>}
+            </div>}
           </div>}
           {viewOrder.notes && <div><h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Notes</h4><p className="mt-1 whitespace-pre-wrap text-slate-800">{viewOrder.notes}</p></div>}
         </div>}

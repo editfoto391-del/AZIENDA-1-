@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { CreditCard, Eye, Search, Wallet } from "lucide-react";
+import { CreditCard, Eye, ReceiptText, Search, Wallet } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtMoney, newKey, STATUS_META, today } from "@/lib/format";
 import { Badge, Btn, Card, Empty, Input, Modal, PageHeader, Select, Textarea } from "@/components/common";
 import { usesUnifiedPriceList } from "@/lib/company";
+import { PAYMENT_METHODS, RECEIVING_OPTIONS } from "@/lib/paymentMethods";
 import { useAuth } from "@/context/AuthContext";
 
 const newPayment = (invoice) => ({
   invoice,
   amount: Number(invoice.outstanding || 0).toFixed(2),
   method: "Cash",
+  receiving_on: "",
   date: today(),
   reference: "",
   notes: "",
@@ -22,7 +24,7 @@ const toCents = (amount) => {
   return Number.isFinite(value) ? Math.round(value * 100) : 0;
 };
 
-export default function ClientPayments() {
+export default function ClientPayments({ express = false }) {
   const { user } = useAuth();
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const [customers, setCustomers] = useState([]);
@@ -33,10 +35,19 @@ export default function ClientPayments() {
   const [profile, setProfile] = useState(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [payment, setPayment] = useState(null);
-  const [paymentMethods, setPaymentMethods] = useState(["Cash", "Bank Transfer"]);
+  const [viewPayment, setViewPayment] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [expressPaymentsSummaryOpen, setExpressPaymentsSummaryOpen] = useState(false);
+  const [expressPaymentsDate, setExpressPaymentsDate] = useState(today());
+  const [expressPayments, setExpressPayments] = useState([]);
+  const [expressPaymentsLoading, setExpressPaymentsLoading] = useState(false);
+  const [expressPaymentsError, setExpressPaymentsError] = useState("");
+  const [updatingExpressPaymentId, setUpdatingExpressPaymentId] = useState("");
 
-  const loadCustomers = () => Promise.all([api.get("/customers"), api.get("/invoices")])
+  const loadCustomers = () => Promise.all([
+    api.get("/customers"),
+    api.get("/invoices", express ? { express: true } : undefined),
+  ])
     .then(([customerData, invoiceData]) => {
       const customerIds = new Set(customerData.map((customer) => customer.id));
       const deletedCustomers = new Map();
@@ -57,7 +68,27 @@ export default function ClientPayments() {
     .catch((error) => toast.error(apiError(error)))
     .finally(() => setLoading(false));
 
-  useEffect(() => { loadCustomers(); }, []);
+  useEffect(() => { loadCustomers(); }, [express]);
+
+  useEffect(() => {
+    if (!express || !expressPaymentsSummaryOpen) return undefined;
+    let active = true;
+    setExpressPaymentsLoading(true);
+    setExpressPaymentsError("");
+    api.getUncached("/express-payments", { payment_date: expressPaymentsDate })
+      .then((records) => {
+        if (active) setExpressPayments(records);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setExpressPayments([]);
+        setExpressPaymentsError(apiError(error));
+      })
+      .finally(() => {
+        if (active) setExpressPaymentsLoading(false);
+      });
+    return () => { active = false; };
+  }, [express, expressPaymentsSummaryOpen, expressPaymentsDate]);
 
   const filteredCustomers = useMemo(() => customers.filter((customer) =>
     `${customer.name} ${customer.phone || ""} ${customer.email || ""}`.toLowerCase().includes(query.trim().toLowerCase()),
@@ -86,7 +117,7 @@ export default function ClientPayments() {
     setProfile({ customer, summary: null });
     setProfileLoading(true);
     try {
-      const summary = await api.get(`/customers/${customer.id}/summary`);
+      const summary = await api.get(`/customers/${customer.id}/summary`, express ? { express_only: true } : undefined);
       setProfile({ customer, summary });
     } catch (error) {
       setProfile(null);
@@ -98,18 +129,11 @@ export default function ClientPayments() {
 
   const openPayment = async (invoice) => {
     setPayment(newPayment(invoice));
-    try {
-      const settings = await api.get("/settings");
-      setPaymentMethods(settings.payment_methods || ["Cash", "Bank Transfer"]);
-    } catch (error) {
-      setPayment(null);
-      toast.error(apiError(error));
-    }
   };
 
   const refreshProfile = async () => {
     if (!profile?.customer) return;
-    const summary = await api.get(`/customers/${profile.customer.id}/summary`);
+    const summary = await api.get(`/customers/${profile.customer.id}/summary`, express ? { express_only: true } : undefined);
     setProfile((current) => current ? { ...current, summary } : current);
   };
 
@@ -118,6 +142,10 @@ export default function ClientPayments() {
     const amount = Number(payment.amount);
     if (!(amount > 0)) {
       toast.error("Amount must be greater than 0");
+      return;
+    }
+    if (payment.method !== "Cash" && !payment.receiving_on) {
+      toast.error("Select where the payment was received");
       return;
     }
     setSaving(true);
@@ -138,6 +166,32 @@ export default function ClientPayments() {
     }
   };
 
+  const setExpressPaymentDailyReportInclusion = async (record) => {
+    if (updatingExpressPaymentId) return;
+    const included = !record.include_on_daily_report;
+    setUpdatingExpressPaymentId(record.id);
+    setExpressPaymentsError("");
+    try {
+      await api.post(`/payments/${record.id}/daily-report`, { included });
+      setExpressPayments((current) => current.map((paymentRecord) => (
+        paymentRecord.id === record.id
+          ? { ...paymentRecord, include_on_daily_report: included }
+          : paymentRecord
+      )));
+      toast.success(included ? "Payment included in the daily report" : "Payment removed from the daily report");
+    } catch (error) {
+      setExpressPaymentsError(apiError(error));
+      toast.error(apiError(error));
+    } finally {
+      setUpdatingExpressPaymentId("");
+    }
+  };
+
+  const expressPaymentsTotal = expressPayments.reduce((total, record) => total + toCents(record.amount), 0) / 100;
+  const expressPaymentsReportTotal = expressPayments
+    .filter((record) => record.include_on_daily_report)
+    .reduce((total, record) => total + toCents(record.amount), 0) / 100;
+
   const mostUsedZone = (invoices, fallback) => {
     const counts = (invoices || []).reduce((result, invoice) => {
       if (!["void", "draft"].includes(invoice.status)) {
@@ -152,7 +206,18 @@ export default function ClientPayments() {
 
   return (
     <div>
-      <PageHeader title="Clients Payments and Balances" subtitle={loading ? "Loading clients..." : `${customers.length} clients`} />
+      <PageHeader title={express ? "Express Website Payments and Balances" : "Clients Payments and Balances"} subtitle={loading ? "Loading clients..." : `${customers.length} clients`}>
+        {express && <Btn
+          variant="outline"
+          onClick={() => {
+            setExpressPaymentsDate(today());
+            setExpressPaymentsSummaryOpen(true);
+          }}
+          data-testid="express-payments-summary-open"
+        >
+          <ReceiptText size={16} /> Payments summary
+        </Btn>}
+      </PageHeader>
 
       <Card className="p-4 mb-4">
         <div className="relative">
@@ -327,12 +392,120 @@ export default function ClientPayments() {
                         {fmtDate(record.date)} · {record.method} · {record.invoice_number || "Invoice"}
                         {record.customer_deleted && <Badge cls="ml-2 border-red-200 bg-red-50 text-red-700">Deleted customer</Badge>}
                       </span>
-                      <span className="font-mono font-semibold text-emerald-600">{fmtMoney(record.amount)}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-semibold text-emerald-600">{fmtMoney(record.amount)}</span>
+                        <button
+                          type="button"
+                          onClick={() => setViewPayment(record)}
+                          aria-label={`View payment details for ${record.invoice_number || "invoice"}`}
+                          title="View payment details"
+                          data-testid={`view-payment-${record.id}`}
+                          className="rounded-md p-1.5 text-slate-400 hover:bg-blue-50 hover:text-primary"
+                        >
+                          <Eye size={15} />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
               )}
             </section>
+          </div>
+        )}
+      </Modal>
+
+      {express && <Modal
+        open={expressPaymentsSummaryOpen}
+        onClose={() => setExpressPaymentsSummaryOpen(false)}
+        title="Express Website Payments Summary"
+        wide
+      >
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <Input
+              label="Payment date"
+              type="date"
+              value={expressPaymentsDate}
+              onChange={(event) => setExpressPaymentsDate(event.target.value || today())}
+              data-testid="express-payments-summary-date"
+            />
+            <div className="flex flex-wrap gap-3">
+              <div className="rounded-lg bg-emerald-50 px-4 py-2">
+                <p className="text-xs text-slate-500">Payments on this date</p>
+                <p className="font-mono font-bold text-emerald-700" data-testid="express-payments-summary-total">{fmtMoney(expressPaymentsTotal)}</p>
+              </div>
+              <div className="rounded-lg bg-blue-50 px-4 py-2">
+                <p className="text-xs text-slate-500">Selected for Daily Report</p>
+                <p className="font-mono font-bold text-blue-700" data-testid="express-payments-report-total">{fmtMoney(expressPaymentsReportTotal)}</p>
+              </div>
+            </div>
+          </div>
+
+          {expressPaymentsError && <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">{expressPaymentsError}</p>}
+          {expressPaymentsLoading ? (
+            <p className="py-8 text-center text-sm text-slate-400" role="status">Loading payments...</p>
+          ) : expressPayments.length === 0 ? (
+            <Empty title="No Express Website payments on this date" />
+          ) : (
+            <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-left text-xs text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2">Client</th>
+                    <th className="px-3 py-2">Invoice</th>
+                    <th className="px-3 py-2">Method</th>
+                    <th className="px-3 py-2">Reference / notes</th>
+                    <th className="px-3 py-2 text-right">Amount</th>
+                    <th className="px-3 py-2 text-center">Daily Report</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {expressPayments.map((record) => (
+                    <tr key={record.id} className="border-t border-border/60">
+                      <td className="px-3 py-2 font-semibold text-slate-800">{record.customer_name || "—"}</td>
+                      <td className="px-3 py-2">{record.invoice_number || "—"}</td>
+                      <td className="px-3 py-2">{record.method || "—"}</td>
+                      <td className="px-3 py-2 text-slate-500">{[record.reference, record.notes].filter(Boolean).join(" · ") || "—"}</td>
+                      <td className="whitespace-nowrap px-3 py-2 text-right font-mono font-semibold text-emerald-700">{fmtMoney(record.amount)}</td>
+                      <td className="px-3 py-2 text-center">
+                        <input
+                          type="checkbox"
+                          checked={!!record.include_on_daily_report}
+                          disabled={!!updatingExpressPaymentId}
+                          onChange={() => setExpressPaymentDailyReportInclusion(record)}
+                          aria-label={`Include payment for ${record.customer_name || record.invoice_number || "client"} on Daily Report`}
+                          data-testid={`express-payment-daily-report-${record.id}`}
+                          className="h-4 w-4 accent-emerald-600"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </Modal>}
+
+      <Modal open={!!viewPayment} onClose={() => setViewPayment(null)} title="Payment Details" wide>
+        {viewPayment && (
+          <div className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              {[
+                ["Invoice", viewPayment.invoice_number || "—"],
+                ["Date", fmtDate(viewPayment.date) || "—"],
+                ["Method", viewPayment.method || "—"],
+                ["Receiving on", viewPayment.receiving_on || "—"],
+                ["Amount", fmtMoney(viewPayment.amount)],
+                ["Reference", viewPayment.reference || "—"],
+                ["Notes", viewPayment.notes || "—"],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-lg border border-border bg-slate-50 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+                  <p className="mt-1 whitespace-pre-wrap text-sm text-slate-800">{value}</p>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </Modal>
@@ -353,11 +526,15 @@ export default function ClientPayments() {
               data-testid="client-payment-amount"
             />
             <div className="grid grid-cols-2 gap-3">
-              <Select label="Method" value={payment.method} onChange={(event) => setPayment({ ...payment, method: event.target.value })}>
-                {paymentMethods.map((method) => <option key={method}>{method}</option>)}
+              <Select label="Payment Method" value={payment.method} onChange={(event) => setPayment({ ...payment, method: event.target.value })}>
+                {PAYMENT_METHODS.map((method) => <option key={method}>{method}</option>)}
               </Select>
               <Input label="Date" type="date" value={payment.date} onChange={(event) => setPayment({ ...payment, date: event.target.value })} />
             </div>
+            <Select label="Receiving on" value={payment.receiving_on} onChange={(event) => setPayment({ ...payment, receiving_on: event.target.value })}>
+              <option value="">Select receiving account</option>
+              {RECEIVING_OPTIONS.map((option) => <option key={option}>{option}</option>)}
+            </Select>
             <Input label="Reference (optional)" value={payment.reference} onChange={(event) => setPayment({ ...payment, reference: event.target.value })} />
             <Textarea label="Notes (optional)" rows={2} value={payment.notes} onChange={(event) => setPayment({ ...payment, notes: event.target.value })} />
             <div className="flex justify-end gap-2">

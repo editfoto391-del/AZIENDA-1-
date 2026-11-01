@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, fmtDateTime, today, newKey, STATUS_META, documentFilename } from "@/lib/format";
 import { usesUnifiedPriceList } from "@/lib/company";
+import { PAYMENT_METHODS } from "@/lib/paymentMethods";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal } from "@/components/common";
 import { Copy, Download, Save, Send, CreditCard, Plus, Trash2, ArrowLeft, Ban, Printer, AlertTriangle, Pencil, X, History, Eye, EyeOff, Archive } from "lucide-react";
@@ -27,18 +28,24 @@ const isOpeningBalancePlaceholder = (item) => !item.category && !item.size && it
 
 const emptyItem = (category = "Simple/Mix color") => ({ qty: 1, category, size: "", description: "", unit_price: 0, price_override: false, tax: false, _needsConfig: false });
 
-export default function InvoiceEditor() {
+export default function InvoiceEditor({ express = false }) {
   const { user } = useAuth();
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const { id } = useParams();
   const nav = useNavigate();
+  const invoicesPath = express ? "/express-invoices" : "/invoices";
   const [customers, setCustomers] = useState([]);
+  const [drivers, setDrivers] = useState([]);
+  const [previousInvoices, setPreviousInvoices] = useState([]);
+  const [loadingPreviousInvoices, setLoadingPreviousInvoices] = useState(false);
   const [prices, setPrices] = useState([]);
   const [settings, setSettings] = useState({});
   const [inv, setInv] = useState({
     customer_id: "", customer_name: "", date: today(), due_date: today(), zone: 1,
     payment_terms: "Due on Delivery", reference: "", notes: "", items: [emptyItem()],
-    discount: 0, extra_charges: 0, tax_enabled: false, tax_rate: 15, status: "draft",
+    discount: 0, extra_charges: 0, delivery_fee: 0, made_by: user?.name || "",
+    client_number: "", assigned_driver_id: "", assigned_driver_name: "",
+    idempotency_key: newKey(), tax_enabled: false, tax_rate: 15, status: "draft",
     amount_paid: 0, number: null,
   });
   const [payRecords, setPayRecords] = useState([]);
@@ -69,17 +76,24 @@ export default function InvoiceEditor() {
     : invoice;
 
   useEffect(() => {
-    Promise.all([api.get("/customers"), api.get("/prices"), api.get("/settings")]).then(([c, p, s]) => {
-      setCustomers(c); setPrices(p); setSettings(s);
+    Promise.all([api.get("/customers"), api.get("/prices"), api.get("/settings"), api.get("/drivers")]).then(([c, p, s, d]) => {
+      setCustomers(c); setPrices(p); setSettings(s); setDrivers(d.filter((driver) => driver.active !== false));
       if (!id) setInv((prev) => ({ ...prev, tax_enabled: s.tax_enabled, tax_rate: s.tax_rate }));
     });
     setEditing(false);
     if (id) api.get(`/invoices/${id}`).then((d) => {
+      if ((d.invoice_type || "standard") !== (express ? "express" : "standard")) {
+        toast.error("This invoice belongs to a different invoice section");
+        nav(express ? "/invoices" : "/express-invoices", { replace: true });
+        return;
+      }
       const loaded = { ...d, zone: unifiedPriceList ? 1 : d.zone, items: (d.items || []).map((item) => ({
         ...item,
         category: ["Standard", "Simple"].includes(item.category) ? "Simple/Mix color" : item.category,
       })) };
-      setInv(loaded); setPayRecords(d.payment_records || []);
+      setInv(loaded);
+      setPayRecords(d.payment_records || []);
+      setPreviousInvoices(d.previous_invoices_pending || []);
       if (sp.get("edit") && d.status !== "void") {
         if (user?.can_skip_supervisor_approval) {
           setSnapshot(loaded);
@@ -93,11 +107,46 @@ export default function InvoiceEditor() {
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, user?.can_skip_supervisor_approval]);
+  }, [id, user?.can_skip_supervisor_approval, express]);
+
+  useEffect(() => {
+    if (id || !inv.customer_id) {
+      setPreviousInvoices([]);
+      setLoadingPreviousInvoices(false);
+      return;
+    }
+
+    let active = true;
+    setLoadingPreviousInvoices(true);
+    api.get(`/customers/${inv.customer_id}/summary`, {
+      invoice_type: express ? "express" : "standard",
+    })
+      .then((summary) => {
+        if (!active) return;
+        setPreviousInvoices((summary.invoices || [])
+          .filter((invoice) =>
+            invoice.id !== inv.id
+            && !["draft", "void"].includes(invoice.status)
+            && Number(invoice.outstanding) > 0
+            && (!inv.date || !invoice.date || invoice.date < inv.date),
+          )
+          .sort((a, b) => String(a.date || "").localeCompare(String(b.date || ""))));
+      })
+      .catch((error) => {
+        if (!active) return;
+        setPreviousInvoices([]);
+        toast.error(`Could not load previous invoice balances: ${apiError(error)}`);
+      })
+      .finally(() => {
+        if (active) setLoadingPreviousInvoices(false);
+      });
+
+    return () => { active = false; };
+  }, [id, inv.customer_id, inv.date, express]);
 
   useEffect(() => {
     if (!id && /^\d{4}-/.test(inv.date)) {
-      api.get(`/invoices/next-number?year=${encodeURIComponent(inv.date.slice(0, 4))}`)
+      api.get(`/invoices/next-number?year=${encodeURIComponent(inv.date.slice(0, 4))}&express=${express}`)
         .then((d) => setNextNum(d.number))
         .catch((error) => toast.error(apiError(error)));
     }
@@ -286,7 +335,7 @@ export default function InvoiceEditor() {
       const next = repriceItems(inv.items, zone);
       if (confirmReprice(inv.items, next)) items = next;
     }
-    setInv({ ...inv, customer_id: cid, customer_name: c.name, payment_terms: c.payment_terms, zone: items === inv.items ? inv.zone : zone, items, destination: inv.destination || c.city || "" });
+    setInv({ ...inv, customer_id: cid, customer_name: c.name, client_number: c.client_number || "", payment_terms: c.payment_terms, zone: items === inv.items ? inv.zone : zone, items, destination: inv.destination || c.city || "" });
     if (!c.city) toast.info("This customer has no saved city. Please confirm the delivery destination.");
   };
 
@@ -296,12 +345,12 @@ export default function InvoiceEditor() {
       selectCustomer(match.id);
       return;
     }
-    setInv((prev) => ({ ...prev, customer_id: "", customer_name: name, destination: "" }));
+    setInv((prev) => ({ ...prev, customer_id: "", customer_name: name, client_number: "", destination: "" }));
   };
 
   const totals = useMemo(() => {
     const subtotal = inv.items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
-    const taxed = Math.max(subtotal - Number(inv.discount || 0) + Number(inv.extra_charges || 0), 0);
+    const taxed = Math.max(subtotal - Number(inv.discount || 0) + Number(inv.delivery_fee || 0) + Number(inv.extra_charges || 0), 0);
     const tax = inv.tax_enabled ? taxed * (Number(inv.tax_rate) || 0) / 100 : 0;
     const total = taxed + tax;
     const outstanding = total - Number(inv.amount_paid || 0);
@@ -314,6 +363,13 @@ export default function InvoiceEditor() {
   const [busy, setBusy] = useState(false);
 
   const buildPayload = (status) => ({
+    invoice_type: express ? "express" : "standard",
+    previous_invoices_pending: previousInvoices.map(({ id: invoiceId, date, number, outstanding }) => ({
+      id: invoiceId,
+      date: date || "",
+      number: number || "",
+      outstanding: Number(outstanding) || 0,
+    })),
     customer_id: inv.customer_id, customer_name: inv.customer_name, date: inv.date,
     due_date: inv.due_date, zone: inv.zone, payment_terms: inv.payment_terms,
     reference: inv.reference, notes: inv.notes, destination: inv.destination || "",
@@ -323,11 +379,18 @@ export default function InvoiceEditor() {
     })),
     opening_balance: !!inv.opening_balance,
     discount: Number(inv.discount) || 0, extra_charges: Number(inv.extra_charges) || 0,
+    delivery_fee: Number(inv.delivery_fee) || 0, made_by: inv.made_by || user?.name || "",
+    client_number: inv.client_number || "", assigned_driver_id: inv.assigned_driver_id || "",
+    assigned_driver_name: inv.assigned_driver_name || "",
+    idempotency_key: inv.idempotency_key || "",
     tax_enabled: inv.tax_enabled, tax_rate: Number(inv.tax_rate) || 0, status,
   });
 
   const validate = (status) => {
     if (!inv.customer_name.trim()) { toast.error("Enter or select a customer"); return false; }
+    if (!id && !(inv.made_by || user?.name || "").trim()) { toast.error("Made By is required"); return false; }
+    if (Number(inv.delivery_fee || 0) < 0 || !Number.isFinite(Number(inv.delivery_fee || 0))) { toast.error("Delivery Fee must be a valid non-negative amount"); return false; }
+    if (inv.assigned_driver_id && !drivers.some((driver) => driver.id === inv.assigned_driver_id)) { toast.error("Select an eligible driver"); return false; }
     if (!inv.items.some((it) => it.size || it.description)) { toast.error("Add at least one item"); return false; }
     if (inv.items.some((it) => (Number(it.qty) || 0) <= 0 && (it.size || it.description))) { toast.error("Quantity must be positive"); return false; }
     if (status !== "draft" && hasConfigIssue) { toast.error("Some items require administrator confirmation. Enter a manual price before issuing."); return false; }
@@ -391,7 +454,7 @@ export default function InvoiceEditor() {
       const submitted = !id && status !== "draft";
       toast.success(submitted ? "INVOICE SUBMITTED" : status === "draft" ? "Saved as draft" : "Invoice saved");
       setPendingSave(null);
-      nav(submitted && !downloadAfterSave ? "/invoices" : `/invoices/${res.id}${downloadAfterSave ? "?pdf=1" : ""}`);
+      nav(submitted && !downloadAfterSave ? invoicesPath : `${invoicesPath}/${res.id}${downloadAfterSave ? "?pdf=1" : ""}`);
       if (id) { setInv(res); setEditAuthorization(""); }
     } catch (e) {
       const detail = e.response?.data?.detail;
@@ -457,7 +520,7 @@ export default function InvoiceEditor() {
         toast.success("Invoice issued");
       } else {
         toast.success("Invoice issued");
-        nav("/invoices");
+        nav(invoicesPath);
       }
     } catch (e) {
       const detail = e.response?.data?.detail;
@@ -500,7 +563,7 @@ export default function InvoiceEditor() {
     try {
       await api.del(`/invoices/${id}`);
       toast.success("Draft archived");
-      nav("/invoices");
+      nav(invoicesPath);
     } catch (e) { toast.error(apiError(e)); }
   };
 
@@ -533,12 +596,23 @@ export default function InvoiceEditor() {
     L.push(`INVOICE: ${inv.number || "DRAFT"}`);
     L.push("");
     L.push(`Customer: ${inv.customer_name || "-"}`);
+    if (inv.client_number) L.push(`Client Number: ${inv.client_number}`);
+    if (inv.made_by) L.push(`Made By: ${inv.made_by}`);
+    if (inv.assigned_driver_name) L.push(`Assigned Driver: ${inv.assigned_driver_name}`);
     L.push(`Invoice Date: ${fmtDate(inv.date)}`);
     L.push(`Due Date: ${fmtDate(inv.due_date)}`);
     if (!unifiedPriceList) L.push(`Price Zone: Zone ${inv.zone}`);
     L.push(`Payment Terms: ${inv.payment_terms}`);
     if (inv.destination) L.push(`Delivery To: ${inv.destination}`);
     if (inv.reference && !inv.opening_balance) L.push(`Reference: ${inv.reference}`);
+    if (!inv.opening_balance && previousInvoices.length > 0) {
+      L.push("");
+      L.push("PREVIOUS INVOICES PENDING PAYMENTS:");
+      previousInvoices.forEach((invoice) => {
+        L.push(`${fmtDate(invoice.date)} · INV. ${invoice.number || "—"} · BLN: ${fmtMoney(invoice.outstanding)}`);
+      });
+      L.push(`Total previous BLN: ${fmtMoney(previousInvoicesBalance)}`);
+    }
     L.push("");
     const textItems = invoiceItems.filter((it) => it.size || it.description);
     if (textItems.length) {
@@ -555,6 +629,7 @@ export default function InvoiceEditor() {
     }
     L.push(`Subtotal: ${fmtMoney(totals.subtotal)}`);
     if (Number(inv.discount)) L.push(`Discount: ${fmtMoney(inv.discount)}`);
+    if (Number(inv.delivery_fee)) L.push(`Delivery Fee: ${fmtMoney(inv.delivery_fee)}`);
     if (Number(inv.extra_charges)) L.push(`Added: ${fmtMoney(inv.extra_charges)}`);
     if (inv.tax_enabled) L.push(`Tax (${inv.tax_rate}%): ${fmtMoney(totals.tax)}`);
     L.push(`Total: ${fmtMoney(totals.total)}`);
@@ -591,7 +666,7 @@ export default function InvoiceEditor() {
     try {
       await elementToPdf(element, filename);
       toast.success(successMessage);
-      if (returnToInvoices) nav("/invoices");
+      if (returnToInvoices) nav(invoicesPath);
     } catch (error) {
       toast.error(`${errorLabel}: ${error.message}`);
     } finally {
@@ -618,6 +693,11 @@ export default function InvoiceEditor() {
     );
   };
   const custObj = customers.find((c) => c.id === inv.customer_id) || {};
+  const canEditClientNumber = !user?.is_worker || user.allowed_sections?.includes("customers");
+  const previousInvoicesBalance = previousInvoices.reduce(
+    (total, invoice) => total + (Number(invoice.outstanding) || 0),
+    0,
+  );
   const invoiceDeliveryNote = {
     reference: inv.number || "DRAFT",
     expected_ship_date: inv.date,
@@ -678,7 +758,7 @@ export default function InvoiceEditor() {
   return (
     <div>
       <div className="flex items-center justify-between mb-5 no-print">
-        <button onClick={() => nav("/invoices")} className="flex items-center gap-2 text-sm font-semibold text-slate-500 hover:text-slate-800">
+        <button onClick={() => nav(invoicesPath)} className="flex items-center gap-2 text-sm font-semibold text-slate-500 hover:text-slate-800">
           <ArrowLeft size={16} /> Back to Invoices
         </button>
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -732,8 +812,30 @@ export default function InvoiceEditor() {
                   {(settings.payment_terms || ["Due on Delivery", "7 Days", "30 Days"]).map((t) => <option key={t}>{t}</option>)}
                 </Select></div><Input label="Delivery Destination" value={inv.destination || ""} onChange={(e) => setInv({ ...inv, destination: e.target.value })} data-testid="invoice-destination-input" /></div></Card>
               <Card className="p-5"><div className="flex items-center justify-between mb-4"><h3 className="font-bold text-slate-800 font-display">2. Invoice Details</h3><span className="font-mono text-sm font-bold text-primary">{inv.number || nextNum || "DRAFT"}</span></div>
-                <div className="space-y-4"><div className="grid grid-cols-2 gap-3"><Input label="Invoice Date" type="date" value={inv.date} onChange={(e) => setInv({ ...inv, date: e.target.value })} /><Input label="Due Date" type="date" value={inv.due_date} onChange={(e) => setInv({ ...inv, due_date: e.target.value })} /></div><Input label="Reference (optional)" value={inv.reference} onChange={(e) => setInv({ ...inv, reference: e.target.value })} />
-                <Textarea label="Notes (optional)" rows={2} value={inv.notes || ""} onChange={(e) => setInv({ ...inv, notes: e.target.value })} placeholder="Additional notes..." /></div></Card>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-3"><Input label="Invoice Date" type="date" value={inv.date} onChange={(e) => setInv({ ...inv, date: e.target.value })} /><Input label="Due Date" type="date" value={inv.due_date} onChange={(e) => setInv({ ...inv, due_date: e.target.value })} /></div>
+                  {!id ? <>
+                    <Input label="Made By *" value={inv.made_by || user?.name || ""} readOnly required data-testid="invoice-made-by" />
+                    <Input label="Client Number" value={inv.client_number || ""} onChange={(event) => setInv({ ...inv, client_number: event.target.value })} disabled={!canEditClientNumber} data-testid="invoice-client-number" />
+                    <Select label="Assigned Driver" value={inv.assigned_driver_id || ""} onChange={(event) => {
+                      const driver = drivers.find((item) => item.id === event.target.value);
+                      setInv({ ...inv, assigned_driver_id: event.target.value, assigned_driver_name: driver?.name || "" });
+                    }} data-testid="invoice-assigned-driver">
+                      <option value="">No driver assigned</option>{drivers.map((driver) => <option key={driver.id} value={driver.id}>{driver.name}</option>)}
+                    </Select>
+                  </> : <>
+                    <Input label="Made By" value={inv.made_by || ""} readOnly data-testid="invoice-made-by" />
+                    <Input label="Client Number" value={inv.client_number || ""} onChange={(event) => setInv({ ...inv, client_number: event.target.value })} disabled={!canEditClientNumber} data-testid="invoice-client-number" />
+                    <Select label="Assigned Driver" value={inv.assigned_driver_id || ""} onChange={(event) => {
+                      const driver = drivers.find((item) => item.id === event.target.value);
+                      setInv({ ...inv, assigned_driver_id: event.target.value, assigned_driver_name: driver?.name || "" });
+                    }} data-testid="invoice-assigned-driver">
+                      <option value="">No driver assigned</option>{drivers.map((driver) => <option key={driver.id} value={driver.id}>{driver.name}</option>)}
+                    </Select>
+                    <Input label="Reference (optional)" value={inv.reference || ""} onChange={(e) => setInv({ ...inv, reference: e.target.value })} />
+                    <Textarea label="Notes (optional)" rows={2} value={inv.notes || ""} onChange={(e) => setInv({ ...inv, notes: e.target.value })} placeholder="Additional notes..." />
+                  </>}
+                </div></Card>
             </div>
 
             {(!openingBalanceOnly || editing) && <Card className="p-5">
@@ -844,6 +946,8 @@ export default function InvoiceEditor() {
                 <div className="flex justify-between"><span className="text-slate-500">Subtotal</span><span className="font-mono font-semibold">{fmtMoney(totals.subtotal)}</span></div>
                 <div className="flex justify-between items-center"><span className="text-slate-500">Discount</span>
                   <input type="number" step="0.01" value={inv.discount} onChange={(e) => setInv({ ...inv, discount: e.target.value })} data-testid="discount-input" className="w-24 rounded border border-input px-2 py-1 text-sm font-mono text-right" /></div>
+                <div className="flex justify-between items-center"><span className="text-slate-500">Delivery Fee</span>
+                  <input type="number" min="0" step="0.01" value={inv.delivery_fee ?? 0} onChange={(e) => setInv({ ...inv, delivery_fee: e.target.value })} data-testid="delivery-fee-input" className="w-24 rounded border border-input px-2 py-1 text-sm font-mono text-right" /></div>
                 <div className="flex justify-between items-center"><span className="text-slate-500">Added</span>
                   <input type="number" step="0.01" value={inv.extra_charges} onChange={(e) => setInv({ ...inv, extra_charges: e.target.value })} className="w-24 rounded border border-input px-2 py-1 text-sm font-mono text-right" /></div>
                 <label className="flex items-center justify-between"><span className="text-slate-500">Apply Tax {inv.tax_enabled ? `(${inv.tax_rate}%)` : ""}</span>
@@ -851,12 +955,12 @@ export default function InvoiceEditor() {
                 {inv.tax_enabled && <div className="flex justify-between"><span className="text-slate-500">Tax</span><span className="font-mono">{fmtMoney(totals.tax)}</span></div>}
                 <div className="flex justify-between border-t border-border pt-3 text-base"><span className="font-bold text-slate-800">Total</span><span className="font-mono font-bold text-slate-900" data-testid="invoice-total">{fmtMoney(totals.total)}</span></div>
                 <div className="flex justify-between"><span className="text-slate-500">Amount Paid</span><span className="font-mono text-emerald-600">{fmtMoney(inv.amount_paid)}</span></div>
-                <div className="flex justify-between"><span className="font-semibold text-slate-700">Outstanding</span><span className="font-mono font-bold text-red-600" data-testid="invoice-outstanding">{fmtMoney(totals.outstanding)}</span></div>
+                <div className="flex justify-between"><span className="font-semibold text-slate-700">BLN (Balance Remaining)</span><span className="font-mono font-bold text-red-600" data-testid="invoice-outstanding">{fmtMoney(totals.outstanding)}</span></div>
               </fieldset>
             </Card>
             </div>
             <div className="no-print flex flex-wrap justify-between gap-3">
-              <Btn variant="outline" onClick={() => (editing ? cancelEdit() : nav("/invoices"))} data-testid="bottom-cancel-btn">Cancel</Btn>
+              <Btn variant="outline" onClick={() => (editing ? cancelEdit() : nav(invoicesPath))} data-testid="bottom-cancel-btn">Cancel</Btn>
               <div className="flex flex-wrap gap-2">
                 {!id && <Btn variant="outline" disabled={busy} onClick={() => save("draft")} data-testid="bottom-save-draft-btn"><Save size={15} /> {busy ? "Saving…" : "Save Draft"}</Btn>}
                 <Btn variant="outline" onClick={() => document.querySelector('[data-testid="invoice-preview"]')?.scrollIntoView({ behavior: "smooth" })} data-testid="bottom-preview-btn">Preview Invoice</Btn>
@@ -872,10 +976,25 @@ export default function InvoiceEditor() {
               <button onClick={downloadPDF} disabled={busy || pdfBusy} className="rounded-md py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50" data-testid="tab-pdf">{busy ? "Issuing..." : pdfBusy ? "Generating PDF..." : "Download PDF"}</button>
             </div>
             <Card className="p-3 overflow-hidden"><FitPreview>
-              <InvoiceDocument inv={inv} totals={totals} settings={settings} customer={custObj} />
+              <InvoiceDocument inv={inv} totals={totals} settings={settings} customer={custObj} previousInvoices={previousInvoices} />
             </FitPreview></Card>
           </div>
-          <div style={{ position: "fixed", left: -10000, top: 0 }} aria-hidden="true"><InvoiceDocument ref={docRef} inv={inv} totals={totals} settings={settings} customer={custObj} /></div>
+          {loadingPreviousInvoices && !id && inv.customer_id && <p className="no-print text-xs text-slate-500" role="status">Loading previous invoice balances...</p>}
+          {!id && !inv.opening_balance && previousInvoices.length > 0 && <div className="no-print rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950" data-testid="previous-invoices-pending-summary">
+            <div className="flex flex-wrap items-center justify-between gap-2 font-bold">
+              <span>PREVIOUS INVOICES PENDING PAYMENTS</span>
+              <span>Total previous balance: {fmtMoney(previousInvoicesBalance)}</span>
+            </div>
+            <ul className="mt-2 space-y-1">
+              {previousInvoices.map((invoice) => (
+                <li key={invoice.id} className="flex flex-wrap justify-between gap-x-4 gap-y-1 border-t border-amber-200 pt-1.5">
+                  <span>{fmtDate(invoice.date)} · INV. {invoice.number || "—"}</span>
+                  <span className="font-mono font-semibold">BLN: {fmtMoney(invoice.outstanding)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>}
+          <div style={{ position: "fixed", left: -10000, top: 0 }} aria-hidden="true"><InvoiceDocument ref={docRef} inv={inv} totals={totals} settings={settings} customer={custObj} previousInvoices={previousInvoices} /></div>
           <div style={{ position: "fixed", left: -10000, top: 0 }} aria-hidden="true">
             <DeliveryNote ref={deliveryNoteRef} order={invoiceDeliveryNote} settings={settings} />
           </div>
@@ -887,8 +1006,8 @@ export default function InvoiceEditor() {
           <div className="space-y-4">
             <Input label="Amount (R)" type="number" step="0.01" value={payModal.amount} onChange={(e) => setPayModal({ ...payModal, amount: e.target.value })} data-testid="payment-amount-input" />
             <div className="grid grid-cols-2 gap-3">
-              <Select label="Method" value={payModal.method} onChange={(e) => setPayModal({ ...payModal, method: e.target.value })}>
-                {(settings.payment_methods || ["Cash", "Bank Transfer"]).map((m) => <option key={m}>{m}</option>)}
+              <Select label="Payment Method" value={payModal.method} onChange={(e) => setPayModal({ ...payModal, method: e.target.value })}>
+                {PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
               </Select>
               <Input label="Date" type="date" value={payModal.date} onChange={(e) => setPayModal({ ...payModal, date: e.target.value })} />
             </div>

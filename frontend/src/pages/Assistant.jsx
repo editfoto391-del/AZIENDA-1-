@@ -4,6 +4,7 @@ import { api, apiError, invalidateGetCache } from "@/lib/api";
 import { fmtDateTime } from "@/lib/format";
 import { Card, Btn, PageHeader } from "@/components/common";
 import { Sparkles, Send, Plus, Trash2, MessageSquare } from "lucide-react";
+import { listViewState, loadListRequest } from "@/lib/listRequest.mjs";
 
 const SUGGESTIONS = ["Who owes me money right now?", "What is the diesel price in Kokstad today?", "Summarise this week's expenses and estimated result", "Which orders are urgent to send?"];
 const BASE = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -19,13 +20,28 @@ function Bubble({ m, idx }) {
   );
 }
 
-function SessionList({ sessions, loading, active, onPick, onNew, onDelete }) {
+function SessionList({ sessions, loading, error, active, onPick, onNew, onDelete, onRetry }) {
+  const sessionState = listViewState({ loading, error, items: sessions });
+
   return (
     <Card className="p-3 h-full flex flex-col">
       <Btn onClick={onNew} className="w-full mb-3" data-testid="new-chat-btn"><Plus size={16} /> New chat</Btn>
       <div className="space-y-1 overflow-y-auto flex-1">
-        {loading ? <p className="text-xs text-slate-400 px-2">Loading conversations...</p> : sessions.length === 0 && <p className="text-xs text-slate-400 px-2">No conversations yet.</p>}
-        {sessions.map((s) => (
+        {sessionState === "loading" && (
+          <p className="px-2 text-xs text-slate-400" role="status">Loading conversations...</p>
+        )}
+        {sessionState === "error" && (
+          <div className="space-y-2 px-2 py-3" role="alert">
+            <p className="text-xs text-red-700">Conversations could not be loaded: {error}</p>
+            <Btn variant="outline" className="px-3 py-1.5 text-xs" onClick={onRetry} data-testid="assistant-conversations-retry">
+              Retry
+            </Btn>
+          </div>
+        )}
+        {sessionState === "empty" && (
+          <p className="px-2 text-xs text-slate-400" data-testid="assistant-conversations-empty">No conversations yet.</p>
+        )}
+        {(sessionState === "items" || (sessionState === "error" && sessions.length > 0)) && sessions.map((s) => (
           <div key={s.id} className={`group flex items-center gap-2 rounded-lg px-2 py-2 cursor-pointer text-sm ${active === s.id ? "bg-blue-50 text-primary" : "hover:bg-slate-50 text-slate-600"}`} onClick={() => onPick(s.id)} data-testid={`chat-session-${s.id}`}>
             <MessageSquare size={14} className="shrink-0" />
             <div className="flex-1 min-w-0"><p className="truncate font-semibold">{s.title}</p><p className="text-[10px] text-slate-400">{fmtDateTime(s.updated_at)}</p></div>
@@ -37,16 +53,20 @@ function SessionList({ sessions, loading, active, onPick, onNew, onDelete }) {
 }
 
 export default function Assistant() {
-  const [sessions, setSessions] = useState([]);
-  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [sessionsRequest, setSessionsRequest] = useState({ items: [], loading: true, error: "" });
   const [sid, setSid] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const endRef = useRef(null);
 
-  const loadSessions = () => api.get("/assistant/sessions").then(setSessions).catch(() => {}).finally(() => setSessionsLoading(false));
-  useEffect(() => { loadSessions(); }, []);
+  const loadSessions = ({ showLoading = true } = {}) => loadListRequest({
+    request: () => api.get("/assistant/sessions"),
+    setState: setSessionsRequest,
+    errorMessage: apiError,
+    showLoading,
+  });
+  useEffect(() => { void loadSessions(); }, []);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
   const pick = async (id) => {
@@ -55,7 +75,13 @@ export default function Assistant() {
   };
   const remove = async (id) => {
     if (!window.confirm("Delete this conversation?")) return;
-    await api.del(`/assistant/sessions/${id}`); if (id === sid) { setSid(null); setMessages([]); } loadSessions();
+    try {
+      await api.del(`/assistant/sessions/${id}`);
+      if (id === sid) { setSid(null); setMessages([]); }
+      await loadSessions({ showLoading: false });
+    } catch (error) {
+      toast.error(apiError(error));
+    }
   };
 
   const send = async (text) => {
@@ -87,7 +113,7 @@ export default function Assistant() {
           else if (ev.type === "error") { append(`\n\n⚠ ${ev.message}`); toast.error("Assistant error"); }
         }
       }
-      loadSessions();
+      await loadSessions({ showLoading: false });
     } catch (e) {
       setMessages((m) => m.slice(0, -1)); toast.error(e.message); setInput(msg);
     } finally { setBusy(false); }
@@ -97,7 +123,16 @@ export default function Assistant() {
     <div>
       <PageHeader title="AI Business Assistant" subtitle="Your ERP data + live web search (with sources) · GPT-5.2" />
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 h-[calc(100vh-13rem)] min-h-[480px]">
-        <div className="hidden lg:block"><SessionList sessions={sessions} loading={sessionsLoading} active={sid} onPick={pick} onNew={() => { setSid(null); setMessages([]); }} onDelete={remove} /></div>
+        <div className="hidden lg:block"><SessionList
+          sessions={sessionsRequest.items}
+          loading={sessionsRequest.loading}
+          error={sessionsRequest.error}
+          active={sid}
+          onPick={pick}
+          onNew={() => { setSid(null); setMessages([]); }}
+          onDelete={remove}
+          onRetry={() => { void loadSessions(); }}
+        /></div>
         <Card className="lg:col-span-3 flex flex-col overflow-hidden bg-slate-50/60">
           <div className="flex-1 overflow-y-auto p-5 space-y-4" data-testid="chat-messages">
             {messages.length === 0 ? (

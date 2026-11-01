@@ -1,10 +1,10 @@
 import axios from "axios";
+import { GET_CACHE_MS, isCacheEntryFresh, pruneExpiredCache } from "./apiCache.mjs";
 
 const BASE = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const client = axios.create({ baseURL: BASE, withCredentials: true });
 const pendingGets = new Map();
 const cachedGets = new Map();
-const GET_CACHE_MS = 30_000;
 let supervisorPromptQueue = Promise.resolve();
 
 function requestSupervisorPassword() {
@@ -63,14 +63,16 @@ export const api = {
     const token = localStorage.getItem("token") || "anonymous";
     const key = `${token}:${client.getUri({ url: u, params })}`;
     const cached = cachedGets.get(key);
-    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
+    if (isCacheEntryFresh(cached, Date.now())) return Promise.resolve(cached.data);
     if (cached) cachedGets.delete(key);
     const pending = pendingGets.get(key);
     if (pending) return pending;
 
     let request;
     request = client.get(u, { params }).then((r) => {
-      cachedGets.set(key, { data: r.data, expiresAt: Date.now() + GET_CACHE_MS });
+      const cachedAt = Date.now();
+      pruneExpiredCache(cachedGets, cachedAt);
+      cachedGets.set(key, { data: r.data, expiresAt: cachedAt + GET_CACHE_MS });
       return r.data;
     }).finally(() => {
       if (pendingGets.get(key) === request) pendingGets.delete(key);
@@ -78,7 +80,8 @@ export const api = {
     pendingGets.set(key, request);
     return request;
   },
-  getUncached: (u, params) => client.get(u, { params }).then((r) => r.data),
+  getUncached: (u, params, config = {}) => client.get(u, { ...config, params }).then((r) => r.data),
+  getBlob: (u) => client.get(u, { responseType: "blob" }).then((r) => r.data),
   post: (u, d) => client.post(u, d).then((r) => { invalidateGetCache(); return r.data; }),
   put: (u, d) => client.put(u, d).then((r) => { invalidateGetCache(); return r.data; }),
   del: (u) => client.delete(u).then((r) => { invalidateGetCache(); return r.data; }),

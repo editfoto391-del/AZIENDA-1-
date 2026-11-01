@@ -1,11 +1,19 @@
+import { buildPdfSnapshotLayout } from "./pdf-layout.mjs";
+
 export async function elementToPdf(el, filename = "document.pdf") {
   if (!el) throw new Error("PDF target is not ready yet.");
+
+  const { cloneWidth, wrapperWidth } = buildPdfSnapshotLayout({
+    scrollWidth: el.scrollWidth || 0,
+    offsetWidth: el.offsetWidth || 0,
+  });
 
   const clone = el.cloneNode(true);
   clone.style.position = "fixed";
   clone.style.left = "0";
   clone.style.top = "0";
-  clone.style.width = `${el.scrollWidth || el.offsetWidth || 794}px`;
+  clone.style.width = `${cloneWidth}px`;
+  clone.style.minWidth = `${cloneWidth}px`;
   clone.style.maxWidth = "none";
   clone.style.zIndex = "2147483647";
   clone.style.visibility = "visible";
@@ -22,7 +30,7 @@ export async function elementToPdf(el, filename = "document.pdf") {
   wrapper.style.position = "absolute";
   wrapper.style.left = "-99999px";
   wrapper.style.top = "0";
-  wrapper.style.width = "max-content";
+  wrapper.style.width = `${wrapperWidth}px`;
   wrapper.style.pointerEvents = "none";
   wrapper.appendChild(clone);
   document.body.appendChild(wrapper);

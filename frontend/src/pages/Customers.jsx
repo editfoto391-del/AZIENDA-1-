@@ -8,7 +8,7 @@ import { useAuth } from "@/context/AuthContext";
 import { usesUnifiedPriceList } from "@/lib/company";
 import { Users, Search, Plus, Pencil, Eye, Trash2 } from "lucide-react";
 
-const blank = { name: "", phone: "", email: "", address: "", city: "", notes: "", default_zone: 1, payment_terms: "Due on Delivery", active: true };
+const blank = { name: "", client_number: "", phone: "", email: "", address: "", city: "", notes: "", default_zone: 1, payment_terms: "Due on Delivery", active: true };
 
 export default function Customers() {
   const { user } = useAuth();
@@ -87,11 +87,12 @@ export default function Customers() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                <th className="px-4 py-3 font-semibold">Name</th><th className="px-4 font-semibold">Phone</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold">Terms</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
+                <th className="px-4 py-3 font-semibold">Name</th><th className="px-4 font-semibold">Client Number</th><th className="px-4 font-semibold">Phone</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold">Terms</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{filtered.map((c) => (
                 <tr key={c.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`customer-row-${c.id}`}>
                   <td className="px-4 py-3 font-semibold text-slate-800">{c.name}</td>
+                  <td className="px-4 text-slate-500">{c.client_number || "-"}</td>
                   <td className="px-4 text-slate-500">{c.phone || "-"}</td>
                   {!unifiedPriceList && <td className="px-4"><Badge cls="bg-blue-50 text-blue-700 border-blue-200">Zone {c.default_zone}</Badge></td>}
                   <td className="px-4 text-slate-500">{c.payment_terms}</td>
@@ -111,6 +112,7 @@ export default function Customers() {
         {modal && (
           <div className="space-y-4">
             <Input label="Name *" value={modal.name} onChange={(e) => setModal({ ...modal, name: e.target.value })} data-testid="customer-name-input" />
+            <Input label="Client Number" value={modal.client_number || ""} onChange={(e) => setModal({ ...modal, client_number: e.target.value })} data-testid="customer-client-number-input" />
             <div className="grid grid-cols-2 gap-3">
               <Input label="Phone" value={modal.phone} onChange={(e) => setModal({ ...modal, phone: e.target.value })} />
               <Input label="Email" value={modal.email} onChange={(e) => setModal({ ...modal, email: e.target.value })} />

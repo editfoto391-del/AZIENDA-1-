@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { today } from "@/lib/format";
-import { downloadDailyReportPdf } from "@/lib/dailyReportPdf";
+import { downloadDailyReportPdf, downloadHomeReportPdf } from "@/lib/dailyReportPdf";
 import { companyDailyReportName, companyProfileName } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Btn } from "@/components/common";
@@ -38,7 +38,7 @@ function ReportSection({ number, title, columns, rows, totalLabel, total, mainIn
                 <tr key={row?.id || `${number}-row-${index}`}>
                   {columns.map((column, columnIndex) => (
                     <td key={column.key} className={column.align === "right" ? "text-right" : ""}>
-                      {row ? column.render(row, index) : columnIndex === 0 && number !== "04" ? index + 1 : ""}
+                      {row ? column.render(row, index) : columnIndex === 0 && number !== "05" ? index + 1 : ""}
                     </td>
                   ))}
                 </tr>
@@ -126,6 +126,35 @@ function ReportTables({ report }) {
   );
 }
 
+function HomeReportTable({ report }) {
+  return (
+    <div className="daily-report-paper daily-report-home-paper" data-testid="home-daily-report">
+      <header className="daily-report-heading">
+        <div className="daily-report-company">HOME</div>
+        <div className="daily-report-title">DAILY REPORT</div>
+        <div className="daily-report-meta">
+          <span><strong>Date:</strong> {report.date}</span>
+          <span><strong>Day:</strong> {report.day || ""}</span>
+          <span><strong>Section:</strong> Home expenses</span>
+        </div>
+      </header>
+      <ReportSection
+        number="H"
+        title="HOME"
+        columns={[
+          { key: "no", label: "NO", render: (_row, index) => index + 1 },
+          { key: "category", label: "CATEGORY", render: (row) => row.category },
+          { key: "description", label: "DESCRIPTION", render: (row) => row.description },
+          { key: "amount", label: "AMOUNT", align: "right", render: (row) => formatMoney(row.amount) },
+        ]}
+        rows={report.home_expenses || []}
+        totalLabel="Total Home"
+        total={report.totals?.home_expenses}
+      />
+    </div>
+  );
+}
+
 const FINANCIAL_SECTIONS = [
   ["invoices", "Invoices", "Invoices by issue date"],
   ["payments", "Payments received", "Collections by payment date"],
@@ -149,6 +178,36 @@ const MONEY_LABELS = [
   ["grv", "GRV received", "grv_count", "grvs"],
   ["final_profit", "Final profit", null, "profit_reconciliation"],
 ];
+
+function InvoicePaymentsDetails({ invoice }) {
+  const paymentRecords = invoice.payment_records || [];
+  return (
+    <details>
+      <summary className="cursor-pointer text-xs font-semibold text-sky-700">
+        {paymentRecords.length ? `Payment history (${paymentRecords.length})` : "Payment history"}
+      </summary>
+      {paymentRecords.length ? (
+        <div className="mt-2 min-w-72 rounded bg-slate-50 p-2">
+          <div className="grid grid-cols-4 gap-2 text-[10px] font-semibold uppercase text-slate-500">
+            <span>Date</span><span>Method</span><span className="text-right">Paid</span><span className="text-right">BLN (Balance Remaining)</span>
+          </div>
+          {paymentRecords.map((payment) => (
+            <div key={payment.id || `${payment.date}-${payment.amount}`} className="mt-1 grid grid-cols-4 gap-2 text-xs">
+              <span>{String(payment.date || "").slice(0, 10) || "—"}</span>
+              <span>{payment.method || "—"}</span>
+              <span className="text-right">{formatMoney(payment.amount)}</span>
+              <span className="text-right">{payment.balance_remaining == null ? "Unavailable" : formatMoney(payment.balance_remaining)}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-2 text-xs text-slate-500">
+          No dated payment records are available for this invoice.
+        </p>
+      )}
+    </details>
+  );
+}
 
 function FinancialReport({ report, mode, onModeChange, category, onCategoryChange, companies, selectedCompany, onCompanyChange, loading }) {
   const [openedSection, setOpenedSection] = useState("");
@@ -275,19 +334,70 @@ function FinancialReport({ report, mode, onModeChange, category, onCategoryChang
                 {(isOpened || printing) && <div className="overflow-x-auto">
                   <table className="w-full min-w-[700px] text-left text-sm">
                     <thead className="border-y border-slate-200 bg-white text-xs uppercase text-slate-500">
-                      <tr><th className="px-3 py-2">Date</th><th className="px-3 py-2">Description / party</th><th className="px-3 py-2">Category / status</th><th className="px-3 py-2">Reference</th><th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2">Record</th></tr>
+                      {key === "invoices" ? (
+                        <tr>
+                          <th className="px-3 py-2">Invoice date</th><th className="px-3 py-2">Client</th>
+                          <th className="px-3 py-2">Invoice no.</th><th className="px-3 py-2 text-right">Total invoice</th>
+                          <th className="px-3 py-2 text-right">Paid</th><th className="px-3 py-2 text-right">BLN (Balance Remaining)</th>
+                          <th className="px-3 py-2">Invoice / payments</th>
+                        </tr>
+                      ) : key === "payments" ? (
+                        <tr>
+                          <th className="px-3 py-2">Payment date</th><th className="px-3 py-2">Client</th>
+                          <th className="px-3 py-2">Invoice no.</th><th className="px-3 py-2">Method</th>
+                          <th className="px-3 py-2 text-right">Paid</th><th className="px-3 py-2 text-right">BLN (Balance Remaining)</th>
+                          <th className="px-3 py-2">Invoice preview</th>
+                        </tr>
+                      ) : (
+                        <tr><th className="px-3 py-2">Date</th><th className="px-3 py-2">Description / party</th><th className="px-3 py-2">Category / status</th><th className="px-3 py-2">Reference</th><th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2">Record</th></tr>
+                      )}
                     </thead>
                     <tbody>
-                      {visibleRows.length === 0 ? <tr><td colSpan="6" className="px-3 py-5 text-center text-slate-400">No records in this period.</td></tr> : visibleRows.map((row, index) => (
-                        <tr className="border-b border-slate-100 align-top" key={row.id || `${key}-${index}`}>
-                          <td className="whitespace-nowrap px-3 py-2">{String(row.date || "").slice(0, 10)}</td>
-                          <td className="px-3 py-2">{row.description || row.customer_name || row.supplier || row.number || row.grv_number || "—"}{row.supplier && row.description ? <span className="block text-xs text-slate-500">{row.supplier}</span> : null}</td>
-                          <td className="px-3 py-2">{row.status || row.category || row.method || "—"}</td>
-                          <td className="px-3 py-2">{row.reference || row.number || row.invoice_number || "—"}</td>
-                          <td className="whitespace-nowrap px-3 py-2 text-right font-mono">{row.amount === undefined ? "—" : formatMoney(row.amount)}</td>
-                          <td className="px-3 py-2"><details><summary className="cursor-pointer text-xs font-semibold text-sky-700">Details</summary><pre className="mt-2 max-h-64 max-w-xl overflow-auto whitespace-pre-wrap break-words rounded bg-slate-50 p-2 text-[10px]">{JSON.stringify(row.source_record || row, null, 2)}</pre></details></td>
-                        </tr>
-                      ))}
+                      {visibleRows.length === 0 ? <tr><td colSpan="7" className="px-3 py-5 text-center text-slate-400">No records in this period.</td></tr> : visibleRows.map((row, index) => {
+                        if (key === "invoices") {
+                          return (
+                            <tr className="border-b border-slate-100 align-top" key={row.id || `${key}-${index}`}>
+                              <td className="whitespace-nowrap px-3 py-2">{String(row.date || "").slice(0, 10)}</td>
+                              <td className="px-3 py-2">{row.customer_name || "—"}</td>
+                              <td className="px-3 py-2 font-semibold">{row.number || "—"}</td>
+                              <td className="whitespace-nowrap px-3 py-2 text-right font-mono">{formatMoney(row.amount)}</td>
+                              <td className="whitespace-nowrap px-3 py-2 text-right font-mono">{formatMoney(row.amount_paid)}</td>
+                              <td className="whitespace-nowrap px-3 py-2 text-right font-mono">{formatMoney(row.balance_remaining)}</td>
+                              <td className="space-y-2 px-3 py-2">
+                                {row.id && <Link className="block text-xs font-semibold text-sky-700 hover:underline" to={`/invoices/${row.id}`}>Preview invoice</Link>}
+                                <InvoicePaymentsDetails invoice={row} />
+                              </td>
+                            </tr>
+                          );
+                        }
+                        if (key === "payments") {
+                          return (
+                            <tr className="border-b border-slate-100 align-top" key={row.id || `${key}-${index}`}>
+                              <td className="whitespace-nowrap px-3 py-2">{String(row.date || "").slice(0, 10)}</td>
+                              <td className="px-3 py-2">{row.customer_name || row.description || "—"}</td>
+                              <td className="px-3 py-2 font-semibold">{row.invoice_number || "—"}</td>
+                              <td className="px-3 py-2">{row.method || "—"}</td>
+                              <td className="whitespace-nowrap px-3 py-2 text-right font-mono">{formatMoney(row.amount)}</td>
+                              <td className="whitespace-nowrap px-3 py-2 text-right font-mono">{row.balance_remaining == null ? "Unavailable" : formatMoney(row.balance_remaining)}</td>
+                              <td className="px-3 py-2">
+                                {row.invoice_id
+                                  ? <Link className="text-xs font-semibold text-sky-700 hover:underline" to={`/invoices/${row.invoice_id}`}>Preview invoice</Link>
+                                  : <span className="text-xs text-slate-500">Invoice link unavailable</span>}
+                              </td>
+                            </tr>
+                          );
+                        }
+                        return (
+                          <tr className="border-b border-slate-100 align-top" key={row.id || `${key}-${index}`}>
+                            <td className="whitespace-nowrap px-3 py-2">{String(row.date || "").slice(0, 10)}</td>
+                            <td className="px-3 py-2">{row.description || row.customer_name || row.supplier || row.number || row.grv_number || "—"}{row.supplier && row.description ? <span className="block text-xs text-slate-500">{row.supplier}</span> : null}</td>
+                            <td className="px-3 py-2">{row.status || row.category || row.method || "—"}</td>
+                            <td className="px-3 py-2">{row.reference || row.number || row.invoice_number || "—"}</td>
+                            <td className="whitespace-nowrap px-3 py-2 text-right font-mono">{row.amount === undefined ? "—" : formatMoney(row.amount)}</td>
+                            <td className="px-3 py-2"><details><summary className="cursor-pointer text-xs font-semibold text-sky-700">Details</summary><pre className="mt-2 max-h-64 max-w-xl overflow-auto whitespace-pre-wrap break-words rounded bg-slate-50 p-2 text-[10px]">{JSON.stringify(row.source_record || row, null, 2)}</pre></details></td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>}
@@ -337,6 +447,7 @@ export default function DailyReport() {
   const [financialLoading, setFinancialLoading] = useState(false);
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(false);
+  const [downloadingHome, setDownloadingHome] = useState(false);
   const followToday = useRef(true);
   const companyName = report?.company_name || companyDailyReportName(user?.company_id);
   const accessibleCompanies = Array.isArray(user?.company_ids) && user.company_ids.length
@@ -448,6 +559,17 @@ export default function DailyReport() {
     }
   };
 
+  const downloadHomePdf = async () => {
+    setDownloadingHome(true);
+    try {
+      await downloadHomeReportPdf(report);
+    } catch (pdfError) {
+      toast.error(apiError(pdfError));
+    } finally {
+      setDownloadingHome(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -479,7 +601,11 @@ export default function DailyReport() {
         </label>
         {viewMode === "daily" && <Btn onClick={downloadPdf} disabled={!report || loading || downloading} data-testid="daily-report-download-pdf">
           {downloading ? <RefreshCw size={16} className="animate-spin" /> : <Download size={16} />}
-          {downloading ? "Preparing PDF..." : "DOWNLOAD PDF"}
+          {downloading ? "Preparing PDF..." : "DOWNLOAD COMPANY PDF"}
+        </Btn>}
+        {viewMode === "daily" && <Btn variant="outline" onClick={downloadHomePdf} disabled={!report || loading || downloadingHome} data-testid="home-daily-report-download-pdf">
+          {downloadingHome ? <RefreshCw size={16} className="animate-spin" /> : <Download size={16} />}
+          {downloadingHome ? "Preparing PDF..." : "DOWNLOAD HOME PDF"}
         </Btn>}
       </div>
 
@@ -528,6 +654,7 @@ export default function DailyReport() {
           <div role="status" className="daily-report-loading">Report data could not be loaded.</div>
         )}
       </div>}
+      {viewMode === "daily" && !loading && report && <HomeReportTable report={report} />}
       {viewMode !== "daily" && <FinancialReport
         report={financialReport}
         mode={accountingMode}

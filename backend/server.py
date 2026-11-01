@@ -6,13 +6,14 @@ load_dotenv(ROOT_DIR / '.env')
 load_dotenv(ROOT_DIR / '.env.multicompany')
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import json, re
 import shutil
+import calendar
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Literal
 from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
@@ -25,13 +26,30 @@ from pymongo.errors import DuplicateKeyError
 import seed_data
 from costs_math import calculate_production_cost
 from piecework_math import calculate_piecework
-from salary_math import calculate_salary_hours
+from salary_math import (
+    OVERTIME_HOURLY_RATE,
+    STANDARD_PAID_DAYS_PER_WEEK,
+    STANDARD_WEEKLY_HOURS,
+    calculate_salary_hours,
+)
 from grv_math import (
     aggregate_accepted_stock_lines,
     grv_confirmation_status,
     validate_grv_line_quantities,
 )
 from tenancy import DEFAULT_COMPANY_ID, GLOBAL_COLLECTIONS, ScopedDatabase, active_company_id, tenant_database, uses_unified_price_list
+from attendance_math import summarize_attendance_records
+from workflow_engine import (
+    ACTION_DEFINITIONS,
+    OPERATORS_BY_TYPE,
+    TRIGGER_DEFINITIONS,
+    WorkflowValidationError,
+    evaluate_conditions,
+    event_payload,
+    render_action_template,
+    validate_workflow_definition,
+    validate_event_payload,
+)
 from backup_service import (
     backup_configuration,
     create_snapshot,
@@ -52,6 +70,7 @@ JWT_ALGO = "HS256"
 app = FastAPI()
 api = APIRouter(prefix="/api")
 backup_scheduler_task = None
+fleet_notification_scheduler_task = None
 
 
 def now_iso():
@@ -257,6 +276,19 @@ def canonical_email(email):
         return os.environ["ADMIN_EMAIL"].strip().lower()
     return normalized
 
+
+def is_global_owner_account(user):
+    return (
+        user.get("role") == "owner"
+        and not user.get("is_worker")
+        and canonical_email(user.get("email")) == canonical_email(os.environ["ADMIN_EMAIL"])
+    )
+
+
+def require_global_owner(user):
+    if not is_global_owner_account(user):
+        raise HTTPException(403, "Global Owner access required")
+
 async def user_from_session(token):
     s = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
     if not s:
@@ -361,6 +393,8 @@ def enforce_worker_api_access(request, user):
             return
         if re.fullmatch(r"invoices/[^/]+/authorize-action", path) and method == "POST":
             return
+        if re.fullmatch(r"invoices/[^/]+/daily-report", path) and method == "POST":
+            return
         if re.fullmatch(r"invoices/[^/]+/issue", path) and method == "POST":
             return
         if "client-payments" in allowed and re.fullmatch(r"invoices/[^/]+/payments", path) and method == "POST":
@@ -380,6 +414,7 @@ def enforce_worker_api_access(request, user):
         return
 
     support_rules = {
+        "invoices": [("drivers", "GET")],
         "buyings": [("suppliers", "GET"), ("stock", "GET")],
         "grv": [
             ("suppliers", "GET"), ("stock", "GET"),
@@ -418,6 +453,7 @@ def enforce_worker_api_access(request, user):
         "buyings": "buyings",
         "invoices": "invoices",
         "orders": "orders",
+        "intercompany": "orders",
         "stock": "stock",
         "production": "production",
         "simple-production": "production",
@@ -530,6 +566,8 @@ async def get_current_user(request: Request):
         if user:
             user = await authorize_company(user, user.get("_active_company_id") or DEFAULT_COMPANY_ID,
                                            user.get("_session_id"))
+            if request.url.path.startswith("/api/workflow-builder"):
+                require_global_owner(user)
             enforce_worker_api_access(request, user)
             await require_supervisor_for_company_write(request, user)
             return user
@@ -544,6 +582,8 @@ async def get_current_user(request: Request):
     except jwt.InvalidTokenError:
         user = await user_from_session(token)
         if user:
+            if request.url.path.startswith("/api/workflow-builder"):
+                require_global_owner(user)
             enforce_worker_api_access(request, user)
             await require_supervisor_for_company_write(request, user)
             return user
@@ -565,6 +605,8 @@ async def get_current_user(request: Request):
         if expires_at and expires_at < datetime.now(timezone.utc):
             raise HTTPException(401, "Worker session has expired")
     user = await authorize_company(user, payload.get("company_id") or DEFAULT_COMPANY_ID, payload.get("sid"))
+    if request.url.path.startswith("/api/workflow-builder"):
+        require_global_owner(user)
     enforce_worker_api_access(request, user)
     await require_supervisor_for_company_write(request, user)
     return user
@@ -644,6 +686,27 @@ class BackupRestoreIn(BaseModel):
 class SwitchCompanyIn(BaseModel):
     company_id: str
 
+class WorkflowDefinitionIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    company_id: str
+    name: str
+    trigger: str
+    logic: str = "all"
+    conditions: List[dict] = Field(default_factory=list)
+    actions: List[dict]
+    enabled: bool = False
+
+class WorkflowToggleIn(BaseModel):
+    enabled: bool
+
+class WorkflowDryRunIn(BaseModel):
+    event_data: dict = Field(default_factory=dict)
+
+class WorkflowApprovalDecisionIn(BaseModel):
+    decision: str
+    note: Optional[str] = Field(default="", max_length=500)
+
 def public_user(u):
     company_id = u.get("_active_company_id") or DEFAULT_COMPANY_ID
     role = u.get("_active_role") or company_role(u, company_id) or u.get("role", "user")
@@ -700,6 +763,422 @@ def require_profile_owner(user):
 
 def is_company_admin(user):
     return user.get("role") in ("owner", "admin") or user.get("_active_role") in ("owner", "admin")
+
+
+def _validate_workflow_company(company_id):
+    profile = next((item for item in COMPANY_PROFILES if item["id"] == company_id), None)
+    if not profile:
+        raise HTTPException(400, "Select a valid company")
+    return profile
+
+
+def _workflow_database(company_id):
+    _validate_workflow_company(company_id)
+    return tenant_database(client, base_db, company_id)
+
+
+async def _workflow_company(company_id):
+    profile = _validate_workflow_company(company_id)
+    company = await base_db.companies.find_one(
+        {"id": company_id, "active": True}, {"_id": 0, "id": 1},
+    )
+    if not company:
+        raise HTTPException(403, "Company is unavailable")
+    return profile
+
+
+async def _get_workflow_or_404(workflow_id, company_id):
+    workflow = await _workflow_database(company_id).workflows.find_one(
+        {"id": workflow_id, "company_id": company_id}, {"_id": 0},
+    )
+    if not workflow:
+        raise HTTPException(404, "Workflow not found in this company")
+    return workflow
+
+
+@api.get("/workflow-builder/catalog")
+async def workflow_catalog(user=Depends(get_current_user)):
+    require_global_owner(user)
+    return {
+        "companies": [{"id": item["id"], "name": item["name"]} for item in COMPANY_PROFILES],
+        "triggers": [
+            {"id": key, "label": item["label"], "fields": item["fields"]}
+            for key, item in TRIGGER_DEFINITIONS.items()
+        ],
+        "operators": OPERATORS_BY_TYPE,
+        "actions": [{"id": key, "label": value} for key, value in ACTION_DEFINITIONS.items()],
+    }
+
+
+@api.get("/workflow-builder")
+async def get_workflows(company_id: str, user=Depends(get_current_user)):
+    require_global_owner(user)
+    await _workflow_company(company_id)
+    workflow_db = _workflow_database(company_id)
+    workflows = await workflow_db.workflows.find(
+        {"company_id": company_id}, {"_id": 0},
+    ).sort("updated_at", -1).to_list(None)
+    for workflow in workflows:
+        workflow["last_execution"] = await workflow_db.workflow_runs.find_one(
+            {"company_id": company_id, "workflow_id": workflow["id"]},
+            {
+                "_id": 0,
+                "started_at": 1,
+                "completed_at": 1,
+                "result": 1,
+                "duration_ms": 1,
+            },
+            sort=[("started_at", -1)],
+        )
+    return workflows
+
+
+@api.post("/workflow-builder")
+async def create_workflow(body: WorkflowDefinitionIn, user=Depends(get_current_user)):
+    require_global_owner(user)
+    await _workflow_company(body.company_id)
+    try:
+        definition = validate_workflow_definition(body.model_dump(exclude={"company_id"}))
+    except WorkflowValidationError as error:
+        raise HTTPException(400, str(error)) from error
+    timestamp = now_iso()
+    workflow = {
+        **definition,
+        "id": new_id(),
+        "company_id": body.company_id,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "created_by": user["id"],
+        "updated_by": user["id"],
+    }
+    await _workflow_database(body.company_id).workflows.insert_one(dict(workflow))
+    return workflow
+
+
+@api.put("/workflow-builder/{workflow_id}")
+async def edit_workflow(workflow_id: str, body: WorkflowDefinitionIn, user=Depends(get_current_user)):
+    require_global_owner(user)
+    await _workflow_company(body.company_id)
+    await _get_workflow_or_404(workflow_id, body.company_id)
+    try:
+        definition = validate_workflow_definition(body.model_dump(exclude={"company_id"}))
+    except WorkflowValidationError as error:
+        raise HTTPException(400, str(error)) from error
+    await _workflow_database(body.company_id).workflows.update_one(
+        {"id": workflow_id, "company_id": body.company_id},
+        {"$set": {**definition, "updated_at": now_iso(), "updated_by": user["id"]}},
+    )
+    return await _get_workflow_or_404(workflow_id, body.company_id)
+
+
+@api.post("/workflow-builder/{workflow_id}/duplicate")
+async def duplicate_workflow(workflow_id: str, company_id: str, user=Depends(get_current_user)):
+    require_global_owner(user)
+    await _workflow_company(company_id)
+    source = await _get_workflow_or_404(workflow_id, company_id)
+    timestamp = now_iso()
+    duplicate = {
+        **{key: value for key, value in source.items()
+           if key not in {"id", "created_at", "updated_at", "created_by", "updated_by"}},
+        "id": new_id(),
+        "name": f"{source['name']} (copy)"[:120],
+        "enabled": False,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "created_by": user["id"],
+        "updated_by": user["id"],
+    }
+    await _workflow_database(company_id).workflows.insert_one(dict(duplicate))
+    return duplicate
+
+
+@api.post("/workflow-builder/{workflow_id}/status")
+async def set_workflow_status(
+    workflow_id: str, body: WorkflowToggleIn, company_id: str, user=Depends(get_current_user),
+):
+    require_global_owner(user)
+    await _workflow_company(company_id)
+    await _get_workflow_or_404(workflow_id, company_id)
+    await _workflow_database(company_id).workflows.update_one(
+        {"id": workflow_id, "company_id": company_id},
+        {"$set": {"enabled": body.enabled, "updated_at": now_iso(), "updated_by": user["id"]}},
+    )
+    return await _get_workflow_or_404(workflow_id, company_id)
+
+
+@api.post("/workflow-builder/{workflow_id}/test")
+async def dry_run_workflow(
+    workflow_id: str, body: WorkflowDryRunIn, company_id: str, user=Depends(get_current_user),
+):
+    require_global_owner(user)
+    await _workflow_company(company_id)
+    workflow = await _get_workflow_or_404(workflow_id, company_id)
+    try:
+        payload = validate_event_payload(workflow["trigger"], body.event_data)
+        matched, evaluated = evaluate_conditions(
+            workflow["trigger"], workflow["conditions"], workflow["logic"], payload,
+        )
+    except (WorkflowValidationError, KeyError) as error:
+        raise HTTPException(400, str(error)) from error
+    started = datetime.now(timezone.utc)
+    completed = datetime.now(timezone.utc)
+    run = {
+        "id": new_id(),
+        "workflow_id": workflow["id"],
+        "workflow_name": workflow["name"],
+        "company_id": company_id,
+        "trigger": workflow["trigger"],
+        "event_id": f"dry-run:{new_id()}",
+        "started_at": started.isoformat(),
+        "completed_at": completed.isoformat(),
+        "duration_ms": 0,
+        "dry_run": True,
+        "conditions_evaluated": evaluated,
+        "actions_attempted": [
+            {"type": action["type"], "status": "dry_run"}
+            for action in (workflow["actions"] if matched else [])
+        ],
+        "actions_completed": [],
+        "actions_requiring_approval": [],
+        "result": "dry_run_matched" if matched else "dry_run_no_match",
+        "error_details": [],
+    }
+    await _workflow_database(company_id).workflow_runs.insert_one(dict(run))
+    return {
+        "matched": matched,
+        "conditions_evaluated": evaluated,
+        "actions": run["actions_attempted"],
+        "run_id": run["id"],
+        "dry_run": True,
+    }
+
+
+@api.delete("/workflow-builder/{workflow_id}")
+async def delete_workflow(workflow_id: str, company_id: str, user=Depends(get_current_user)):
+    require_global_owner(user)
+    await _workflow_company(company_id)
+    workflow = await _get_workflow_or_404(workflow_id, company_id)
+    await _workflow_database(company_id).workflows.delete_one({"id": workflow_id, "company_id": company_id})
+    await _workflow_database(company_id).workflow_runs.update_many(
+        {"workflow_id": workflow_id, "company_id": company_id},
+        {"$set": {"workflow_deleted": True, "workflow_name": workflow["name"]}},
+    )
+    return {"ok": True, "deleted": True}
+
+
+@api.get("/workflow-builder/runs")
+async def get_workflow_runs(
+    company_id: str,
+    workflow_id: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    user=Depends(get_current_user),
+):
+    require_global_owner(user)
+    await _workflow_company(company_id)
+    query = {"company_id": company_id}
+    if workflow_id:
+        query["workflow_id"] = workflow_id
+    workflow_db = _workflow_database(company_id)
+    total = await workflow_db.workflow_runs.count_documents(query)
+    records = await workflow_db.workflow_runs.find(query, {"_id": 0}).sort(
+        "started_at", -1,
+    ).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    return {"items": records, "page": page, "page_size": page_size, "total": total}
+
+
+@api.get("/workflow-builder/outputs")
+async def get_workflow_outputs(
+    company_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    user=Depends(get_current_user),
+):
+    require_global_owner(user)
+    await _workflow_company(company_id)
+    query = {"company_id": company_id}
+    workflow_db = _workflow_database(company_id)
+    total = await workflow_db.workflow_artifacts.count_documents(query)
+    records = await workflow_db.workflow_artifacts.find(query, {"_id": 0}).sort(
+        "created_at", -1,
+    ).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    return {"items": records, "page": page, "page_size": page_size, "total": total}
+
+
+@api.post("/workflow-builder/outputs/{output_id}/decision")
+async def decide_workflow_approval(
+    output_id: str,
+    body: WorkflowApprovalDecisionIn,
+    company_id: str,
+    user=Depends(get_current_user),
+):
+    require_global_owner(user)
+    await _workflow_company(company_id)
+    if body.decision not in ("approved", "rejected"):
+        raise HTTPException(400, "Decision must be approved or rejected")
+    updated = await _workflow_database(company_id).workflow_artifacts.find_one_and_update(
+        {
+            "id": output_id,
+            "company_id": company_id,
+            "type": "request_global_owner_approval",
+            "status": "pending",
+        },
+        {"$set": {
+            "status": body.decision,
+            "decision_note": (body.note or "").strip(),
+            "decided_by": user["id"],
+            "decided_at": now_iso(),
+        }},
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        raise HTTPException(404, "Pending approval request not found")
+    return updated
+
+
+async def emit_workflow_event(trigger, record):
+    company_id = active_company_id.get()
+    if trigger not in TRIGGER_DEFINITIONS or company_id not in {
+        profile["id"] for profile in COMPANY_PROFILES
+    }:
+        return
+    workflow_db = _workflow_database(company_id)
+    try:
+        payload = validate_event_payload(trigger, event_payload(trigger, record or {}))
+        workflows = await workflow_db.workflows.find(
+            {"company_id": company_id, "trigger": trigger, "enabled": True},
+            {"_id": 0},
+        ).to_list(None)
+    except Exception:
+        logging.exception("Could not load workflows for %s in %s", trigger, company_id)
+        return
+
+    for workflow in workflows:
+        if workflow.get("company_id") != company_id or workflow.get("enabled") is not True:
+            continue
+        try:
+            safe_definition = validate_workflow_definition(workflow)
+        except WorkflowValidationError:
+            logging.error(
+                "Skipping invalid stored workflow %s in company %s",
+                workflow.get("id"),
+                company_id,
+            )
+            continue
+        workflow = {**workflow, **safe_definition}
+        started = datetime.now(timezone.utc)
+        event_reference = str(record.get("id") or "")
+        event_version = record.get("updated_at") or record.get("created_at") or ""
+        event_id = f"{trigger}:{event_reference}:{event_version}"
+        run = {
+            "id": new_id(),
+            "workflow_id": workflow["id"],
+            "workflow_name": workflow["name"],
+            "company_id": company_id,
+            "trigger": trigger,
+            "event_id": event_id,
+            "event_reference": event_reference,
+            "started_at": started.isoformat(),
+            "completed_at": None,
+            "duration_ms": 0,
+            "dry_run": False,
+            "conditions_evaluated": [],
+            "actions_attempted": [],
+            "actions_completed": [],
+            "actions_requiring_approval": [],
+            "result": "running",
+            "error_details": [],
+        }
+        try:
+            await workflow_db.workflow_runs.insert_one(dict(run))
+        except DuplicateKeyError:
+            continue
+        except Exception:
+            logging.exception("Could not claim workflow execution %s", workflow.get("id"))
+            continue
+
+        try:
+            matched, evaluated = evaluate_conditions(
+                trigger, workflow.get("conditions", []), workflow.get("logic", "all"), payload,
+            )
+            run["conditions_evaluated"] = evaluated
+            if not matched:
+                run["result"] = "conditions_not_met"
+            else:
+                completed_actions = []
+                failed_actions = []
+                approvals = []
+                for action in workflow.get("actions", []):
+                    attempted = {"type": action["type"], "status": "attempted"}
+                    run["actions_attempted"].append(attempted)
+                    artifact_id = new_id()
+                    title = render_action_template(
+                        action.get("title") or ACTION_DEFINITIONS[action["type"]], payload,
+                    )
+                    artifact = {
+                        "id": artifact_id,
+                        "company_id": company_id,
+                        "workflow_id": workflow["id"],
+                        "workflow_name": workflow["name"],
+                        "type": action["type"],
+                        "title": title,
+                        "message": render_action_template(action["message"], payload),
+                        "source_trigger": trigger,
+                        "source_event_id": event_id,
+                        "status": "pending" if action["type"] == "request_global_owner_approval" else "prepared",
+                        "created_at": now_iso(),
+                    }
+                    try:
+                        await workflow_db.workflow_artifacts.insert_one(artifact)
+                        attempted["status"] = "completed"
+                        completed_actions.append(action["type"])
+                        if action["type"] == "request_global_owner_approval":
+                            approvals.append(artifact_id)
+                    except Exception as error:
+                        attempted["status"] = "failed"
+                        failed_actions.append(action["type"])
+                        run["error_details"].append(
+                            f"{action['type']}: {type(error).__name__}: {str(error)[:400]}"
+                        )
+                run["actions_completed"] = completed_actions
+                run["actions_requiring_approval"] = approvals
+                if failed_actions and completed_actions:
+                    run["result"] = "partial"
+                elif failed_actions:
+                    run["result"] = "failed"
+                else:
+                    run["result"] = "success"
+            completed = datetime.now(timezone.utc)
+            run["completed_at"] = completed.isoformat()
+            run["duration_ms"] = max(0, int((completed - started).total_seconds() * 1000))
+            await workflow_db.workflow_runs.update_one(
+                {"id": run["id"], "company_id": company_id},
+                {"$set": {
+                    key: value for key, value in run.items()
+                    if key not in {"id", "workflow_id", "company_id", "trigger", "event_id"}
+                }},
+            )
+        except Exception as error:
+            logging.exception("Workflow execution failed for %s", workflow.get("id"))
+            completed = datetime.now(timezone.utc)
+            run.update({
+                "completed_at": completed.isoformat(),
+                "duration_ms": max(0, int((completed - started).total_seconds() * 1000)),
+                "result": "failed",
+                "error_details": [f"{type(error).__name__}: {str(error)[:400]}"],
+            })
+            try:
+                await workflow_db.workflow_runs.update_one(
+                    {"id": run["id"], "company_id": company_id},
+                    {"$set": {
+                        key: value for key, value in run.items()
+                        if key not in {"id", "workflow_id", "company_id", "trigger", "event_id"}
+                    }},
+                )
+            except Exception:
+                logging.exception("Could not record workflow execution failure %s", run["id"])
+
 
 @api.post("/auth/register")
 async def register(body: RegisterIn, user=Depends(get_current_user)):
@@ -1668,6 +2147,7 @@ async def listall(coll, flt=None, sort=None, limit=5000):
 # ---------------- Customers ----------------
 class CustomerIn(BaseModel):
     name: str
+    client_number: Optional[str] = ""
     phone: Optional[str] = ""
     email: Optional[str] = ""
     address: Optional[str] = ""
@@ -1686,14 +2166,18 @@ async def add_customer(body: CustomerIn, user=Depends(get_current_user)):
     data = body.model_dump()
     if uses_unified_price_list(active_company_id.get()):
         data["default_zone"] = 1
-    return await insert("customers", data)
+    record = await insert("customers", data)
+    await emit_workflow_event("customer.created", record)
+    return record
 
 @api.put("/customers/{cid}")
 async def edit_customer(cid: str, body: CustomerIn, user=Depends(get_current_user)):
     data = body.model_dump()
     if uses_unified_price_list(active_company_id.get()):
         data["default_zone"] = 1
-    return await update_doc("customers", cid, data)
+    record = await update_doc("customers", cid, data)
+    await emit_workflow_event("customer.updated", record)
+    return record
 
 @api.delete("/customers/{cid}")
 async def delete_customer(cid: str, user=Depends(get_current_user)):
@@ -1725,13 +2209,32 @@ async def delete_customer(cid: str, user=Depends(get_current_user)):
     return {"ok": True, "archived": True}
 
 @api.get("/customers/{cid}/summary")
-async def customer_summary(cid: str, user=Depends(get_current_user)):
+async def customer_summary(
+    cid: str,
+    express_only: bool = False,
+    invoice_type: Optional[Literal["standard", "express"]] = None,
+    user=Depends(get_current_user),
+):
+    invoice_query = {"customer_id": cid, "archived": {"$ne": True}}
+    if express_only:
+        invoice_query["invoice_type"] = "express"
+    elif invoice_type == "express":
+        invoice_query["invoice_type"] = "express"
+    elif invoice_type == "standard":
+        invoice_query["invoice_type"] = {"$ne": "express"}
     invs, payment_records, orders, dels = await asyncio.gather(
-        listall("invoices", {"customer_id": cid, "archived": {"$ne": True}}, ("created_at", -1)),
+        listall("invoices", invoice_query, ("created_at", -1)),
         listall("payments", {"customer_id": cid}, ("created_at", -1)),
         listall("orders", {"customer_id": cid, "archived": {"$ne": True}}, ("created_at", -1)),
         listall("deliveries", {"customer_id": cid, "archived": {"$ne": True}}, ("created_at", -1)),
     )
+    if express_only or invoice_type:
+        invoice_ids = [invoice["id"] for invoice in invs]
+        payment_records = await listall(
+            "payments",
+            {"customer_id": cid, "invoice_id": {"$in": invoice_ids}},
+            ("created_at", -1),
+        ) if invoice_ids else []
     for i in invs:
         i["status"] = derive_status(i)
     valid = [i for i in invs if i["status"] not in ("void", "draft")]
@@ -1809,10 +2312,10 @@ def price_category(zone, category):
         if category == "Candy":
             return "Ribbon Black"
         return category
+    if category in ("Simple", "Simple/Mix color"):
+        return "Standard"
     if category == "Candy":
         return "Ribbon Black"
-    if category == "Simple/Mix color":
-        return "Standard"
     return category
 
 def is_manual_only(category, size):
@@ -1842,7 +2345,12 @@ def compute_invoice(inv):
         lt = q(D(it.get("qty")) * D(it.get("unit_price")))
         it["line_total"] = float(lt)
         subtotal += lt
-    taxed = max(subtotal - D(inv.get("discount")) + D(inv.get("extra_charges")), Decimal("0"))
+    taxed = max(
+        subtotal - D(inv.get("discount"))
+        + D(inv.get("extra_charges"))
+        + D(inv.get("delivery_fee")),
+        Decimal("0"),
+    )
     tax_amount = q(taxed * D(inv.get("tax_rate")) / 100) if inv.get("tax_enabled") else Decimal("0")
     total = q(taxed + tax_amount)
     paid = q(D(inv.get("amount_paid")))
@@ -1896,6 +2404,12 @@ class InvoiceItem(BaseModel):
     tax: bool = False
     order_id: Optional[str] = ""
 
+class PreviousInvoiceBalanceIn(BaseModel):
+    id: str
+    date: str = ""
+    number: Optional[str] = ""
+    outstanding: float
+
 class InvoiceIn(BaseModel):
     customer_id: Optional[str] = ""
     customer_name: str = ""
@@ -1910,9 +2424,18 @@ class InvoiceIn(BaseModel):
     items: List[InvoiceItem] = []
     discount: float = 0
     extra_charges: float = 0
+    delivery_fee: float = 0
+    made_by: str = ""
+    client_number: Optional[str] = ""
+    assigned_driver_id: Optional[str] = ""
+    assigned_driver_name: Optional[str] = ""
+    idempotency_key: str = Field(default="", max_length=100)
+    intercompany_request_id: Optional[str] = ""
     tax_enabled: bool = False
     tax_rate: float = 0
     status: str = "draft"
+    invoice_type: Literal["standard", "express"] = "standard"
+    previous_invoices_pending: List[PreviousInvoiceBalanceIn] = Field(default_factory=list)
     edit_reason: Optional[str] = ""
     opening_balance: Optional[bool] = None
     deduct_stock: bool = False
@@ -1934,7 +2457,19 @@ class InvoiceIssueIn(BaseModel):
     deduct_stock: bool = False
     allow_negative_stock: bool = False
 
-INV_DIFF_FIELDS = ("customer_name", "date", "due_date", "zone", "payment_terms", "reference", "destination", "notes", "discount", "extra_charges", "tax_enabled", "total")
+INV_DIFF_FIELDS = (
+    "customer_name", "date", "due_date", "zone", "payment_terms", "reference",
+    "destination", "notes", "discount", "extra_charges", "delivery_fee",
+    "made_by", "client_number", "assigned_driver_name", "tax_enabled", "total",
+)
+
+def invoice_submission_hash(body):
+    payload = body.model_dump(exclude={
+        "idempotency_key", "supervisor_authorization", "edit_reason",
+    })
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
 
 def _line_str(it):
     label = " ".join(x for x in (it.get("category"), it.get("size")) if x) or it.get("description") or "item"
@@ -1951,9 +2486,10 @@ def invoice_numbering_year(invoice_date=None):
     year_match = re.match(r"^(\d{4})", str(invoice_date or ""))
     return int(year_match.group(1)) if year_match else local_now().year
 
-async def invoice_sequence_start(year):
+async def invoice_sequence_start(year, invoice_type="standard"):
+    invoice_type_filter = "express" if invoice_type == "express" else {"$ne": "express"}
     invoices = await db.invoices.find(
-        {"numbering_year": year},
+        {"numbering_year": year, "invoice_type": invoice_type_filter},
         {"_id": 0, "number": 1},
     ).to_list(None)
     legacy_numbers = [
@@ -1963,38 +2499,78 @@ async def invoice_sequence_start(year):
     ]
     return max(legacy_numbers, default=0)
 
-async def current_invoice_sequence(year=None):
+async def current_invoice_sequence(year=None, invoice_type="standard"):
     year = year or local_now().year
-    counter_id = f"invoice-sequence-{year}"
+    counter_id = f"express-invoice-sequence-{year}" if invoice_type == "express" else f"invoice-sequence-{year}"
     counter = await db.counters.find_one({"_id": counter_id})
     if counter:
         return int(counter["seq"])
-    return await invoice_sequence_start(year)
+    return await invoice_sequence_start(year, invoice_type)
 
-async def next_invoice_number(invoice_date=None):
+async def next_invoice_number(invoice_date=None, invoice_type="standard"):
     year = invoice_numbering_year(invoice_date)
-    counter_id = f"invoice-sequence-{year}"
+    counter_id = f"express-invoice-sequence-{year}" if invoice_type == "express" else f"invoice-sequence-{year}"
     counter = await db.counters.find_one({"_id": counter_id})
     if not counter:
-        initial_seq = await invoice_sequence_start(year)
+        initial_seq = await invoice_sequence_start(year, invoice_type)
         try:
             await db.counters.insert_one({"_id": counter_id, "seq": initial_seq + 1})
-            return f"{initial_seq + 1:02d}"
+            number = f"{initial_seq + 1:02d}"
+            return f"EW-{number}" if invoice_type == "express" else number
         except DuplicateKeyError:
             pass
     counter = await db.counters.find_one_and_update(
         {"_id": counter_id}, {"$inc": {"seq": 1}},
         return_document=ReturnDocument.AFTER)
-    return f"{counter['seq']:02d}"
+    number = f"{counter['seq']:02d}"
+    return f"EW-{number}" if invoice_type == "express" else number
 
 @api.get("/invoices/next-number")
-async def get_next_number(year: Optional[int] = None, user=Depends(get_current_user)):
-    return {"number": f"{(await current_invoice_sequence(year)) + 1:02d}"}
+async def get_next_number(year: Optional[int] = None, express: bool = False, user=Depends(get_current_user)):
+    sequence = await current_invoice_sequence(year, "express" if express else "standard")
+    number = f"{sequence + 1:02d}"
+    return {"number": f"EW-{number}" if express else number}
+
+def invoice_list_query(express=False, include_archived=False):
+    query = {} if include_archived else {"archived": {"$ne": True}}
+    query["invoice_type"] = "express" if express else {"$ne": "express"}
+    return query
+
+def previous_invoice_query(customer_id, invoice_type, invoice_date, exclude_id=None):
+    query = {
+        "customer_id": customer_id,
+        "date": {"$lt": invoice_date},
+        "archived": {"$ne": True},
+        "status": {"$nin": ["draft", "void"]},
+        "invoice_type": "express" if invoice_type == "express" else {"$ne": "express"},
+    }
+    if exclude_id:
+        query["id"] = {"$ne": exclude_id}
+    return query
+
+async def previous_invoice_balances(customer_id, invoice_type, invoice_date, exclude_id=None):
+    if not customer_id or not invoice_date:
+        return []
+    records = await db.invoices.find(
+        previous_invoice_query(customer_id, invoice_type, invoice_date, exclude_id),
+        {"_id": 0},
+    ).to_list(None)
+    pending = []
+    for invoice in records:
+        compute_invoice(invoice)
+        if derive_status(invoice) in ("draft", "void") or r2(invoice.get("outstanding", 0)) <= 0:
+            continue
+        pending.append({
+            "id": invoice["id"],
+            "date": invoice.get("date", ""),
+            "number": invoice.get("number", ""),
+            "outstanding": r2(invoice.get("outstanding", 0)),
+        })
+    return sorted(pending, key=lambda invoice: (invoice["date"], invoice.get("number") or ""))
 
 @api.get("/invoices")
-async def get_invoices(include_archived: bool = False, user=Depends(get_current_user)):
-    query = {} if include_archived else {"archived": {"$ne": True}}
-    invs = await listall("invoices", query, ("created_at", -1))
+async def get_invoices(include_archived: bool = False, express: bool = False, user=Depends(get_current_user)):
+    invs = await listall("invoices", invoice_list_query(express, include_archived), ("created_at", -1))
     for i in invs:
         i["status"] = derive_status(i)
     return invs
@@ -2007,6 +2583,24 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
     inv["status"] = derive_status(inv)
     inv["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
     return inv
+
+class DailyReportInclusionIn(BaseModel):
+    included: bool
+
+@api.post("/invoices/{iid}/daily-report")
+async def set_invoice_daily_report_inclusion(iid: str, body: DailyReportInclusionIn, user=Depends(get_current_user)):
+    invoice = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    if invoice.get("invoice_type") != "express":
+        raise HTTPException(400, "Only Express Website invoices can be included separately in the daily report")
+    updated = await update_doc("invoices", iid, {"include_on_daily_report": body.included})
+    await log_audit(
+        "invoice", iid, "daily_report_inclusion_updated", user,
+        before={"include_on_daily_report": invoice.get("include_on_daily_report", False)},
+        after={"include_on_daily_report": body.included},
+    )
+    return updated
 
 async def authenticate_supervisor(password, user, allow_skip=True):
     if allow_skip and can_skip_supervisor_approval(user):
@@ -2216,7 +2810,7 @@ async def bulk_delete_invoices(body: BulkDeleteIn, user=Depends(get_current_user
         n += await _archive_invoice(iid, user, body.reason or "", body.restore_stock)
     return {"archived": n, "stock_restored": body.restore_stock}
 
-async def _prepare_invoice(body: InvoiceIn):
+async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
     customer_id = (body.customer_id or "").strip()
     cust = await db.customers.find_one({"id": customer_id}) if customer_id else None
     if customer_id and not cust:
@@ -2228,15 +2822,61 @@ async def _prepare_invoice(body: InvoiceIn):
     inv.pop("allow_negative_stock", None)
     inv.pop("supervisor_authorization", None)
     inv["customer_id"] = customer_id
+    if not inv.get("idempotency_key"):
+        inv.pop("idempotency_key", None)
     if inv.get("opening_balance") is None or inv.get("opening_balance") is False:
         inv.pop("opening_balance", None)
     if uses_unified_price_list(active_company_id.get()):
         inv["zone"] = 1
-    if inv.get("discount", 0) < 0 or inv.get("extra_charges", 0) < 0 or inv.get("tax_rate", 0) < 0:
-        raise HTTPException(400, "Discount, additional charges and tax rate cannot be negative")
+    if any(inv.get(field, 0) < 0 for field in ("discount", "extra_charges", "delivery_fee", "tax_rate")):
+        raise HTTPException(400, "Discount, additional charges, delivery fee and tax rate cannot be negative")
     if any((it.get("unit_price") or 0) < 0 for it in inv.get("items", [])):
         raise HTTPException(400, "Unit prices cannot be negative")
     inv["customer_name"] = cust["name"] if cust else body.customer_name.strip()
+    submitted_client_number = (body.client_number or "").strip()
+    can_edit_client_number = bool(
+        user and (
+            not user.get("is_worker")
+            or "customers" in (user.get("worker_allowed_sections") or [])
+        )
+    )
+    if cust:
+        stored_client_number = (cust.get("client_number") or "").strip()
+        if submitted_client_number and submitted_client_number != stored_client_number and not can_edit_client_number:
+            raise HTTPException(403, "You cannot override this customer's client number")
+        inv["client_number"] = (
+            submitted_client_number if can_edit_client_number and submitted_client_number
+            else stored_client_number
+        )
+    elif submitted_client_number and not can_edit_client_number:
+        raise HTTPException(403, "You cannot set a client number for this customer")
+    else:
+        inv["client_number"] = submitted_client_number
+    driver_id = (body.assigned_driver_id or "").strip()
+    if driver_id:
+        driver = await db.drivers.find_one({"id": driver_id}, {"_id": 0})
+        if not driver:
+            raise HTTPException(400, "Assigned driver not found in this company")
+        inv["assigned_driver_id"] = driver_id
+        inv["assigned_driver_name"] = driver.get("name", "")
+    else:
+        inv["assigned_driver_id"] = ""
+        inv["assigned_driver_name"] = ""
+    if existing is not None:
+        if existing.get("made_by") is None:
+            inv.pop("made_by", None)
+            inv.pop("made_by_user_id", None)
+        else:
+            inv["made_by"] = existing.get("made_by", "")
+            if existing.get("made_by_user_id"):
+                inv["made_by_user_id"] = existing["made_by_user_id"]
+    else:
+        authenticated_name = (user or {}).get("name") or (user or {}).get("username") or ""
+        if not authenticated_name:
+            raise HTTPException(400, "Made By is required")
+        inv["made_by"] = authenticated_name
+        if user and user.get("id"):
+            inv["made_by_user_id"] = user["id"]
     if not inv.get("due_date"):
         inv["due_date"] = inv["date"]
     inv["amount_paid"] = 0
@@ -2246,11 +2886,27 @@ async def _prepare_invoice(body: InvoiceIn):
 @api.post("/invoices")
 async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
     deduct_stock = body.deduct_stock
-    inv = await _prepare_invoice(body)
+    inv = await _prepare_invoice(body, user=user)
+    if body.idempotency_key:
+        submission_hash = invoice_submission_hash(body)
+        existing_submission = await db.invoices.find_one(
+            {"idempotency_key": body.idempotency_key}, {"_id": 0},
+        )
+        if existing_submission:
+            if existing_submission.get("submission_payload_hash") != submission_hash:
+                raise HTTPException(409, "This invoice submission key was already used for different invoice data")
+            return existing_submission
+        inv["idempotency_key"] = body.idempotency_key
+        inv["submission_payload_hash"] = submission_hash
+    inv["previous_invoices_pending"] = await previous_invoice_balances(
+        inv.get("customer_id"),
+        inv.get("invoice_type", "standard"),
+        inv.get("date"),
+    )
     if inv["status"] != "draft":
         inv["status"] = "issued"
         await validate_for_issue(inv)
-        inv["number"] = await next_invoice_number(inv.get("date"))
+        inv["number"] = await next_invoice_number(inv.get("date"), inv.get("invoice_type", "standard"))
         inv["numbering_year"] = invoice_numbering_year(inv.get("date"))
         inv["issued_at"] = now_iso()
         inv["audit"] = [{"action": "issued", "at": now_iso(), "by": user["email"]}]
@@ -2260,13 +2916,44 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
         inv["number"] = None
         inv["audit"] = [{"action": "draft_created", "at": now_iso(), "by": user["email"]}]
     if not deduct_stock:
-        return await insert("invoices", inv)
+        try:
+            record = await insert("invoices", inv)
+        except DuplicateKeyError as error:
+            if not body.idempotency_key:
+                raise
+            existing_submission = await db.invoices.find_one(
+                {"idempotency_key": body.idempotency_key}, {"_id": 0},
+            )
+            if not existing_submission:
+                raise
+            if existing_submission.get("submission_payload_hash") != invoice_submission_hash(body):
+                raise HTTPException(409, "This invoice submission key was already used for different invoice data") from error
+            return existing_submission
+        await emit_workflow_event("invoice.created", record)
+        if record.get("status") != "draft":
+            await emit_workflow_event("invoice.issued", record)
+        return record
     deductions = await invoice_stock_deductions(inv)
     async with StockLock([item["stock_id"] for item in deductions]):
         await validate_invoice_stock(deductions, body.allow_negative_stock)
-        rec = await insert("invoices", inv)
+        try:
+            rec = await insert("invoices", inv)
+        except DuplicateKeyError as error:
+            if not body.idempotency_key:
+                raise
+            existing_submission = await db.invoices.find_one(
+                {"idempotency_key": body.idempotency_key}, {"_id": 0},
+            )
+            if not existing_submission:
+                raise
+            if existing_submission.get("submission_payload_hash") != invoice_submission_hash(body):
+                raise HTTPException(409, "This invoice submission key was already used for different invoice data") from error
+            return existing_submission
         await post_invoice_stock_deductions(rec, deductions, user)
         rec = await update_doc("invoices", rec["id"], {"stock_deducted": True})
+    await emit_workflow_event("invoice.created", rec)
+    if rec.get("status") != "draft":
+        await emit_workflow_event("invoice.issued", rec)
     return rec
 
 @api.put("/invoices/{iid}")
@@ -2280,7 +2967,15 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
     if not reason:
         raise HTTPException(400, "A reason is required to edit an invoice")
     await consume_invoice_action_authorization(body.supervisor_authorization, iid, "edit", user)
-    inv = await _prepare_invoice(body)
+    inv = await _prepare_invoice(body, user=user, existing=existing)
+    if existing.get("idempotency_key"):
+        inv["idempotency_key"] = existing["idempotency_key"]
+    else:
+        inv.pop("idempotency_key", None)
+    if existing.get("submission_payload_hash"):
+        inv["submission_payload_hash"] = existing["submission_payload_hash"]
+    inv["invoice_type"] = existing.get("invoice_type", "standard")
+    inv["previous_invoices_pending"] = existing.get("previous_invoices_pending", [])
     inv.pop("edit_reason", None)
     inv["amount_paid"] = existing.get("amount_paid", 0)
     compute_invoice(inv)
@@ -2300,7 +2995,13 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
             raise HTTPException(400, f"Invoice total cannot be lower than payments already received (R {inv['amount_paid']:.2f})")
     if existing.get("status") == "draft" and inv["status"] != "draft" and not inv["number"]:
         inv["status"] = "issued"
-        inv["number"] = await next_invoice_number(inv.get("date"))
+        inv["previous_invoices_pending"] = await previous_invoice_balances(
+            inv.get("customer_id"),
+            inv.get("invoice_type", "standard"),
+            inv.get("date"),
+            iid,
+        )
+        inv["number"] = await next_invoice_number(inv.get("date"), inv.get("invoice_type", "standard"))
         inv["numbering_year"] = invoice_numbering_year(inv.get("date"))
         inv["issued_at"] = now_iso()
         inv["audit"].append({"action": "issued", "at": now_iso(), "by": user["email"]})
@@ -2322,6 +3023,9 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
         await log_audit("invoice", iid, "issued_invoice_edited", user,
                         before={"items": existing.get("items"), "total": existing.get("total")},
                         after={"items": rec.get("items"), "total": rec.get("total")}, reason=reason)
+    await emit_workflow_event("invoice.updated", rec)
+    if existing.get("status") == "draft" and rec.get("status") != "draft":
+        await emit_workflow_event("invoice.issued", rec)
     rec["status"] = derive_status(rec)
     rec["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
     return rec
@@ -2340,21 +3044,30 @@ async def issue_invoice(iid: str, body: InvoiceIssueIn = InvoiceIssueIn(), user=
         raise HTTPException(409, "Stock has already been deducted for this invoice")
     upd = {"items": inv["items"]}
     if not inv.get("number"):
-        upd["number"] = await next_invoice_number(inv.get("date"))
+        upd["number"] = await next_invoice_number(inv.get("date"), inv.get("invoice_type", "standard"))
         upd["numbering_year"] = invoice_numbering_year(inv.get("date"))
         upd["issued_at"] = now_iso()
     upd["status"] = "issued"
+    upd["previous_invoices_pending"] = await previous_invoice_balances(
+        inv.get("customer_id"),
+        inv.get("invoice_type", "standard"),
+        inv.get("date"),
+        iid,
+    )
     audit = inv.get("audit", [])
     audit.append({"action": "issued", "at": now_iso(), "by": user["email"]})
     upd["audit"] = audit
     if not body.deduct_stock:
-        return await update_doc("invoices", iid, upd)
-    deductions = await invoice_stock_deductions(inv)
-    async with StockLock([item["stock_id"] for item in deductions]):
-        await validate_invoice_stock(deductions, body.allow_negative_stock)
         rec = await update_doc("invoices", iid, upd)
-        await post_invoice_stock_deductions(rec, deductions, user)
-        return await update_doc("invoices", iid, {"stock_deducted": True})
+    else:
+        deductions = await invoice_stock_deductions(inv)
+        async with StockLock([item["stock_id"] for item in deductions]):
+            await validate_invoice_stock(deductions, body.allow_negative_stock)
+            rec = await update_doc("invoices", iid, upd)
+            await post_invoice_stock_deductions(rec, deductions, user)
+            rec = await update_doc("invoices", iid, {"stock_deducted": True})
+    await emit_workflow_event("invoice.issued", rec)
+    return rec
 
 class ReasonIn(BaseModel):
     reason: str
@@ -2376,12 +3089,14 @@ async def void_invoice(iid: str, body: ReasonIn, user=Depends(get_current_user))
     audit.append({"action": "voided", "reason": body.reason, "at": now_iso(), "by": user["email"]})
     rec = await update_doc("invoices", iid, {"status": "void", "void_reason": body.reason, "audit": audit})
     await log_audit("invoice", iid, "voided", user, before={"status": inv.get("status")}, after={"status": "void"}, reason=body.reason)
+    await emit_workflow_event("invoice.voided", rec)
     return rec
 
 # ---------------- Payments ----------------
 class PaymentIn(BaseModel):
     amount: float
     method: str = "Cash"
+    receiving_on: Optional[str] = ""
     date: str = Field(default_factory=today_str)
     reference: Optional[str] = ""
     notes: Optional[str] = ""
@@ -2438,6 +3153,7 @@ async def record_payment(iid: str, body: PaymentIn, user=Depends(get_current_use
         audit.append({"action": "payment", "amount": amt, "at": now_iso(), "by": user["email"]})
         await db.invoices.update_one({"id": iid}, {"$set": {"audit": audit}})
         await log_audit("payment", pay_rec["id"], "recorded", user, after=pay_rec)
+        await emit_workflow_event("payment.recorded", pay_rec)
         return pay_rec
     finally:
         await db.invoices.update_one({"id": iid}, {"$unset": {"payment_lock": ""}})
@@ -2460,12 +3176,99 @@ async def reverse_payment(pid: str, body: ReasonIn, user=Depends(get_current_use
         raise HTTPException(400, "Payment not found or already reversed")
     await recalc_invoice_payments(p["invoice_id"])
     await log_audit("payment", pid, "reversed", user, before={"reversed": False}, after={"reversed": True}, reason=body.reason)
+    await emit_workflow_event("payment.reversed", p)
     return p
 
 @api.get("/payments")
 async def get_payments(include_archived: bool = False, user=Depends(get_current_user)):
     flt = {} if include_archived else {"archived": {"$ne": True}}
     return await listall("payments", flt, sort=("created_at", -1))
+
+@api.get("/express-payments")
+async def get_express_payments(payment_date: str, user=Depends(get_current_user)):
+    try:
+        selected_date = date.fromisoformat(payment_date).isoformat()
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Payment date must be a valid YYYY-MM-DD date")
+    if selected_date != payment_date:
+        raise HTTPException(422, "Payment date must use YYYY-MM-DD format")
+
+    payments = await daily_report_records(
+        "payments",
+        selected_date,
+        {"archived": {"$ne": True}, "reversed": {"$ne": True}},
+        "created_at",
+    )
+    payment_invoice_ids = list({payment.get("invoice_id") for payment in payments if payment.get("invoice_id")})
+    if not payment_invoice_ids:
+        return []
+    invoices = await db.invoices.find(
+        {
+            "id": {"$in": payment_invoice_ids},
+            "invoice_type": "express",
+            "archived": {"$ne": True},
+        },
+        {"_id": 0, "id": 1, "number": 1, "customer_name": 1, "include_on_daily_report": 1},
+    ).to_list(None)
+    invoice_by_id = {invoice["id"]: invoice for invoice in invoices}
+    if not invoice_by_id:
+        return []
+
+    return [
+        {
+            "id": payment.get("id"),
+            "invoice_id": payment.get("invoice_id"),
+            "date": payment.get("date"),
+            "amount": r2(payment.get("amount", 0)),
+            "method": payment.get("method") or "",
+            "receiving_on": payment.get("receiving_on") or "",
+            "reference": payment.get("reference") or "",
+            "notes": payment.get("notes") or "",
+            "invoice_number": payment.get("invoice_number") or invoice_by_id[payment["invoice_id"]].get("number") or "",
+            "customer_name": payment.get("customer_name") or invoice_by_id[payment["invoice_id"]].get("customer_name") or "",
+            "include_on_daily_report": bool(
+                payment.get("include_on_daily_report")
+                if payment.get("daily_report_inclusion_set")
+                else payment.get("include_on_daily_report") or invoice_by_id[payment["invoice_id"]].get("include_on_daily_report")
+            ),
+        }
+        for payment in payments
+        if payment.get("invoice_id") in invoice_by_id
+    ]
+
+class PaymentDailyReportInclusionIn(BaseModel):
+    included: bool
+
+@api.post("/payments/{pid}/daily-report")
+async def set_payment_daily_report_inclusion(
+    pid: str, body: PaymentDailyReportInclusionIn, user=Depends(get_current_user),
+):
+    payment = await db.payments.find_one({"id": pid}, {"_id": 0})
+    if not payment:
+        raise HTTPException(404, "Payment not found")
+    if payment.get("reversed") or payment.get("archived"):
+        raise HTTPException(409, "Reversed or archived payments cannot be included in the daily report")
+    invoice = await db.invoices.find_one({"id": payment.get("invoice_id")}, {"_id": 0})
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    if invoice.get("invoice_type") != "express":
+        raise HTTPException(400, "Only Express Website payments can be selected separately for the daily report")
+    if invoice.get("archived"):
+        raise HTTPException(409, "Restore this invoice before changing its daily report selection")
+
+    updated = await update_doc("payments", pid, {
+        "include_on_daily_report": body.included,
+        "daily_report_inclusion_set": True,
+    })
+    await log_audit(
+        "payment", pid, "daily_report_inclusion_updated", user,
+        before={
+            "include_on_daily_report": payment.get("include_on_daily_report", False),
+            "daily_report_inclusion_set": payment.get("daily_report_inclusion_set", False),
+        },
+        after={"include_on_daily_report": body.included, "daily_report_inclusion_set": True},
+    )
+    return updated
 
 # ---------------- Stock ----------------
 class StockIn(BaseModel):
@@ -2980,6 +3783,38 @@ async def get_product_identification_stats(user=Depends(get_current_user)):
 INC_TYPES = ("production", "purchase", "adjustment_in", "return")
 DEC_TYPES = ("dispatch", "invoice", "production_consumption", "adjustment_out", "damage")
 OPEN_ORDER_STATUSES = ("To Send", "Preparing", "Assigned", "Partially Delivered")
+INCOMPLETE_ORDER_STATUSES = (*OPEN_ORDER_STATUSES, "Dispatched")
+ACTIVE_DELIVERY_STATUSES = ("Planned", "Assigned", "Ready", "Dispatched", "Partially Delivered")
+MAINTENANCE_STATUSES = ("Needed", "Scheduled", "In Progress", "needed", "scheduled", "in progress")
+MAINTENANCE_TYPES = ("repair", "maintenance")
+
+def vehicle_operational_filters():
+    return {
+        "orders": {
+            "status": {"$in": INCOMPLETE_ORDER_STATUSES},
+            "vehicle_id": {"$exists": True, "$nin": ["", None]},
+            "archived": {"$ne": True},
+        },
+        "deliveries": {
+            "status": {"$in": ACTIVE_DELIVERY_STATUSES},
+            "vehicle_id": {"$exists": True, "$nin": ["", None]},
+            "archived": {"$ne": True},
+        },
+        "maintenance": {
+            "status": {"$in": MAINTENANCE_STATUSES},
+            "type": {"$in": MAINTENANCE_TYPES},
+            "vehicle_id": {"$exists": True, "$nin": ["", None]},
+            "archived": {"$ne": True},
+        },
+    }
+
+def vehicle_is_free(vehicle, unavailable_vehicle_ids=()):
+    return (
+        vehicle.get("vtype") != "Trailer"
+        and bool(vehicle.get("available"))
+        and not vehicle.get("assigned_driver_id")
+        and vehicle.get("id") not in unavailable_vehicle_ids
+    )
 
 def mov_sign(m):
     if m.get("direction") in (1, -1):
@@ -3020,7 +3855,9 @@ async def post_movement(stock, mtype, qty, user, reason="", reference="", notes=
          "date": today_str(), "user": user["email"] if user else "system", **(extra or {})}
     if dedupe_key:
         m["dedupe_key"] = dedupe_key
-    return await insert("stock_movements", m)
+    record = await insert("stock_movements", m)
+    await emit_workflow_event("stock.movement_recorded", record)
+    return record
 
 def allocate_fifo_batches(stock_id, opening_quantity, movements, requested_quantity):
     batches = []
@@ -3553,6 +4390,18 @@ async def delete_block_cutting(record_id: str, user=Depends(get_current_user)):
     await log_audit("block_cutting", record_id, "archived", user, before=before, after=updated)
     return {"ok": True, "archived": True}
 
+@api.delete("/production/block-cutting/{record_id}/permanent")
+async def permanently_delete_block_cutting(record_id: str, user=Depends(get_current_user)):
+    require_admin(user)
+    record = await db.block_cuttings.find_one({"id": record_id}, {"_id": 0})
+    if not record:
+        raise HTTPException(404, "Block cutting record not found")
+    if not record.get("archived"):
+        raise HTTPException(409, "Archive the block cutting record before permanently deleting it")
+    await log_audit("block_cutting", record_id, "permanently_deleted", user, before=record)
+    await db.block_cuttings.delete_one({"id": record_id, "archived": True})
+    return {"ok": True, "deleted": True}
+
 @api.post("/production/block-cutting/{record_id}/restore")
 async def restore_block_cutting(record_id: str, user=Depends(get_current_user)):
     before = await db.block_cuttings.find_one({"id": record_id}, {"_id": 0})
@@ -3572,6 +4421,9 @@ async def add_production(body: ProductionIn, user=Depends(get_current_user)):
     d["stock_added"] = False
     rec = await insert("production", {k: v for k, v in d.items() if k not in ("ready_at", "rest_elapsed")})
     await log_audit("production", rec["id"], "created", user, after=rec)
+    await emit_workflow_event("production.created", rec)
+    if rec.get("status") == "Completed":
+        await emit_workflow_event("production.completed", rec)
     return enrich_production(rec, hours)
 
 @api.put("/production/{pid}")
@@ -3585,6 +4437,8 @@ async def edit_production(pid: str, body: ProductionIn, user=Depends(get_current
     d = {k: v for k, v in d.items() if k not in ("ready_at", "rest_elapsed")}
     rec = await update_doc("production", pid, d)
     await log_audit("production", pid, "updated", user, before=existing, after=rec)
+    if existing.get("status") != "Completed" and rec.get("status") == "Completed":
+        await emit_workflow_event("production.completed", rec)
     return enrich_production(rec, hours)
 
 class ReceiveIn(BaseModel):
@@ -3727,14 +4581,15 @@ async def reconcile_employee_roster(user):
             employee.get("id") or "",
         ))
         weekly_salary = roster_employee["weekly_salary"]
-        hours_per_week = roster_employee["hours_per_week"]
+        hours_per_week = STANDARD_WEEKLY_HOURS
         employee_data = {
             "name": roster_employee["name"],
             "department": roster_employee["department"],
             "pay_type": roster_employee["pay_type"],
-            "hourly_rate": weekly_salary / hours_per_week,
+            "hourly_rate": weekly_salary / STANDARD_PAID_DAYS_PER_WEEK / 8,
             "weekly_salary": weekly_salary,
             "hours_per_week": hours_per_week,
+            "work_days_per_week": 6,
             "active": True,
         }
 
@@ -3814,8 +4669,7 @@ async def reconcile_payroll_roster(user=Depends(get_current_user)):
         employee = roster_employees_by_name[payroll_employee_name_key(roster_employee["name"])]
         if not employee:
             raise HTTPException(500, f"Could not find reconciled employee {roster_employee['name']}")
-        workdays = 6 if roster_employee["hours_per_week"] == 50 else 5
-        for day_offset in range(workdays):
+        for day_offset in range(6):
             attendance_records.append({
                 "id": new_id(),
                 "employee_id": employee["id"],
@@ -3854,11 +4708,15 @@ async def get_deleted_employees(user=Depends(get_current_user)):
 
 @api.post("/employees")
 async def add_employee(body: EmployeeIn, user=Depends(get_current_user)):
-    return await insert("employees", body.model_dump())
+    rec = await insert("employees", body.model_dump())
+    await emit_workflow_event("employee.created", rec)
+    return rec
 
 @api.put("/employees/{eid}")
 async def edit_employee(eid: str, body: EmployeeIn, user=Depends(get_current_user)):
-    return await update_doc("employees", eid, body.model_dump())
+    rec = await update_doc("employees", eid, body.model_dump())
+    await emit_workflow_event("employee.updated", rec)
+    return rec
 
 @api.delete("/employees/{eid}")
 async def delete_employee(eid: str, user=Depends(get_current_user)):
@@ -3924,8 +4782,11 @@ async def add_attendance(body: AttendanceIn, user=Depends(get_current_user)):
     data["employee_name"] = emp["name"]
     data["department"] = emp.get("department", "")
     if existing:
-        return await update_doc("attendance", existing["id"], data)
-    return await insert("attendance", data)
+        record = await update_doc("attendance", existing["id"], data)
+    else:
+        record = await insert("attendance", data)
+    await emit_workflow_event("attendance.recorded", record)
+    return record
 
 class SalaryAdvanceIn(BaseModel):
     employee_id: str
@@ -3941,7 +4802,9 @@ class SalaryCutIn(BaseModel):
     notes: Optional[str] = ""
 
 class SalaryRateIn(BaseModel):
-    hourly_rate: float = Field(ge=0.01)
+    hourly_rate: Optional[float] = Field(default=None, ge=0.01)
+    weekly_salary: Optional[float] = Field(default=None, gt=0)
+    work_days_per_week: Optional[int] = Field(default=None, ge=6, le=6)
 
 class PieceProductionIn(BaseModel):
     employee_id: str
@@ -3999,6 +4862,7 @@ async def save_piece_production(body: PieceProductionIn, user=Depends(get_curren
             after={"record": updated, "weekly_calculation": next_calculation},
             reason=audit_reason,
         )
+        await emit_workflow_event("piece_production.saved", updated)
         return updated
     created = await insert("piece_production", data)
     next_calculation = await piecework_week_snapshot(body.employee_id, work_date, employee.get("name", ""))
@@ -4007,6 +4871,7 @@ async def save_piece_production(body: PieceProductionIn, user=Depends(get_curren
         before={"weekly_calculation": previous_calculation},
         after={"record": created, "weekly_calculation": next_calculation},
     )
+    await emit_workflow_event("piece_production.saved", created)
     return created
 
 
@@ -4058,9 +4923,15 @@ async def salary_report(start_date, end_date):
         hourly_rate = float(employee.get("hourly_rate") or 20)
         is_piece_paid = is_piece_paid_employee(employee)
         weekly_salary = employee.get("weekly_salary") if not is_piece_paid else None
-        hours_per_week = float(employee.get("hours_per_week") or 45)
+        hours_per_week = STANDARD_WEEKLY_HOURS
+        work_days_per_week = 6
         if weekly_salary is None and not is_piece_paid:
-            weekly_salary = r2(D(hourly_rate) * D(hours_per_week))
+            weekly_salary = r2(D(hourly_rate) * D(8) * D(STANDARD_PAID_DAYS_PER_WEEK))
+        if not is_piece_paid:
+            hourly_rate = float(
+                (D(weekly_salary) / D(STANDARD_PAID_DAYS_PER_WEEK) / D(8))
+                .quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+            )
         rows = sorted(
             [record for record in attendance if record.get("employee_id") == employee["id"]],
             key=lambda record: record.get("date", ""),
@@ -4071,21 +4942,31 @@ async def salary_report(start_date, end_date):
             start_date=start_date, end_date=end_date) if is_piece_paid else {
                 "days": [], "total_pieces": 0, "piece_rate": 0, "piece_pay": 0, "weeks": [],
             }
-        days = [] if is_piece_paid else calculate_salary_hours(rows, weekly_regular_limit=hours_per_week)
+        days = [] if is_piece_paid else calculate_salary_hours(rows)
         regular_hours = sum(day["regular_hours"] for day in days)
         overtime_hours = sum(day["overtime_hours"] for day in days)
         present_days = sum(day["status"] == "Present" for day in days)
         half_days = sum(day["status"] == "Half Day" for day in days)
         for day in days:
-            day["pay"] = r2(D(day["regular_hours"] + day["overtime_hours"]) * D(hourly_rate))
+            day["regular_pay"] = r2(
+                D(weekly_salary) * D(day["attendance_fraction"]) / D(STANDARD_PAID_DAYS_PER_WEEK)
+            )
+            day["overtime_pay"] = r2(D(day["overtime_hours"]) * D(OVERTIME_HOURLY_RATE))
+            day["pay"] = r2(D(day["regular_pay"]) + D(day["overtime_pay"]))
         employee_advances = [item for item in advances if item.get("employee_id") == employee["id"]]
         employee_cuts = [item for item in cuts if item.get("employee_id") == employee["id"]]
         all_advance_total = sum((D(item.get("amount", 0)) for item in employee_advances), Decimal("0"))
         all_cut_total = sum((D(item.get("amount", 0)) for item in employee_cuts), Decimal("0"))
         period_cut = next((item for item in employee_cuts
                            if item.get("start_date") == start_date and item.get("end_date") == end_date), None)
-        regular_pay = r2(D(regular_hours) * D(hourly_rate))
-        overtime_pay = r2(D(overtime_hours) * D(hourly_rate))
+        regular_pay = r2(sum(
+            (
+                D(weekly_salary) * D(day["attendance_fraction"]) / D(STANDARD_PAID_DAYS_PER_WEEK)
+                for day in days
+            ),
+            Decimal("0"),
+        ))
+        overtime_pay = r2(D(overtime_hours) * D(OVERTIME_HOURLY_RATE))
         gross = employee_piecework["piece_pay"] if is_piece_paid else r2(regular_pay + overtime_pay)
         cut = r2((period_cut or {}).get("amount", 0))
         balance = all_advance_total - all_cut_total
@@ -4132,7 +5013,7 @@ async def salary_report(start_date, end_date):
             "employee_id": employee["id"], "name": employee.get("name", ""),
             "department": employee.get("department", ""), "active": employee.get("active", True),
             "hourly_rate": hourly_rate, "weekly_salary": weekly_salary,
-            "hours_per_week": hours_per_week,
+            "hours_per_week": hours_per_week, "work_days_per_week": work_days_per_week,
             "pay_type": "piece" if is_piece_paid else "hourly",
             "total_pieces": employee_piecework["total_pieces"],
             "piece_rate": employee_piecework["piece_rate"],
@@ -4162,15 +5043,38 @@ async def save_salary_rate(eid: str, body: SalaryRateIn, user=Depends(get_curren
     employee = await db.employees.find_one({"id": eid}, {"_id": 0})
     if not employee:
         raise HTTPException(404, "Employee not found")
-    hourly_rate = float(D(body.hourly_rate).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
-    hours_per_week = float(employee.get("hours_per_week") or 45)
+    if body.weekly_salary is None and body.hourly_rate is None:
+        raise HTTPException(422, "Provide a weekly salary or an hourly rate")
+    work_days_per_week = 6
+    hours_per_week = STANDARD_WEEKLY_HOURS
+    weekly_salary = r2(D(body.weekly_salary)) if body.weekly_salary is not None else None
+    hourly_rate = (
+        float(
+            (D(weekly_salary) / D(STANDARD_PAID_DAYS_PER_WEEK) / D(8))
+            .quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+        )
+        if weekly_salary is not None
+        else float(D(body.hourly_rate).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
+    )
+    if weekly_salary is None:
+        weekly_salary = r2(D(hourly_rate) * D(8) * D(STANDARD_PAID_DAYS_PER_WEEK))
     updated = await update_doc("employees", eid, {
         "hourly_rate": hourly_rate,
-        "weekly_salary": r2(D(hourly_rate) * D(hours_per_week)),
+        "weekly_salary": weekly_salary,
+        "hours_per_week": hours_per_week,
+        "work_days_per_week": work_days_per_week,
     })
     await log_audit("employee", eid, "salary_rate_updated", user,
-                    before={"hourly_rate": employee.get("hourly_rate", 20)},
-                    after={"hourly_rate": updated["hourly_rate"]})
+                    before={
+                        "hourly_rate": employee.get("hourly_rate", 20),
+                        "weekly_salary": employee.get("weekly_salary"),
+                        "work_days_per_week": employee.get("work_days_per_week", 6),
+                    },
+                    after={
+                        "hourly_rate": updated["hourly_rate"],
+                        "weekly_salary": updated["weekly_salary"],
+                        "work_days_per_week": updated["work_days_per_week"],
+                    })
     return updated
 
 @api.post("/salaries/advances")
@@ -4249,11 +5153,15 @@ async def get_drivers(user=Depends(get_current_user)):
 
 @api.post("/drivers")
 async def add_driver(body: DriverIn, user=Depends(get_current_user)):
-    return await insert("drivers", body.model_dump())
+    rec = await insert("drivers", body.model_dump())
+    await emit_workflow_event("driver.created", rec)
+    return rec
 
 @api.put("/drivers/{did}")
 async def edit_driver(did: str, body: DriverIn, user=Depends(get_current_user)):
-    return await update_doc("drivers", did, body.model_dump())
+    rec = await update_doc("drivers", did, body.model_dump())
+    await emit_workflow_event("driver.updated", rec)
+    return rec
 
 class VehicleIn(BaseModel):
     name: str
@@ -4269,17 +5177,1394 @@ class VehicleIn(BaseModel):
     payload_kg: Optional[float] = None
     tank_litres: Optional[float] = None
 
+class VehicleDriverAssignmentIn(BaseModel):
+    driver_id: Optional[str] = Field(default=None, max_length=100)
+    notes: Optional[str] = Field(default="", max_length=500)
+
+class VehicleLicenceDiscIn(BaseModel):
+    disc_number: str = Field(min_length=1, max_length=80)
+    issue_date: Optional[str] = None
+    expiry_date: str
+    document_name: str = Field(min_length=1, max_length=200)
+    document_content_type: Literal["application/pdf", "image/jpeg", "image/png"]
+    document_base64: str = Field(min_length=1)
+
+    @field_validator("disc_number", "document_name")
+    @classmethod
+    def strip_required_text(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("This field is required")
+        return value
+
+    @field_validator("issue_date", "expiry_date")
+    @classmethod
+    def validate_licence_date(cls, value, info):
+        if info.field_name == "issue_date" and value in (None, ""):
+            return None
+        if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("Dates must use YYYY-MM-DD format")
+        try:
+            date.fromisoformat(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Dates must use YYYY-MM-DD format") from error
+        return value
+
+    @field_validator("document_base64")
+    @classmethod
+    def validate_document_size(cls, value):
+        if len(value) > 7_000_000:
+            raise ValueError("Licence disc document must be no larger than 5 MB")
+        return value
+
+def vehicle_licence_disc_status(expiry_date, today=None):
+    try:
+        expiry = date.fromisoformat(str(expiry_date))
+    except (TypeError, ValueError):
+        return {"status": "UNKNOWN", "days_remaining": None}
+    remaining = (expiry - (today or local_today())).days
+    status = "EXPIRED" if remaining < 0 else "EXPIRING SOON" if remaining <= 30 else "VALID"
+    return {"status": status, "days_remaining": remaining}
+
+def vehicle_licence_alert_due(expiry_date, today=None):
+    remaining = vehicle_licence_disc_status(expiry_date, today)["days_remaining"]
+    return remaining is not None and remaining <= 7
+
+def fleet_notification_recipients(accounts, company_id):
+    recipients = {}
+    for account in accounts:
+        if account.get("active", True) is False or account.get("is_worker"):
+            continue
+        is_global_owner = (
+            account.get("role") == "owner"
+            and canonical_email(account.get("email")) == canonical_email(os.environ["ADMIN_EMAIL"])
+        )
+        role = (account.get("company_roles") or {}).get(company_id)
+        if is_global_owner or role in ("owner", "admin"):
+            recipients[account["id"]] = account
+    return list(recipients.values())
+
+def next_fleet_notification_cycle(now=None):
+    now = now or local_now()
+    next_cycle = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    if next_cycle <= now:
+        next_cycle += timedelta(days=1)
+    return next_cycle.astimezone(timezone.utc).isoformat()
+
+async def process_daily_vehicle_licence_alerts(today=None):
+    report_date = today or local_today()
+    accounts = await base_db.users.find(
+        {"active": {"$ne": False}},
+        {"_id": 0, "id": 1, "email": 1, "role": 1, "company_roles": 1, "is_worker": 1, "name": 1},
+    ).to_list(None)
+    for profile in COMPANY_PROFILES:
+        company_id = profile["id"]
+        company_db = tenant_database(client, base_db, company_id)
+        latest_discs = await company_db.vehicle_licence_discs.aggregate([
+            {"$match": {"company_id": company_id}},
+            {"$sort": {"created_at": -1}},
+            {"$group": {"_id": "$vehicle_id", "disc": {"$first": "$$ROOT"}}},
+        ]).to_list(None)
+        vehicles = await company_db.vehicles.find(
+            {"company_id": company_id, "archived": {"$ne": True}},
+            {"_id": 0, "id": 1, "name": 1, "registration": 1},
+        ).to_list(None)
+        vehicle_by_id = {vehicle["id"]: vehicle for vehicle in vehicles}
+        recipients = fleet_notification_recipients(accounts, company_id)
+        for row in latest_discs:
+            disc = row["disc"]
+            vehicle = vehicle_by_id.get(disc.get("vehicle_id"))
+            if not vehicle:
+                continue
+            await base_db.notifications.update_many(
+                {
+                    "company_id": company_id,
+                    "type": "fleet_licence_expiry",
+                    "vehicle_id": vehicle["id"],
+                    "disc_id": {"$ne": disc["id"]},
+                    "archived": {"$ne": True},
+                },
+                {"$set": {"archived": True, "archived_at": now_iso()}},
+            )
+            if not vehicle_licence_alert_due(disc.get("expiry_date"), report_date):
+                continue
+            status = vehicle_licence_disc_status(disc["expiry_date"], report_date)
+            for recipient in recipients:
+                event_key = f"fleet-licence:{company_id}:{disc['id']}"
+                dynamic_fields = {
+                    "days_remaining": status["days_remaining"],
+                    "licence_status": status["status"],
+                    "title": (
+                        "VEHICLE LICENCE DISC EXPIRED"
+                        if status["status"] == "EXPIRED"
+                        else "VEHICLE LICENCE DISC EXPIRING"
+                    ),
+                    "message": (
+                        f"Vehicle: {vehicle.get('registration') or vehicle.get('name')}. "
+                        f"Expiry date: {disc['expiry_date']}. "
+                        f"Days remaining: {status['days_remaining']}."
+                    ),
+                }
+                notification = {
+                    "id": new_id(),
+                    "company_id": company_id,
+                    "recipient_user_id": recipient["id"],
+                    "type": "fleet_licence_expiry",
+                    "event_key": event_key,
+                    "vehicle_id": vehicle["id"],
+                    "vehicle_name": vehicle.get("name", ""),
+                    "registration": vehicle.get("registration", ""),
+                    "disc_id": disc["id"],
+                    "expiry_date": disc["expiry_date"],
+                    "action_path": f"/fleet?vehicleId={vehicle['id']}&section=licence",
+                    "created_at": now_iso(),
+                    "read": False,
+                    "dismiss_count": 0,
+                    "permanently_dismissed": False,
+                    "archived": False,
+                }
+                await base_db.notifications.update_one(
+                    {
+                        "company_id": company_id,
+                        "event_key": event_key,
+                        "recipient_user_id": recipient["id"],
+                    },
+                    {"$set": dynamic_fields, "$setOnInsert": notification},
+                    upsert=True,
+                )
+
+async def scheduled_fleet_notification_loop():
+    while True:
+        try:
+            await process_daily_vehicle_licence_alerts()
+        except Exception:
+            logging.exception("Daily vehicle licence notifications could not be processed")
+        now = local_now()
+        next_cycle = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if next_cycle <= now:
+            next_cycle += timedelta(days=1)
+        await asyncio.sleep(max(1, (next_cycle - now).total_seconds()))
+
+class NotificationDismissIn(BaseModel):
+    request_id: str = Field(min_length=8, max_length=100)
+
+@api.get("/notifications")
+async def get_notifications(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    user=Depends(get_current_user),
+):
+    company_id = active_company_id.get()
+    query = {
+        "company_id": company_id,
+        "recipient_user_id": user["id"],
+        "archived": {"$ne": True},
+        "permanently_dismissed": {"$ne": True},
+        "$or": [
+            {"hidden_until": {"$exists": False}},
+            {"hidden_until": None},
+            {"hidden_until": {"$lte": datetime.now(timezone.utc).isoformat()}},
+        ],
+    }
+    total = await base_db.notifications.count_documents(query)
+    records = await base_db.notifications.find(query, {"_id": 0}).sort(
+        "created_at", -1,
+    ).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    unread = await base_db.notifications.count_documents({**query, "read": {"$ne": True}})
+    return {"items": records, "page": page, "page_size": page_size, "total": total, "unread": unread}
+
+@api.post("/notifications/{notification_id}/dismiss")
+async def dismiss_notification(
+    notification_id: str,
+    body: NotificationDismissIn,
+    user=Depends(get_current_user),
+):
+    company_id = active_company_id.get()
+    query = {
+        "id": notification_id,
+        "company_id": company_id,
+        "recipient_user_id": user["id"],
+        "archived": {"$ne": True},
+    }
+    notification = await base_db.notifications.find_one(query, {"_id": 0})
+    if not notification:
+        raise HTTPException(404, "Notification not found")
+    if notification.get("permanently_dismissed"):
+        return {"ok": True, "dismiss_count": notification.get("dismiss_count", 2), "permanently_dismissed": True}
+    hidden_until = notification.get("hidden_until")
+    if hidden_until and hidden_until > datetime.now(timezone.utc).isoformat():
+        raise HTTPException(409, "This notification can be dismissed again after the next daily reminder")
+    last_request_id = notification.get("last_dismiss_request_id")
+    if body.request_id == last_request_id:
+        return {
+            "ok": True,
+            "dismiss_count": notification.get("dismiss_count", 0),
+            "permanently_dismissed": notification.get("permanently_dismissed", False),
+        }
+    last_dismissed = notification.get("last_dismissed_at")
+    if last_dismissed:
+        last_dismissed_at = datetime.fromisoformat(last_dismissed)
+        if last_dismissed_at.tzinfo is None:
+            last_dismissed_at = last_dismissed_at.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - last_dismissed_at).total_seconds() < 5:
+            return {"ok": True, "dismiss_count": notification.get("dismiss_count", 0), "permanently_dismissed": False}
+    dismiss_count = notification.get("dismiss_count", 0) + 1
+    now = datetime.now(timezone.utc).isoformat()
+    changes = {
+        "dismiss_count": dismiss_count,
+        "last_dismissed_at": now,
+        "last_dismiss_request_id": body.request_id,
+        "read": True,
+    }
+    permanently_dismissed = dismiss_count >= 2
+    changes["permanently_dismissed"] = permanently_dismissed
+    if not permanently_dismissed:
+        changes["hidden_until"] = next_fleet_notification_cycle()
+    result = await base_db.notifications.update_one(
+        {
+            **query,
+            "dismiss_count": notification.get("dismiss_count", 0),
+            "last_dismiss_request_id": {"$ne": body.request_id},
+        },
+        {"$set": changes},
+    )
+    if not result.modified_count:
+        latest = await base_db.notifications.find_one(query, {"_id": 0}) or notification
+        return {
+            "ok": True,
+            "dismiss_count": latest.get("dismiss_count", 0),
+            "permanently_dismissed": latest.get("permanently_dismissed", False),
+        }
+    return {"ok": True, "dismiss_count": dismiss_count, "permanently_dismissed": permanently_dismissed}
+
+@api.post("/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: str, user=Depends(get_current_user)):
+    company_id = active_company_id.get()
+    result = await base_db.notifications.update_one(
+        {
+            "id": notification_id,
+            "company_id": company_id,
+            "recipient_user_id": user["id"],
+            "archived": {"$ne": True},
+        },
+        {"$set": {"read": True}},
+    )
+    if not result.matched_count:
+        raise HTTPException(404, "Notification not found")
+    return {"ok": True}
+
+class IntercompanyOrderLineIn(BaseModel):
+    stock_id: str = Field(min_length=1, max_length=100)
+    quantity: float = Field(gt=0, le=1_000_000)
+
+class IntercompanyOrderRequestIn(BaseModel):
+    supplying_company_id: str
+    items: List[IntercompanyOrderLineIn] = Field(min_length=1, max_length=100)
+    notes: Optional[str] = Field(default="", max_length=2000)
+
+class IntercompanyRejectIn(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+
+class IntercompanyReviewIn(BaseModel):
+    item_id: str
+
+class IntercompanyPriceIn(BaseModel):
+    stock_id: str
+    unit_price: float = Field(gt=0)
+
+class IntercompanyCustomerMapIn(BaseModel):
+    requesting_company_id: str
+    customer_id: str
+
+class IntercompanyCreateInvoiceIn(BaseModel):
+    send_to_requesting_company: bool
+    delivery_fee: float = Field(default=0, ge=0)
+    assigned_driver_id: Optional[str] = ""
+
+def require_intercompany_company_access(user, company_id, *, administrator=False):
+    if company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
+        raise HTTPException(404, "Company not found")
+    if user.get("is_worker"):
+        if company_id != user.get("_active_company_id") or not {"orders", "invoices"}.intersection(
+            user.get("worker_allowed_sections") or []
+        ):
+            raise HTTPException(403, "This worker account cannot access intercompany requests")
+        if administrator:
+            raise HTTPException(403, "Company administrator access required")
+        return
+    role = company_role(user, company_id)
+    if role not in ("owner", "admin", "user"):
+        raise HTTPException(403, "You are not assigned to this company")
+    if administrator and role not in ("owner", "admin"):
+        raise HTTPException(403, "Company administrator access required")
+
+async def notify_intercompany_company(company_id, event_key, title, message, action_path, extra_user_ids=()):
+    accounts = await base_db.users.find(
+        {"active": {"$ne": False}},
+        {"_id": 0, "id": 1, "email": 1, "role": 1, "company_roles": 1, "is_worker": 1},
+    ).to_list(None)
+    recipients = {
+        account["id"]: account
+        for account in fleet_notification_recipients(accounts, company_id)
+    }
+    for user_id in extra_user_ids:
+        account = next((item for item in accounts if item.get("id") == user_id), None)
+        if account:
+            recipients[user_id] = account
+    for recipient_id in recipients:
+        await base_db.notifications.update_one(
+            {
+                "company_id": company_id,
+                "event_key": event_key,
+                "recipient_user_id": recipient_id,
+            },
+            {"$setOnInsert": {
+                "id": new_id(),
+                "company_id": company_id,
+                "recipient_user_id": recipient_id,
+                "type": "intercompany",
+                "event_key": event_key,
+                "title": title,
+                "message": message,
+                "action_path": action_path,
+                "created_at": now_iso(),
+                "read": False,
+                "dismiss_count": 0,
+                "permanently_dismissed": False,
+                "archived": False,
+            }},
+            upsert=True,
+        )
+
+async def intercompany_available_stock(company_db, company_id, stock_ids):
+    if not stock_ids:
+        return {}
+    rows = await company_db.stock_movements.aggregate([
+        {"$match": {"company_id": company_id, "stock_id": {"$in": stock_ids}}},
+        {"$project": {
+            "stock_id": 1,
+            "signed_quantity": {"$multiply": [
+                {"$convert": {"input": "$quantity", "to": "double", "onError": 0, "onNull": 0}},
+                {"$cond": [
+                    {"$in": ["$direction", [1, -1]]},
+                    "$direction",
+                    {"$cond": [{"$in": ["$type", list(INC_TYPES)]}, 1, -1]},
+                ]},
+            ]},
+        }},
+        {"$group": {"_id": "$stock_id", "quantity": {"$sum": "$signed_quantity"}}},
+    ]).to_list(None)
+    movement_totals = {row["_id"]: row["quantity"] for row in rows}
+    stocks = await company_db.stock.find(
+        {"company_id": company_id, "id": {"$in": stock_ids}},
+        {"_id": 0, "id": 1, "opening": 1},
+    ).to_list(None)
+    return {
+        stock["id"]: r2(D(stock.get("opening", 0)) + D(movement_totals.get(stock["id"], 0)))
+        for stock in stocks
+    }
+
+def intercompany_price_zone(supplying_company_id, requesting_company_id, customer=None):
+    if supplying_company_id != DEFAULT_COMPANY_ID:
+        return 1
+    if requesting_company_id == WHOLESALERS_COMPANY_ID:
+        return 1
+    return int((customer or {}).get("default_zone") or 1)
+
+def public_intercompany_request(request, company_id):
+    result = dict(request)
+    if result.get("requesting_company_id") == company_id and not result.get("invoice_sent"):
+        for key in ("invoice_id", "invoice_number", "invoice_total", "invoice_date", "sent_at"):
+            result.pop(key, None)
+    return result
+
+@api.get("/intercompany/products")
+async def get_intercompany_products(
+    supplying_company_id: str,
+    q: str = "",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    user=Depends(get_current_user),
+):
+    requesting_company_id = active_company_id.get()
+    require_intercompany_company_access(user, requesting_company_id)
+    if supplying_company_id == requesting_company_id:
+        raise HTTPException(400, "Choose another company as the supplier")
+    if supplying_company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
+        raise HTTPException(400, "Invalid supplying company")
+    company_db = tenant_database(client, base_db, supplying_company_id)
+    query = {"company_id": supplying_company_id, "archived": {"$ne": True}}
+    if q.strip():
+        term = re.escape(q.strip()[:80])
+        query["$or"] = [
+            {"product": {"$regex": term, "$options": "i"}},
+            {"size": {"$regex": term, "$options": "i"}},
+        ]
+    total = await company_db.stock.count_documents(query)
+    stock_items = await company_db.stock.find(query, {"_id": 0}).sort(
+        [("product", 1), ("size", 1)],
+    ).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    stock_ids = [item["id"] for item in stock_items]
+    identities = await base_db.product_identifications.find(
+        {
+            "company_id": supplying_company_id,
+            "stock_id": {"$in": stock_ids},
+            "active": {"$ne": False},
+        },
+        {"_id": 0},
+    ).to_list(page_size)
+    identity_by_stock = {identity["stock_id"]: identity for identity in identities}
+    availability = await intercompany_available_stock(company_db, supplying_company_id, stock_ids)
+    items = []
+    for stock in stock_items:
+        identity = identity_by_stock.get(stock["id"])
+        items.append({
+            "stock_id": stock["id"],
+            "product_id": (identity or {}).get("product_id") or stock.get("product_id"),
+            "product": stock.get("product", ""),
+            "dimensions": stock.get("size", ""),
+            "description": (identity or {}).get("description") or stock.get("description", ""),
+            "product_type": (identity or {}).get("product_type") or stock.get("product_type", ""),
+            "density": (identity or {}).get("density") or stock.get("density"),
+            "available_quantity": availability.get(stock["id"], 0),
+            "manual_review": not bool((identity or {}).get("product_id") or stock.get("product_id")),
+        })
+    return {"items": items, "page": page, "page_size": page_size, "total": total}
+
+@api.get("/intercompany/catalog")
+async def get_intercompany_supplier_catalog(
+    q: str = "",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(1, ge=1, le=100),
+    user=Depends(get_current_user),
+):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id, administrator=True)
+    company_db = tenant_database(client, base_db, company_id)
+    query = {"company_id": company_id, "archived": {"$ne": True}}
+    if q.strip():
+        term = re.escape(q.strip()[:80])
+        query["$or"] = [
+            {"product": {"$regex": term, "$options": "i"}},
+            {"size": {"$regex": term, "$options": "i"}},
+        ]
+    total = await company_db.stock.count_documents(query)
+    stock_items = await company_db.stock.find(query, {"_id": 0}).sort(
+        [("product", 1), ("size", 1)],
+    ).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    stock_ids = [item["id"] for item in stock_items]
+    availability = await intercompany_available_stock(company_db, company_id, stock_ids)
+    return {
+        "items": [{
+            "stock_id": item["id"],
+            "product": item.get("product", ""),
+            "dimensions": item.get("size", ""),
+            "available_quantity": availability.get(item["id"], 0),
+        } for item in stock_items],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+    }
+
+@api.get("/intercompany/requests")
+async def list_intercompany_requests(
+    status: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    user=Depends(get_current_user),
+):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id)
+    query = {"$or": [
+        {"requesting_company_id": company_id},
+        {"supplying_company_id": company_id},
+    ]}
+    if status:
+        query["status"] = status.upper()
+    total = await base_db.intercompany_order_requests.count_documents(query)
+    requests = await base_db.intercompany_order_requests.find(query, {"_id": 0}).sort(
+        "created_at", -1,
+    ).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    return {
+        "items": [public_intercompany_request(item, company_id) for item in requests],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+    }
+
+@api.post("/intercompany/requests")
+async def create_intercompany_request(
+    body: IntercompanyOrderRequestIn,
+    user=Depends(get_current_user),
+):
+    requesting_company_id = active_company_id.get()
+    require_intercompany_company_access(user, requesting_company_id)
+    if body.supplying_company_id == requesting_company_id:
+        raise HTTPException(400, "Requesting and supplying companies must be different")
+    if body.supplying_company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
+        raise HTTPException(400, "Invalid supplying company")
+    stock_ids = [item.stock_id for item in body.items]
+    if len(stock_ids) != len(set(stock_ids)):
+        raise HTTPException(400, "Combine repeated product lines into one quantity")
+    supplier_db = tenant_database(client, base_db, body.supplying_company_id)
+    stock_records = await supplier_db.stock.find({
+        "company_id": body.supplying_company_id,
+        "id": {"$in": stock_ids},
+        "archived": {"$ne": True},
+    }, {"_id": 0}).to_list(len(stock_ids))
+    stock_by_id = {stock["id"]: stock for stock in stock_records}
+    if len(stock_by_id) != len(stock_ids):
+        raise HTTPException(400, "One or more selected products do not belong to the supplying company")
+    identities = await base_db.product_identifications.find(
+        {
+            "company_id": body.supplying_company_id,
+            "stock_id": {"$in": stock_ids},
+            "active": {"$ne": False},
+        },
+        {"_id": 0},
+    ).to_list(len(stock_ids))
+    identity_by_stock = {identity["stock_id"]: identity for identity in identities}
+    availability = await intercompany_available_stock(supplier_db, body.supplying_company_id, stock_ids)
+    lines = []
+    for requested in body.items:
+        stock = stock_by_id[requested.stock_id]
+        identity = identity_by_stock.get(requested.stock_id)
+        lines.append({
+            "id": new_id(),
+            "stock_id": stock["id"],
+            "product_id": (identity or {}).get("product_id") or stock.get("product_id"),
+            "product": stock.get("product", ""),
+            "dimensions": stock.get("size", ""),
+            "description": (identity or {}).get("description") or stock.get("description", ""),
+            "product_type": (identity or {}).get("product_type") or stock.get("product_type", ""),
+            "density": (identity or {}).get("density") or stock.get("density"),
+            "quantity": requested.quantity,
+            "available_quantity_at_request": availability.get(stock["id"], 0),
+            "manual_review": not bool((identity or {}).get("product_id") or stock.get("product_id")),
+            "manual_reviewed_by": None,
+            "manual_reviewed_at": None,
+        })
+    request_id = f"ICR-{uuid.uuid4().hex[:12].upper()}"
+    company_names = {profile["id"]: profile["name"] for profile in COMPANY_PROFILES}
+    record = {
+        "id": request_id,
+        "requesting_company_id": requesting_company_id,
+        "requesting_company_name": company_names[requesting_company_id],
+        "supplying_company_id": body.supplying_company_id,
+        "supplying_company_name": company_names[body.supplying_company_id],
+        "items": lines,
+        "notes": (body.notes or "").strip(),
+        "status": "PENDING",
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("username") or "",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "audit": [{
+            "action": "created",
+            "at": now_iso(),
+            "by": user["id"],
+            "company_id": requesting_company_id,
+        }],
+        "invoice_sent": False,
+    }
+    try:
+        await base_db.intercompany_order_requests.insert_one(record)
+    except DuplicateKeyError as error:
+        raise HTTPException(409, "Intercompany request ID collision; retry the request") from error
+    record.pop("_id", None)
+    total_quantity = sum(item["quantity"] for item in lines)
+    await notify_intercompany_company(
+        body.supplying_company_id,
+        f"intercompany:{request_id}:submitted",
+        "New Intercompany Order Request",
+        f"{request_id} from {record['requesting_company_name']}: {len(lines)} product lines, {total_quantity:g} units.",
+        f"/intercompany?requestId={request_id}",
+    )
+    return record
+
+@api.get("/intercompany/requests/{request_id}")
+async def get_intercompany_request(request_id: str, user=Depends(get_current_user)):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id)
+    request = await base_db.intercompany_order_requests.find_one(
+        {
+            "id": request_id,
+            "$or": [
+                {"requesting_company_id": company_id},
+                {"supplying_company_id": company_id},
+            ],
+        },
+        {"_id": 0},
+    )
+    if not request:
+        raise HTTPException(404, "Intercompany request not found")
+    return public_intercompany_request(request, company_id)
+
+@api.post("/intercompany/requests/{request_id}/items/review")
+async def review_intercompany_request_item(
+    request_id: str,
+    body: IntercompanyReviewIn,
+    user=Depends(get_current_user),
+):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id, administrator=True)
+    request = await base_db.intercompany_order_requests.find_one({
+        "id": request_id,
+        "supplying_company_id": company_id,
+        "status": "PENDING",
+        "items.id": body.item_id,
+    }, {"_id": 0})
+    if not request:
+        raise HTTPException(404, "Pending request item not found")
+    item = next((row for row in request["items"] if row["id"] == body.item_id), None)
+    if not item:
+        raise HTTPException(404, "Request item not found")
+    if item.get("manual_review"):
+        await base_db.intercompany_order_requests.update_one(
+            {"id": request_id, "supplying_company_id": company_id, "status": "PENDING"},
+            {
+                "$set": {
+                    "items.$[item].manual_review": False,
+                    "items.$[item].manual_reviewed_by": user["id"],
+                    "items.$[item].manual_reviewed_at": now_iso(),
+                    "updated_at": now_iso(),
+                },
+                "$push": {"audit": {
+                    "action": "item_manual_reviewed",
+                    "item_id": body.item_id,
+                    "at": now_iso(),
+                    "by": user["id"],
+                    "company_id": company_id,
+                }},
+            },
+            array_filters=[{"item.id": body.item_id}],
+        )
+    return {"ok": True}
+
+@api.post("/intercompany/requests/{request_id}/accept")
+async def accept_intercompany_request(request_id: str, user=Depends(get_current_user)):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id, administrator=True)
+    request = await base_db.intercompany_order_requests.find_one({
+        "id": request_id,
+        "supplying_company_id": company_id,
+        "status": "PENDING",
+    }, {"_id": 0})
+    if not request:
+        raise HTTPException(404, "Pending intercompany request not found")
+    manual_items = [item for item in request["items"] if item.get("manual_review")]
+    if manual_items:
+        raise HTTPException(409, "Manually review all unmatched product identities before accepting this request")
+    supplier_db = tenant_database(client, base_db, company_id)
+    stock_ids = [item["stock_id"] for item in request["items"]]
+    available = await intercompany_available_stock(supplier_db, company_id, stock_ids)
+    shortages = [
+        {
+            "product": item["product"],
+            "dimensions": item["dimensions"],
+            "available": available.get(item["stock_id"], 0),
+            "requested": item["quantity"],
+        }
+        for item in request["items"]
+        if D(available.get(item["stock_id"], 0)) < D(item["quantity"])
+    ]
+    if shortages:
+        raise HTTPException(409, {"message": "Insufficient supplier stock; no stock was reserved or deducted", "shortages": shortages})
+    now = now_iso()
+    updated = await base_db.intercompany_order_requests.find_one_and_update(
+        {
+            "id": request_id,
+            "supplying_company_id": company_id,
+            "status": "PENDING",
+        },
+        {
+            "$set": {
+                "status": "ACCEPTED",
+                "accepted_by": user["id"],
+                "accepted_at": now,
+                "updated_at": now,
+            },
+            "$push": {"audit": {
+                "action": "accepted", "at": now, "by": user["id"], "company_id": company_id,
+            }},
+        },
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        raise HTTPException(409, "Request status changed; reload before accepting")
+    await notify_intercompany_company(
+        updated["requesting_company_id"],
+        f"intercompany:{request_id}:accepted",
+        "Intercompany Order Request Accepted",
+        f"{request_id} was accepted by {updated['supplying_company_name']}.",
+        f"/intercompany?requestId={request_id}",
+        extra_user_ids=(updated["created_by"],),
+    )
+    return updated
+
+@api.post("/intercompany/requests/{request_id}/reject")
+async def reject_intercompany_request(
+    request_id: str,
+    body: IntercompanyRejectIn,
+    user=Depends(get_current_user),
+):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id, administrator=True)
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(400, "A rejection reason is required")
+    now = now_iso()
+    updated = await base_db.intercompany_order_requests.find_one_and_update(
+        {
+            "id": request_id,
+            "supplying_company_id": company_id,
+            "status": "PENDING",
+        },
+        {
+            "$set": {
+                "status": "REJECTED",
+                "rejection_reason": reason,
+                "rejected_by": user["id"],
+                "rejected_at": now,
+                "updated_at": now,
+            },
+            "$push": {"audit": {
+                "action": "rejected", "at": now, "by": user["id"],
+                "company_id": company_id, "reason": reason,
+            }},
+        },
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        raise HTTPException(404, "Pending intercompany request not found")
+    await notify_intercompany_company(
+        updated["requesting_company_id"],
+        f"intercompany:{request_id}:rejected",
+        "Intercompany Order Request Rejected",
+        f"{request_id} was rejected by {updated['supplying_company_name']}: {reason}",
+        f"/intercompany?requestId={request_id}",
+        extra_user_ids=(updated["created_by"],),
+    )
+    return updated
+
+@api.post("/intercompany/prices")
+async def set_intercompany_price(body: IntercompanyPriceIn, user=Depends(get_current_user)):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id, administrator=True)
+    company_db = tenant_database(client, base_db, company_id)
+    stock = await company_db.stock.find_one(
+        {"id": body.stock_id, "company_id": company_id, "archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "product": 1, "size": 1},
+    )
+    if not stock:
+        raise HTTPException(404, "Supplier stock product not found")
+    now = now_iso()
+    price = await company_db.intercompany_prices.find_one_and_update(
+        {"stock_id": body.stock_id, "company_id": company_id},
+        {"$set": {
+            "unit_price": r2(body.unit_price),
+            "updated_at": now,
+            "updated_by": user["id"],
+            "product": stock.get("product", ""),
+            "dimensions": stock.get("size", ""),
+        }, "$setOnInsert": {
+            "id": new_id(),
+            "company_id": company_id,
+            "stock_id": body.stock_id,
+            "created_at": now,
+            "created_by": user["id"],
+        }},
+        upsert=True,
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+    return price
+
+@api.get("/intercompany/prices")
+async def list_intercompany_prices(user=Depends(get_current_user)):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id, administrator=True)
+    company_db = tenant_database(client, base_db, company_id)
+    return await company_db.intercompany_prices.find(
+        {"company_id": company_id}, {"_id": 0},
+    ).sort("product", 1).to_list(1000)
+
+@api.post("/intercompany/customer-mappings")
+async def set_intercompany_customer_mapping(
+    body: IntercompanyCustomerMapIn,
+    user=Depends(get_current_user),
+):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id, administrator=True)
+    if body.requesting_company_id == company_id or body.requesting_company_id not in {
+        profile["id"] for profile in COMPANY_PROFILES
+    }:
+        raise HTTPException(400, "Select a different requesting company")
+    company_db = tenant_database(client, base_db, company_id)
+    customer = await company_db.customers.find_one(
+        {"id": body.customer_id, "company_id": company_id, "active": {"$ne": False}},
+        {"_id": 0, "id": 1, "name": 1},
+    )
+    if not customer:
+        raise HTTPException(404, "Active intercompany customer record not found")
+    now = now_iso()
+    mapping = await company_db.intercompany_customer_mappings.find_one_and_update(
+        {
+            "requesting_company_id": body.requesting_company_id,
+            "company_id": company_id,
+        },
+        {"$set": {
+            "customer_id": customer["id"],
+            "customer_name": customer["name"],
+            "updated_at": now,
+            "updated_by": user["id"],
+        }, "$setOnInsert": {
+            "id": new_id(),
+            "company_id": company_id,
+            "requesting_company_id": body.requesting_company_id,
+            "created_at": now,
+            "created_by": user["id"],
+        }},
+        upsert=True,
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+    return mapping
+
+@api.get("/intercompany/customer-mappings")
+async def list_intercompany_customer_mappings(user=Depends(get_current_user)):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id, administrator=True)
+    company_db = tenant_database(client, base_db, company_id)
+    return await company_db.intercompany_customer_mappings.find(
+        {"company_id": company_id}, {"_id": 0},
+    ).sort("requesting_company_id", 1).to_list(10)
+
+@api.post("/intercompany/requests/{request_id}/invoice")
+async def create_intercompany_invoice(
+    request_id: str,
+    body: IntercompanyCreateInvoiceIn,
+    user=Depends(get_current_user),
+):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id, administrator=True)
+    request = await base_db.intercompany_order_requests.find_one(
+        {
+            "id": request_id,
+            "supplying_company_id": company_id,
+            "status": {"$in": ["ACCEPTED", "INVOICE_CREATED", "INVOICE_SENT"]},
+        },
+        {"_id": 0},
+    )
+    if not request:
+        raise HTTPException(404, "Accepted intercompany request not found")
+    company_db = tenant_database(client, base_db, company_id)
+    idempotency_key = f"intercompany:{request_id}"
+    invoice = await company_db.invoices.find_one(
+        {"idempotency_key": idempotency_key}, {"_id": 0},
+    )
+    if not invoice:
+        mapping = await company_db.intercompany_customer_mappings.find_one(
+            {
+                "requesting_company_id": request["requesting_company_id"],
+                "company_id": company_id,
+            },
+            {"_id": 0},
+        )
+        customer = None
+        if mapping:
+            customer = await company_db.customers.find_one(
+                {"id": mapping["customer_id"], "company_id": company_id, "active": {"$ne": False}},
+                {"_id": 0},
+            )
+        else:
+            requesting_profile = next(
+                profile for profile in COMPANY_PROFILES
+                if profile["id"] == request["requesting_company_id"]
+            )
+            customer_names = {requesting_profile["name"], requesting_profile["username"]}
+            customer = await company_db.customers.find_one(
+                {
+                    "name": {"$in": list(customer_names)},
+                    "company_id": company_id,
+                    "active": {"$ne": False},
+                },
+                {"_id": 0},
+            )
+        if not customer:
+            raise HTTPException(
+                409,
+                "Add an active customer record for the requesting company before creating its invoice",
+            )
+        stock_ids = [item["stock_id"] for item in request["items"]]
+        zone = intercompany_price_zone(
+            company_id, request["requesting_company_id"], customer,
+        )
+        invoice_items = []
+        for item in request["items"]:
+            resolved = await resolve_price(
+                zone,
+                item.get("product_type") or item["product"],
+                item["dimensions"],
+            )
+            if not resolved["found"] or resolved["price"] is None:
+                raise HTTPException(
+                    409,
+                    f"No confirmed saved price for {item['product']} {item['dimensions']} in zone {zone}",
+                )
+            invoice_items.append({
+                "qty": item["quantity"],
+                "category": item.get("product_type") or item["product"],
+                "size": item["dimensions"],
+                "description": item.get("description") or item["product"],
+                "unit_price": resolved["price"],
+            })
+        if body.assigned_driver_id:
+            driver = await company_db.drivers.find_one(
+                {"id": body.assigned_driver_id, "company_id": company_id, "active": {"$ne": False}},
+                {"_id": 0, "id": 1},
+            )
+            if not driver:
+                raise HTTPException(400, "Assigned driver is not active in the supplying company")
+        invoice_body = InvoiceIn(
+            customer_id=customer["id"],
+            customer_name=customer["name"],
+            client_number=customer.get("client_number", ""),
+            zone=zone,
+            reference=f"Intercompany {request_id}",
+            notes=f"Generated from intercompany order request {request_id}",
+            items=invoice_items,
+            delivery_fee=body.delivery_fee,
+            assigned_driver_id=body.assigned_driver_id or "",
+            status="issued",
+            invoice_type="standard",
+            intercompany_request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+        invoice = await create_invoice(invoice_body, user=user)
+    sent_now = body.send_to_requesting_company and not request.get("invoice_sent")
+    now = now_iso()
+    new_status = "INVOICE_SENT" if body.send_to_requesting_company else "INVOICE_CREATED"
+    await base_db.intercompany_order_requests.update_one(
+        {"id": request_id, "supplying_company_id": company_id},
+        {
+            "$set": {
+                "status": new_status if body.send_to_requesting_company else (
+                    request.get("status") if request.get("invoice_sent") else "INVOICE_CREATED"
+                ),
+                "invoice_id": invoice["id"],
+                "invoice_number": invoice.get("number"),
+                "invoice_date": invoice.get("date"),
+                "invoice_total": invoice.get("total"),
+                "invoice_created_by": user["id"],
+                "invoice_created_at": invoice.get("created_at") or invoice.get("issued_at") or now,
+                "invoice_sent": bool(request.get("invoice_sent") or body.send_to_requesting_company),
+                "sent_at": (request.get("sent_at") or now) if body.send_to_requesting_company else request.get("sent_at"),
+                "updated_at": now,
+            },
+            "$push": {"audit": {
+                "action": "invoice_sent" if body.send_to_requesting_company else "invoice_created",
+                "invoice_id": invoice["id"],
+                "invoice_number": invoice.get("number"),
+                "at": now,
+                "by": user["id"],
+                "company_id": company_id,
+            }},
+        },
+    )
+    if sent_now:
+        await notify_intercompany_company(
+            request["requesting_company_id"],
+            f"intercompany:{request_id}:invoice-sent",
+            "Intercompany Invoice Sent",
+            f"Invoice {invoice.get('number') or '—'} for request {request_id} is available.",
+            f"/intercompany?requestId={request_id}",
+            extra_user_ids=(request["created_by"],),
+        )
+    return {
+        "invoice": invoice,
+        "sent": bool(request.get("invoice_sent") or body.send_to_requesting_company),
+        "status": new_status if body.send_to_requesting_company else "INVOICE_CREATED",
+    }
+
+@api.get("/intercompany/requests/{request_id}/invoice")
+async def get_intercompany_request_invoice(request_id: str, user=Depends(get_current_user)):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id)
+    request = await base_db.intercompany_order_requests.find_one(
+        {
+            "id": request_id,
+            "$or": [
+                {"requesting_company_id": company_id},
+                {"supplying_company_id": company_id},
+            ],
+        },
+        {"_id": 0},
+    )
+    if not request:
+        raise HTTPException(404, "Intercompany request not found")
+    is_supplier = request["supplying_company_id"] == company_id
+    if not is_supplier and not request.get("invoice_sent"):
+        raise HTTPException(404, "Invoice has not been sent to the requesting company")
+    if not request.get("invoice_id"):
+        raise HTTPException(404, "Invoice has not been created")
+    supplier_db = tenant_database(client, base_db, request["supplying_company_id"])
+    invoice = await supplier_db.invoices.find_one(
+        {"id": request["invoice_id"], "intercompany_request_id": request_id},
+        {"_id": 0},
+    )
+    if not invoice:
+        raise HTTPException(404, "Linked invoice not found")
+    payments = await supplier_db.payments.find(
+        {
+            "invoice_id": invoice["id"],
+            "reversed": {"$ne": True},
+            "archived": {"$ne": True},
+        },
+        {"_id": 0, "amount": 1},
+    ).to_list(None)
+    invoice["amount_paid"] = r2(dsum(payment.get("amount", 0) for payment in payments))
+    compute_invoice(invoice)
+    invoice["status"] = derive_status(invoice)
+
+    stored_settings = await supplier_db.settings.find_one(
+        {"id": "singleton"}, {"_id": 0},
+    ) or {}
+    settings_defaults = {
+        **seed_data.DEFAULT_SETTINGS,
+        **COMPANY_INVOICE_DETAILS.get(request["supplying_company_id"], {}),
+    }
+    settings = {
+        key: stored_settings.get(key, settings_defaults.get(key, ""))
+        for key in (
+            "company_name", "address", "telephone", "email",
+            "tax_number", "banking_details",
+        )
+    }
+    settings["unified_price_list"] = uses_unified_price_list(
+        request["supplying_company_id"],
+    )
+    customer = await supplier_db.customers.find_one(
+        {
+            "id": invoice.get("customer_id"),
+            "company_id": request["supplying_company_id"],
+        },
+        {"_id": 0, "id": 1, "address": 1, "city": 1, "phone": 1, "email": 1},
+    ) if invoice.get("customer_id") else None
+    return {"invoice": invoice, "settings": settings, "customer": customer or {}}
+
 @api.get("/vehicles")
 async def get_vehicles(user=Depends(get_current_user)):
-    return await listall("vehicles", {"archived": {"$ne": True}}, sort=("name", 1))
+    vehicles = await listall("vehicles", {"archived": {"$ne": True}}, sort=("name", 1))
+    filters = vehicle_operational_filters()
+    order_vehicle_ids, delivery_vehicle_ids, maintenance_vehicle_ids = await asyncio.gather(
+        db.orders.distinct("vehicle_id", filters["orders"]),
+        db.deliveries.distinct("vehicle_id", filters["deliveries"]),
+        db.vehicle_records.distinct("vehicle_id", filters["maintenance"]),
+    )
+    assigned_vehicle_ids = set(order_vehicle_ids) | set(delivery_vehicle_ids)
+    assigned_vehicle_ids.discard(None)
+    assigned_vehicle_ids.discard("")
+    maintenance_vehicle_ids = set(maintenance_vehicle_ids)
+    assigned_driver_ids = {
+        vehicle.get("assigned_driver_id")
+        for vehicle in vehicles
+        if vehicle.get("assigned_driver_id")
+    }
+    driver_rows = await db.drivers.find(
+        {"id": {"$in": list(assigned_driver_ids)}},
+        {"_id": 0, "id": 1, "name": 1},
+    ).to_list(len(assigned_driver_ids)) if assigned_driver_ids else []
+    driver_by_id = {driver["id"]: driver for driver in driver_rows}
+    licence_rows = await db.vehicle_licence_discs.aggregate([
+        {"$sort": {"created_at": -1}},
+        {"$group": {"_id": "$vehicle_id", "licence_disc": {"$first": {
+            "id": "$id", "disc_number": "$disc_number", "issue_date": "$issue_date",
+            "expiry_date": "$expiry_date", "created_at": "$created_at",
+        }}}},
+    ]).to_list(None)
+    licence_by_vehicle = {row["_id"]: row["licence_disc"] for row in licence_rows}
+    for vehicle in vehicles:
+        vehicle.pop("assignment_history", None)
+        driver = driver_by_id.get(vehicle.get("assigned_driver_id"))
+        vehicle["assigned_driver"] = driver
+        vehicle["assigned_to_work"] = vehicle["id"] in assigned_vehicle_ids
+        vehicle["maintenance_due"] = vehicle["id"] in maintenance_vehicle_ids
+        vehicle["is_free"] = vehicle_is_free(
+            vehicle,
+            assigned_vehicle_ids | maintenance_vehicle_ids,
+        )
+        disc = licence_by_vehicle.get(vehicle["id"])
+        vehicle["licence_disc"] = {
+            **disc, **vehicle_licence_disc_status(disc.get("expiry_date")),
+        } if disc else None
+    return vehicles
+
+@api.get("/vehicles/assignment-drivers")
+async def list_vehicle_assignment_drivers(
+    q: str = "",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(1, ge=1, le=100),
+    user=Depends(get_current_user),
+):
+    query = {"active": {"$ne": False}}
+    if q.strip():
+        term = re.escape(q.strip()[:80])
+        query["name"] = {"$regex": term, "$options": "i"}
+    total = await db.drivers.count_documents(query)
+    drivers = await db.drivers.find(query, {"_id": 0, "id": 1, "name": 1}).sort(
+        "name", 1,
+    ).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    return {"items": drivers, "page": page, "page_size": page_size, "total": total}
+
+@api.post("/vehicles/{vid}/driver-assignment")
+async def assign_vehicle_driver(
+    vid: str,
+    body: VehicleDriverAssignmentIn,
+    user=Depends(get_current_user),
+):
+    vehicle = await db.vehicles.find_one(
+        {"id": vid, "archived": {"$ne": True}}, {"_id": 0},
+    )
+    if not vehicle:
+        raise HTTPException(404, "Vehicle not found")
+    driver_id = (body.driver_id or "").strip()
+    if driver_id:
+        driver = await db.drivers.find_one(
+            {"id": driver_id, "active": {"$ne": False}}, {"_id": 0, "id": 1, "name": 1},
+        )
+        if not driver:
+            raise HTTPException(404, "Active driver not found")
+        existing_assignment = await db.vehicles.find_one(
+            {
+                "id": {"$ne": vid},
+                "assigned_driver_id": driver_id,
+                "archived": {"$ne": True},
+            },
+            {"_id": 0, "id": 1, "name": 1},
+        )
+        if existing_assignment:
+            raise HTTPException(409, f"Driver is already assigned to {existing_assignment.get('name', 'another vehicle')}")
+    else:
+        driver = None
+    previous_driver_id = vehicle.get("assigned_driver_id")
+    if previous_driver_id == (driver["id"] if driver else None):
+        return vehicle
+    if not previous_driver_id and not driver:
+        return vehicle
+    previous_driver = await db.drivers.find_one(
+        {"id": previous_driver_id}, {"_id": 0, "name": 1},
+    ) if previous_driver_id else None
+    event = {
+        "id": new_id(),
+        "action": "assigned" if driver and not previous_driver_id else (
+            "unassigned" if not driver else "reassigned"
+        ),
+        "previous_driver_id": previous_driver_id,
+        "previous_driver_name": (previous_driver or {}).get("name", ""),
+        "driver_id": driver["id"] if driver else None,
+        "driver_name": driver["name"] if driver else "",
+        "notes": (body.notes or "").strip(),
+        "at": now_iso(),
+        "by": user["id"],
+    }
+    update = {"$push": {"assignment_history": event}}
+    if driver:
+        update["$set"] = {
+            "assigned_driver_id": driver["id"],
+            "assigned_driver_name": driver["name"],
+        }
+    else:
+        update["$unset"] = {
+            "assigned_driver_id": "",
+            "assigned_driver_name": "",
+        }
+    update_filter = {"id": vid, "archived": {"$ne": True}}
+    if previous_driver_id:
+        update_filter["assigned_driver_id"] = previous_driver_id
+    else:
+        update_filter["$or"] = [
+            {"assigned_driver_id": {"$exists": False}},
+            {"assigned_driver_id": None},
+        ]
+    try:
+        updated = await db.vehicles.find_one_and_update(
+            update_filter,
+            update,
+            projection={"_id": 0, "assignment_history": 0},
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError as error:
+        raise HTTPException(409, "That driver has already been assigned to another vehicle") from error
+    if not updated:
+        raise HTTPException(409, "Vehicle changed; reload before assigning a driver")
+    audit_before = {key: value for key, value in vehicle.items() if key != "assignment_history"}
+    await log_audit("vehicle", vid, "driver_assigned", user, before=audit_before, after=updated)
+    return updated
+
+@api.get("/vehicles/{vid}/assignment-history")
+async def get_vehicle_assignment_history(
+    vid: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(1, ge=1, le=50),
+    user=Depends(get_current_user),
+):
+    vehicle = await db.vehicles.find_one(
+        {"id": vid, "archived": {"$ne": True}},
+        {"_id": 0, "assignment_history": 1},
+    )
+    if not vehicle:
+        raise HTTPException(404, "Vehicle not found")
+    history = list(reversed(vehicle.get("assignment_history") or []))
+    start = (page - 1) * page_size
+    return {
+        "items": history[start:start + page_size],
+        "page": page,
+        "page_size": page_size,
+        "total": len(history),
+    }
+
+@api.get("/vehicles/summary")
+async def get_vehicle_summaries(user=Depends(get_current_user)):
+    rows = await db.vehicle_records.aggregate([
+        {"$match": {"archived": {"$ne": True}, "vehicle_id": {"$nin": ["", None]}}},
+        {"$group": {
+            "_id": {
+                "vehicle_id": "$vehicle_id",
+                "type": "$type",
+                "status": "$status",
+            },
+            "amount": {"$sum": {"$convert": {
+                "input": "$amount", "to": "double", "onError": 0, "onNull": 0,
+            }}},
+            "count": {"$sum": 1},
+        }},
+    ]).to_list(None)
+    return [{
+        "vehicle_id": row["_id"]["vehicle_id"],
+        "type": row["_id"].get("type"),
+        "status": row["_id"].get("status"),
+        "amount": row["amount"],
+        "count": row["count"],
+    } for row in rows]
+
+@api.get("/vehicles/{vid}/records/history")
+async def get_vehicle_record_history(
+    vid: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=50),
+    user=Depends(get_current_user),
+):
+    if not await db.vehicles.find_one({"id": vid, "archived": {"$ne": True}}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Vehicle not found")
+    query = {"vehicle_id": vid}
+    collection = db.vehicle_records
+    total = await collection.count_documents(query)
+    records = await collection.find(query, {"_id": 0}).sort(
+        "date", -1,
+    ).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    return {"items": records, "page": page, "page_size": page_size, "total": total}
+
+@api.get("/vehicles/{vid}/licence-discs")
+async def get_vehicle_licence_discs(
+    vid: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    user=Depends(get_current_user),
+):
+    if not await db.vehicles.find_one({"id": vid, "archived": {"$ne": True}}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Vehicle not found")
+    query = {"vehicle_id": vid}
+    collection = db.vehicle_licence_discs
+    total = await collection.count_documents(query)
+    records = await collection.find(query, {"_id": 0, "document_base64": 0}).sort(
+        "created_at", -1,
+    ).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    for record in records:
+        record.update(vehicle_licence_disc_status(record.get("expiry_date")))
+    return {"items": records, "page": page, "page_size": page_size, "total": total}
+
+@api.post("/vehicles/{vid}/licence-discs")
+async def add_vehicle_licence_disc(
+    vid: str,
+    body: VehicleLicenceDiscIn,
+    user=Depends(get_current_user),
+):
+    if not await db.vehicles.find_one({"id": vid, "archived": {"$ne": True}}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Vehicle not found")
+    try:
+        document = base64.b64decode(body.document_base64, validate=True)
+    except (ValueError, base64.binascii.Error) as error:
+        raise HTTPException(400, "Licence disc document is not valid base64") from error
+    if not document or len(document) > 5 * 1024 * 1024:
+        raise HTTPException(400, "Licence disc document must be between 1 byte and 5 MB")
+    signatures = {
+        "application/pdf": document.startswith(b"%PDF-"),
+        "image/jpeg": document.startswith(b"\xff\xd8\xff"),
+        "image/png": document.startswith(b"\x89PNG\r\n\x1a\n"),
+    }
+    if not signatures[body.document_content_type]:
+        raise HTTPException(400, "The uploaded file does not match its declared type")
+    if body.issue_date and body.issue_date > body.expiry_date:
+        raise HTTPException(400, "Issue date cannot be after expiry date")
+    record = {
+        "id": new_id(),
+        "vehicle_id": vid,
+        "disc_number": body.disc_number,
+        "issue_date": body.issue_date,
+        "expiry_date": body.expiry_date,
+        "document_name": body.document_name,
+        "document_content_type": body.document_content_type,
+        "document_base64": body.document_base64,
+        "document_size": len(document),
+        "created_at": now_iso(),
+        "created_by": user["id"],
+    }
+    try:
+        await db.vehicle_licence_discs.insert_one(record)
+    except DuplicateKeyError as error:
+        raise HTTPException(409, "A licence disc expiry event already exists for this vehicle and date") from error
+    await log_audit("vehicle", vid, "licence_disc_registered", user, after={
+        key: value for key, value in record.items()
+        if key != "document_base64"
+    })
+    return {
+        **{key: value for key, value in record.items() if key != "document_base64"},
+        **vehicle_licence_disc_status(record["expiry_date"]),
+    }
+
+@api.get("/vehicles/{vid}/licence-discs/{disc_id}/document")
+async def get_vehicle_licence_disc_document(vid: str, disc_id: str, user=Depends(get_current_user)):
+    record = await db.vehicle_licence_discs.find_one(
+        {"id": disc_id, "vehicle_id": vid}, {"_id": 0},
+    )
+    if not record:
+        raise HTTPException(404, "Licence disc document not found")
+    document = base64.b64decode(record["document_base64"], validate=True)
+    safe_filename = re.sub(r"[^A-Za-z0-9._ -]", "_", record["document_name"]).strip(" .") or "licence-document"
+    return StreamingResponse(
+        iter([document]),
+        media_type=record["document_content_type"],
+        headers={
+            "Content-Disposition": f'inline; filename="{safe_filename}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 @api.post("/vehicles")
 async def add_vehicle(body: VehicleIn, user=Depends(get_current_user)):
-    return await insert("vehicles", body.model_dump())
+    rec = await insert("vehicles", body.model_dump())
+    await emit_workflow_event("vehicle.created", rec)
+    return rec
 
 @api.put("/vehicles/{vid}")
 async def edit_vehicle(vid: str, body: VehicleIn, user=Depends(get_current_user)):
-    return await update_doc("vehicles", vid, body.model_dump())
+    rec = await update_doc("vehicles", vid, body.model_dump())
+    await emit_workflow_event("vehicle.updated", rec)
+    return rec
 
 @api.delete("/vehicles/{vid}")
 async def delete_vehicle(vid: str, user=Depends(get_current_user)):
@@ -4290,6 +6575,7 @@ async def delete_vehicle(vid: str, user=Depends(get_current_user)):
         "archived": True, "archived_at": now_iso(), "archived_by": user.get("id"),
     })
     await log_audit("vehicle", vid, "archived", user, before=vehicle, after=updated)
+    await emit_workflow_event("vehicle.archived", updated)
     return {"ok": True, "archived": True}
 
 # ---------------- Deliveries ----------------
@@ -4326,7 +6612,9 @@ async def add_delivery(body: DeliveryIn, user=Depends(get_current_user)):
         if cust:
             d["customer_name"] = cust["name"]
     d["dispatched"] = False
-    return await insert("deliveries", d)
+    rec = await insert("deliveries", d)
+    await emit_workflow_event("delivery.created", rec)
+    return rec
 
 @api.delete("/deliveries/{did}")
 async def delete_delivery(did: str, user=Depends(get_current_user)):
@@ -4341,6 +6629,8 @@ async def delete_delivery(did: str, user=Depends(get_current_user)):
         "status": "Cancelled",
     })
     await log_audit("delivery", did, "cancelled", user, before=existing, after=updated)
+    if existing.get("status") != updated.get("status"):
+        await emit_workflow_event("delivery.status_changed", updated)
     return {"ok": True, "cancelled": True}
 
 @api.put("/deliveries/{did}")
@@ -4364,6 +6654,7 @@ async def edit_delivery(did: str, body: DeliveryIn, user=Depends(get_current_use
     rec = await update_doc("deliveries", did, d)
     if existing.get("status") != rec.get("status"):
         await log_audit("delivery", did, "status_changed", user, before={"status": existing.get("status")}, after={"status": rec.get("status")})
+        await emit_workflow_event("delivery.status_changed", rec)
     return rec
 
 @api.post("/deliveries/{did}/dispatch")
@@ -4404,6 +6695,9 @@ async def dispatch_delivery(did: str, user=Depends(get_current_user)):
                "actual_departure": d.get("actual_departure") or local_now().strftime("%Y-%m-%dT%H:%M")}
         rec = await update_doc("deliveries", did, upd)
         await log_audit("delivery", did, "dispatched", user, after={"items": d.get("items")})
+        if d.get("status") != rec.get("status"):
+            await emit_workflow_event("delivery.status_changed", rec)
+        await emit_workflow_event("delivery.dispatched", rec)
         return rec
     finally:
         await db.deliveries.update_one({"id": did}, {"$unset": {"dispatching": ""}})
@@ -4634,44 +6928,97 @@ async def update_diesel_price(body: DieselPriceUpdate, user=Depends(get_current_
 
 # ---------------- Dashboard ----------------
 @api.get("/dashboard")
-async def dashboard(period: str = "month", user=Depends(get_current_user)):
-    (
-        invs, pays, stock, prod, att_today, deliveries, orders, parts_to_buy,
-        vehicles, vrecs, settings, expenses, buyings,
-    ) = await asyncio.gather(
-        listall("invoices", {"archived": {"$ne": True}}),
-        listall("payments", {"archived": {"$ne": True}}),
-        listall("stock"),
-        listall("production", {"archived": {"$ne": True}}),
-        listall("attendance", {"date": today_str()}),
-        listall("deliveries", {"archived": {"$ne": True}}),
-        listall("orders", {"archived": {"$ne": True}}, sort=("created_at", -1)),
-        listall("spareparts", {"status": "to_buy"}),
-        listall("vehicles"),
-        listall("vehicle_records"),
-        db.settings.find_one({"id": "singleton"}),
-        listall("expenses", {"voided": {"$ne": True}, "archived": {"$ne": True}}),
-        listall("buyings", {"voided": {"$ne": True}, "archived": {"$ne": True}}),
+async def dashboard(
+    period: str = "month",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    (period_start, period_end), (previous_start, previous_end) = dashboard_period_ranges(
+        period, start_date, end_date,
     )
-    for i in invs:
-        i["status"] = derive_status(i)
-    valid = [i for i in invs if i["status"] not in ("void", "draft")]
-    total_invoiced = dsum(i.get("total", 0) for i in valid if not i.get("opening_balance"))
-    pays = [p for p in pays if not p.get("reversed")]
-    payments_received = dsum(p.get("amount", 0) for p in pays)
-    outstanding = dsum(i.get("outstanding", 0) for i in valid)
-    overdue = dsum(i.get("outstanding", 0) for i in valid if i["status"] == "overdue")
+    today = today_str()
+    week, month = period_starts()
+    incomplete_order_statuses = INCOMPLETE_ORDER_STATUSES
+    financial_periods = {}
 
-    if stock:
-        movements = await listall(
-            "stock_movements", {"stock_id": {"$in": [s["id"] for s in stock]}}, limit=None,
+    async def period_financials(bounds):
+        key = tuple(bounds)
+        if key not in financial_periods:
+            financial_periods[key] = asyncio.create_task(
+                dashboard_financial_period(*key),
+            )
+        return await financial_periods[key]
+
+    week_range = (week, today)
+    month_range = (month, today)
+    financial_tasks = [
+        asyncio.create_task(period_financials(bounds))
+        for bounds in (
+            week_range,
+            month_range,
+            (period_start, period_end),
+            (previous_start, previous_end),
         )
-        movements_by_stock = {}
-        for movement in movements:
-            movements_by_stock.setdefault(movement["stock_id"], []).append(movement)
-        for item in stock:
-            apply_stock_movements(item, movements_by_stock.get(item["id"], []))
-    finished_stock = r2(sum(s.get("current", 0) for s in stock))
+    ]
+    order_open_filter = {
+        "status": {"$in": OPEN_ORDER_STATUSES},
+        "archived": {"$ne": True},
+    }
+    fleet_filters = vehicle_operational_filters()
+    active_order_vehicle_filter = fleet_filters["orders"]
+    active_delivery_vehicle_filter = fleet_filters["deliveries"]
+    maintenance_filter = fleet_filters["maintenance"]
+    stock_task = asyncio.create_task(listall("stock"))
+    (
+        recent_invoices, prod, att_today, deliveries, orders_to_send, open_order_count,
+        urgent_orders, vehicles, maintenance_vehicle_ids, assigned_order_vehicle_ids,
+        assigned_delivery_vehicle_ids, all_time_payments, all_time_invoice_totals, settings,
+        completed_orders_today, parts_to_buy, stock,
+    ) = await asyncio.gather(
+        listall("invoices", {"archived": {"$ne": True}}, sort=("created_at", -1), limit=8),
+        listall(
+            "production",
+            {
+                "status": {"$in": ["Ready for Cutting", "Resting"]},
+                "archived": {"$ne": True},
+            },
+        ),
+        listall("attendance", {"date": today}),
+        listall(
+            "deliveries",
+            {"status": {"$in": ACTIVE_DELIVERY_STATUSES}, "archived": {"$ne": True}},
+            limit=8,
+        ),
+        listall("orders", order_open_filter, sort=("created_at", -1), limit=8),
+        db.orders.count_documents(order_open_filter),
+        db.orders.count_documents({
+            "status": {"$in": incomplete_order_statuses},
+            "priority": "Urgent",
+            "archived": {"$ne": True},
+        }),
+        listall("vehicles", {"archived": {"$ne": True}}),
+        db.vehicle_records.distinct("vehicle_id", maintenance_filter),
+        db.orders.distinct("vehicle_id", active_order_vehicle_filter),
+        db.deliveries.distinct("vehicle_id", active_delivery_vehicle_filter),
+        dashboard_all_time_payment_total(),
+        dashboard_all_time_invoice_totals(today),
+        db.settings.find_one({"id": "singleton"}),
+        dashboard_completed_orders_today(today),
+        listall("spareparts", {"status": "to_buy"}),
+        stock_task,
+    )
+    stock_movement_totals = await dashboard_stock_movement_totals(
+        [item["id"] for item in stock if item.get("id")],
+    )
+    upcoming = deliveries
+    outstanding = all_time_invoice_totals["outstanding"]
+    for item in stock:
+        item["current"] = r2(
+            D(item.get("opening", 0))
+            + D(stock_movement_totals.get(item["id"], 0))
+        )
+    finished_stock = r2(sum((D(item["current"]) for item in stock), Decimal("0")))
     low_stock = [s for s in stock if s.get("current", 0) <= s.get("threshold", 0)]
 
     hours = await resting_hours()
@@ -4679,29 +7026,52 @@ async def dashboard(period: str = "month", user=Depends(get_current_user)):
         enrich_production(p, hours)
     ready_cutting = [p for p in prod if p.get("status") == "Ready for Cutting" or (p.get("status") == "Resting" and p["rest_elapsed"])]
     resting = [p for p in prod if p.get("status") == "Resting" and not p["rest_elapsed"]]
-    completed_today = [p for p in prod if p.get("status") == "Completed" and (p.get("updated_at") or "")[:10] == today_str()]
-
-    upcoming = [d for d in deliveries if d.get("status") in ("Planned", "Assigned", "Ready", "Dispatched")][:8]
-
-    recent_invoices = sorted(invs, key=lambda x: x.get("created_at", ""), reverse=True)[:8]
-
-    open_orders = [o for o in orders if o.get("status") in OPEN_ORDER_STATUSES]
-    orders_to_send = open_orders[:8]
-    week, month = period_starts()
-    (period_start, period_end), (previous_start, previous_end) = dashboard_period_ranges(period)
-    profit_periods = [
-        (week, None),
-        (month, None),
-        (period_start, period_end),
-        (previous_start, previous_end),
+    for invoice in recent_invoices:
+        invoice["status"] = derive_status(invoice)
+    maintenance_vehicle_ids = set(maintenance_vehicle_ids)
+    assigned_vehicle_ids = set(assigned_order_vehicle_ids) | set(assigned_delivery_vehicle_ids)
+    active_vehicle_ids = {vehicle["id"] for vehicle in vehicles if vehicle.get("id")}
+    maint_due = maintenance_vehicle_ids & active_vehicle_ids
+    assigned_driver_vehicle_ids = {
+        vehicle["id"] for vehicle in vehicles if vehicle.get("assigned_driver_id")
+    }
+    assigned_vehicle_ids |= assigned_driver_vehicle_ids
+    unavailable_vehicle_ids = assigned_vehicle_ids | maint_due
+    available_vehicles = [
+        vehicle for vehicle in vehicles
+        if vehicle.get("vtype") != "Trailer"
     ]
-    calculated_profits = [
-        profit_from_records(*bounds, payments=pays, expenses=expenses, vehicle_records=vrecs,
-                            buyings=buyings)
-        for bounds in profit_periods
+    free_vehicles = [
+        vehicle for vehicle in available_vehicles
+        if vehicle_is_free(vehicle, unavailable_vehicle_ids)
     ]
-    week_profit, month_profit, selected_profit, previous_profit = calculated_profits
-    maint_due = [r for r in vrecs if r.get("status") in ("Needed", "Scheduled", "needed")]
+    fleet_alerts_visible = (
+        not user.get("is_worker")
+        or "fleet" in (user.get("worker_allowed_sections") or [])
+    )
+    licence_alerts = (
+        await dashboard_vehicle_licence_alerts(today)
+        if fleet_alerts_visible else {"expiring_soon": 0, "expired": 0, "items": []}
+    )
+    licence_alerts["maintenance_required"] = [
+        {"vehicle_id": vehicle["id"], "vehicle_name": vehicle.get("name", "")}
+        for vehicle in vehicles
+        if fleet_alerts_visible and vehicle.get("id") in maint_due
+    ][:10]
+    licence_alerts["maintenance_required_count"] = len(maint_due) if fleet_alerts_visible else 0
+
+    week_profit, month_profit, selected_profit, previous_profit = await asyncio.gather(
+        *financial_tasks,
+    )
+    recent_invoice_balances = await dashboard_invoice_outstanding_by_id(
+        recent_invoices,
+    )
+    for invoice in recent_invoices:
+        invoice["outstanding"] = recent_invoice_balances.get(invoice.get("id"), 0)
+        invoice["status"] = derive_status({
+            **invoice,
+            "outstanding": invoice["outstanding"],
+        })
 
     settings = settings or {}
     recommendations = []
@@ -4715,29 +7085,29 @@ async def dashboard(period: str = "month", user=Depends(get_current_user)):
                                     "reason": f"Available {avail} is below minimum {s['threshold']}; target stock {target}"})
 
     return {
-        "total_invoiced": total_invoiced,
-        "payments_received": payments_received,
+        "total_invoiced": selected_profit["total_invoiced"],
+        "total_invoiced_all_time": all_time_invoice_totals["total_invoiced"],
+        "payments_received": all_time_payments,
         "diesel_price": settings.get("diesel_price"),
         "diesel_price_date": settings.get("diesel_price_date") or "",
         "diesel_updated_at": settings.get("diesel_updated_at") or "",
         "diesel_sources": settings.get("diesel_sources") or [],
         "diesel_price_current": diesel_price_is_current(settings.get("diesel_price_date")) and settings.get("diesel_price") is not None,
         "outstanding": outstanding,
-        "overdue": overdue,
+        "overdue": all_time_invoice_totals["overdue"],
         "finished_stock": finished_stock,
         "low_stock": low_stock,
         "recommendations": recommendations,
         "ready_cutting": ready_cutting,
         "resting": resting,
-        "completed_today": len(completed_today),
+        "completed_today": completed_orders_today,
         "attendance_today": att_today,
         "upcoming_deliveries": upcoming,
         "recent_invoices": recent_invoices,
         "current_stock": stock,
-        "invoice_count": len(valid),
         "orders_to_send": orders_to_send,
-        "orders_open_count": len(open_orders),
-        "urgent_orders": len([o for o in open_orders if o.get("priority") == "Urgent"]),
+        "orders_open_count": open_order_count,
+        "urgent_orders": urgent_orders,
         "week_profit": week_profit,
         "month_profit": month_profit,
         "selected_period": period,
@@ -4748,8 +7118,9 @@ async def dashboard(period: str = "month", user=Depends(get_current_user)):
         "previous_period_start": previous_start,
         "previous_period_end": previous_end,
         "parts_to_buy_count": len(parts_to_buy),
-        "vehicles_available": len([v for v in vehicles if v.get("available") and v.get("vtype") != "Trailer"]),
-        "vehicles_total": len([v for v in vehicles if v.get("vtype") != "Trailer"]),
+        "vehicles_available": len(free_vehicles),
+        "vehicles_total": len(available_vehicles),
+        "fleet_alerts": licence_alerts,
         "trailers_total": len([v for v in vehicles if v.get("vtype") == "Trailer"]),
         "maintenance_due": len(maint_due),
         "timezone": "Africa/Johannesburg",
@@ -4826,6 +7197,7 @@ async def add_buying(body: BuyingIn, user=Depends(get_current_user)):
     data["amount"] = buying_amount(data["quantity"], data["unit_price"])
     rec = await insert("buyings", data)
     await log_audit("buying", rec["id"], "created", user, after=rec)
+    await emit_workflow_event("buying.created", rec)
     return rec
 
 @api.put("/buyings/{bid}")
@@ -4856,6 +7228,7 @@ async def edit_buying(bid: str, body: BuyingIn, user=Depends(get_current_user)):
     data["amount"] = buying_amount(data["quantity"], data["unit_price"])
     rec = await update_doc("buyings", bid, data)
     await log_audit("buying", bid, "updated", user, before=before, after=rec)
+    await emit_workflow_event("buying.updated", rec)
     if authorization:
         await db.buying_edit_authorizations.delete_one({"id": authorization["id"]})
     return rec
@@ -4898,6 +7271,7 @@ async def void_buying(bid: str, body: ReasonIn, user=Depends(get_current_user)):
     if not rec:
         raise HTTPException(404, "Buying not found or already voided")
     await log_audit("buying", bid, "voided", user, reason=body.reason)
+    await emit_workflow_event("buying.voided", rec)
     return rec
 
 # ---------------- Suppliers and purchase orders ----------------
@@ -4927,6 +7301,7 @@ async def add_supplier(body: SupplierIn, user=Depends(get_current_user)):
     data.update({"name": name, "name_key": name.casefold()})
     rec = await insert("suppliers", data)
     await log_audit("supplier", rec["id"], "created", user, after=rec)
+    await emit_workflow_event("supplier.created", rec)
     return rec
 
 @api.put("/suppliers/{supplier_id}")
@@ -4943,6 +7318,7 @@ async def edit_supplier(supplier_id: str, body: SupplierIn, user=Depends(get_cur
     data.update({"name": name, "name_key": name.casefold()})
     rec = await update_doc("suppliers", supplier_id, data)
     await log_audit("supplier", supplier_id, "updated", user, before=before, after=rec)
+    await emit_workflow_event("supplier.updated", rec)
     return rec
 
 @api.delete("/suppliers/{supplier_id}")
@@ -4952,6 +7328,7 @@ async def deactivate_supplier(supplier_id: str, user=Depends(get_current_user)):
         raise HTTPException(404, "Supplier not found")
     rec = await update_doc("suppliers", supplier_id, {"active": False, "archived_at": now_iso()})
     await log_audit("supplier", supplier_id, "deactivated", user, before=before, after=rec)
+    await emit_workflow_event("supplier.deactivated", rec)
     return {"ok": True, "deactivated": True}
 
 class PurchaseOrderLineIn(BaseModel):
@@ -5581,6 +7958,9 @@ async def create_grv(body: GRVIn, user=Depends(get_current_user)):
     }
     created = await insert("grvs", record)
     await log_audit("grv", created["id"], "created", user, after=created)
+    await emit_workflow_event("grv.created", {
+        **created, "item_count": len(created.get("items", [])),
+    })
     return created
 
 @api.put("/grvs/{grv_id}")
@@ -5628,6 +8008,9 @@ async def edit_grv(grv_id: str, body: GRVIn, user=Depends(get_current_user)):
         raise HTTPException(409, "Only draft GRVs can be edited; reload and try again")
     updated = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
     await log_audit("grv", grv_id, "edited", user, before=before, after=updated)
+    await emit_workflow_event("grv.updated", {
+        **updated, "item_count": len(updated.get("items", [])),
+    })
     return updated
 
 @api.post("/grvs/{grv_id}/inspect")
@@ -5649,6 +8032,9 @@ async def mark_grv_pending_inspection(grv_id: str, user=Depends(get_current_user
         raise HTTPException(409, "Only draft GRVs can enter inspection")
     updated = before
     await log_audit("grv", grv_id, "pending_inspection", user, before=before, after=updated)
+    await emit_workflow_event("grv.pending_inspection", {
+        **updated, "item_count": len(updated.get("items", [])),
+    })
     return updated
 
 @api.post("/grvs/{grv_id}/confirm")
@@ -5830,6 +8216,15 @@ async def confirm_grv(grv_id: str, user=Depends(get_current_user)):
                         {"$unset": {"receiving_grv_id": ""}},
                     )
         await log_audit("grv", grv_id, "confirmed", user, before=grv, after=updated)
+        await emit_workflow_event("grv.confirmed", {
+            **updated, "item_count": len(updated.get("items", [])),
+        })
+        if updated.get("purchase_order_id"):
+            received_order = await db.purchase_orders.find_one(
+                {"id": updated["purchase_order_id"]}, {"_id": 0},
+            )
+            if received_order:
+                await emit_workflow_event("purchase_order.received", received_order)
         return updated
     except HTTPException:
         raise
@@ -5861,6 +8256,9 @@ async def cancel_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user)
         raise HTTPException(409, "Only unconfirmed GRVs can be cancelled")
     await log_audit("grv", grv_id, "cancelled", user, before=original, after=before,
                     reason=body.reason.strip())
+    await emit_workflow_event("grv.cancelled", {
+        **before, "item_count": len(before.get("items", [])),
+    })
     return before
 
 @api.post("/grvs/{grv_id}/reverse")
@@ -6005,6 +8403,9 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
         "audit": audit,
     })
     await log_audit("grv", grv_id, "reversed", user, before=grv, after=updated, reason=reason)
+    await emit_workflow_event("grv.cancelled", {
+        **updated, "item_count": len(updated.get("items", [])),
+    })
     return updated
 
 @api.delete("/grvs/{grv_id}")
@@ -6045,6 +8446,7 @@ async def add_purchase_order(body: PurchaseOrderIn, user=Depends(get_current_use
     data.update({"reference": await next_ref("purchase-order", "PO"), "status": "draft"})
     rec = await insert("purchase_orders", data)
     await log_audit("purchase_order", rec["id"], "created", user, after=rec)
+    await emit_workflow_event("purchase_order.created", rec)
     return rec
 
 @api.put("/purchase-orders/{order_id}")
@@ -6058,6 +8460,7 @@ async def edit_purchase_order(order_id: str, body: PurchaseOrderIn, user=Depends
     data = await _purchase_order_data(body)
     rec = await update_doc("purchase_orders", order_id, data)
     await log_audit("purchase_order", order_id, "updated", user, before=before, after=rec)
+    await emit_workflow_event("purchase_order.updated", rec)
     return rec
 
 @api.post("/purchase-orders/{order_id}/order")
@@ -6070,6 +8473,7 @@ async def place_purchase_order(order_id: str, user=Depends(get_current_user)):
     if not rec:
         raise HTTPException(409, "Purchase order is not a draft")
     await log_audit("purchase_order", order_id, "ordered", user, after=rec)
+    await emit_workflow_event("purchase_order.ordered", rec)
     return rec
 
 @api.post("/purchase-orders/{order_id}/receive")
@@ -6332,7 +8736,17 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
         raise HTTPException(422, "Report date must be a valid YYYY-MM-DD date")
 
     invoice_records, payments, expense_records = await asyncio.gather(
-        daily_report_records("invoices", selected_date, {"archived": {"$ne": True}}),
+        daily_report_records(
+            "invoices",
+            selected_date,
+            {
+                "archived": {"$ne": True},
+                "$or": [
+                    {"invoice_type": {"$ne": "express"}},
+                    {"invoice_type": "express", "include_on_daily_report": True},
+                ],
+            },
+        ),
         daily_report_records(
             "payments",
             selected_date,
@@ -6387,12 +8801,19 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
     payment_rows = []
     for payment in payments:
         invoice = invoice_by_id.get(payment.get("invoice_id"), {})
+        if invoice.get("invoice_type") == "express":
+            if payment.get("daily_report_inclusion_set"):
+                if not payment.get("include_on_daily_report"):
+                    continue
+            elif not invoice.get("include_on_daily_report") and not payment.get("include_on_daily_report"):
+                continue
         note_parts = []
         for value in (
             payment.get("notes"),
             payment.get("reference"),
             payment.get("description"),
             payment.get("method"),
+            payment.get("receiving_on"),
         ):
             text = str(value or "").strip()
             if text and text not in note_parts:
@@ -6405,6 +8826,16 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
             "notes": " | ".join(note_parts),
         })
 
+    home_expense_rows = [
+        {
+            "id": expense.get("id"),
+            "category": expense.get("category") or "Home",
+            "description": expense.get("description") or "",
+            "amount": r2(expense.get("amount", 0)),
+        }
+        for expense in expense_records
+        if str(expense.get("category") or "").strip().casefold() == "home"
+    ]
     expense_rows = [
         {
             "id": expense.get("id"),
@@ -6413,7 +8844,7 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
             "amount": r2(expense.get("amount", 0)),
         }
         for expense in expense_records
-        if str(expense.get("category") or "").strip().casefold() not in fuel_categories
+        if str(expense.get("category") or "").strip().casefold() not in fuel_categories | {"home"}
     ]
     vehicle_by_id = {vehicle["id"]: vehicle for vehicle in vehicles}
     diesel_rows = []
@@ -6449,12 +8880,14 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
         "pending_invoices": pending_invoices,
         "payments": payment_rows,
         "expenses": expense_rows,
+        "home_expenses": home_expense_rows,
         "diesel_usage": diesel_rows,
         "unassigned_fuel_expenses": unassigned_fuel_rows,
         "totals": {
             "sending": dsum(row["amount"] for row in invoices),
             "received": dsum(row["amount"] for row in payment_rows),
             "expenses": dsum(row["amount"] for row in expense_rows),
+            "home_expenses": dsum(row["amount"] for row in home_expense_rows),
             "diesel": dsum(row["amount"] for row in diesel_rows),
         },
     }
@@ -6477,6 +8910,14 @@ def financial_period_range(period, value):
         next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
         return start, next_month - timedelta(days=1)
     raise HTTPException(422, "Period must be weekly or monthly")
+
+def financial_previous_period_range(period, start, end):
+    previous_end = start - timedelta(days=1)
+    if period == "monthly":
+        previous_start = previous_end.replace(day=1)
+    else:
+        previous_start = previous_end - (end - start)
+    return previous_start, previous_end
 
 def financial_record_date(record, field="date"):
     value = record.get(field)
@@ -6531,7 +8972,8 @@ def _financial_transaction(record, category, amount, description=None, supplier=
     }
 
 def build_financial_report(start, end, mode, *, invoices, payments, linked_payments,
-                           expenses, vehicle_records, buyings, grvs, invoice_movements):
+                           expenses, vehicle_records, buyings, grvs, invoice_movements,
+                           payment_invoices=None):
     payments_by_invoice = {}
     for payment in linked_payments:
         if payment.get("reversed") or payment.get("archived"):
@@ -6552,6 +8994,39 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
     revenue_values = []
     pending_values = []
     invoices_by_id = {invoice.get("id"): invoice for invoice in issued_invoices}
+    referenced_invoices_by_id = {
+        invoice.get("id"): invoice
+        for invoice in (payment_invoices or [])
+        if invoice.get("id")
+    }
+    referenced_invoices_by_id.update(invoices_by_id)
+    payment_history_by_invoice = {}
+    payment_balance_after_by_id = {}
+    for payment in linked_payments:
+        if payment.get("reversed") or payment.get("archived"):
+            continue
+        invoice_id = payment.get("invoice_id")
+        if invoice_id:
+            payment_history_by_invoice.setdefault(invoice_id, []).append(payment)
+    for invoice_id, history in payment_history_by_invoice.items():
+        invoice = referenced_invoices_by_id.get(invoice_id)
+        if not invoice:
+            continue
+        running_paid = Decimal("0")
+        for payment in sorted(
+            history,
+            key=lambda row: (
+                str(row.get("date") or ""),
+                str(row.get("created_at") or ""),
+                str(row.get("id") or ""),
+            ),
+        ):
+            running_paid += D(payment.get("amount", 0))
+            if payment.get("id"):
+                payment_balance_after_by_id[payment["id"]] = r2(
+                    max(D(invoice.get("total", 0)) - running_paid, Decimal("0"))
+                )
+
     for invoice in issued_invoices:
         amount = r2(invoice.get("total", 0))
         revenue_values.append(amount)
@@ -6560,12 +9035,38 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
             paid = D(invoice.get("amount_paid", 0))
         outstanding = max(D(amount) - paid, Decimal("0"))
         pending_values.append(outstanding)
+        status_invoice = {
+            **invoice,
+            "amount_paid": float(paid),
+            "outstanding": float(outstanding),
+        }
+        payment_history = sorted(
+            payment_history_by_invoice.get(invoice.get("id"), []),
+            key=lambda row: (
+                str(row.get("date") or ""),
+                str(row.get("created_at") or ""),
+                str(row.get("id") or ""),
+            ),
+        )
         invoice_rows.append(_financial_transaction(
             invoice, "Invoice", amount,
             description=invoice.get("customer_name") or invoice.get("description") or "",
             reference=invoice.get("number") or "",
         ) | {"number": invoice.get("number"), "customer_name": invoice.get("customer_name", ""),
-             "outstanding": r2(outstanding), "status": derive_status(invoice),
+             "amount_paid": r2(paid), "outstanding": r2(outstanding),
+             "balance_remaining": r2(outstanding), "status": derive_status(status_invoice),
+             "payment_records": [
+                 {
+                     "id": payment.get("id"),
+                     "date": payment.get("date") or "",
+                     "amount": r2(payment.get("amount", 0)),
+                     "method": payment.get("method") or "",
+                     "reference": payment.get("reference") or "",
+                     "notes": payment.get("notes") or "",
+                     "balance_remaining": payment_balance_after_by_id.get(payment.get("id")),
+                 }
+                 for payment in payment_history
+             ],
              "items": invoice.get("items") or []})
         if outstanding > 0:
             pending_rows.append({
@@ -6574,17 +9075,45 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
                 "due_date": invoice.get("due_date"), "amount": r2(outstanding),
             })
 
-    payment_rows = [
-        _financial_transaction(
-            payment, "Payment", payment.get("amount", 0),
-            description=payment.get("customer_name") or payment.get("notes") or "",
-            reference=payment.get("reference") or payment.get("invoice_number") or "",
-        ) | {"invoice_id": payment.get("invoice_id"),
-             "invoice_number": payment.get("invoice_number", ""),
-             "method": payment.get("method", ""), "notes": payment.get("notes", "")}
-        for payment in payments
-        if not payment.get("reversed") and not payment.get("archived")
-    ]
+    payment_rows = []
+    for payment in payments:
+        if payment.get("reversed") or payment.get("archived"):
+            continue
+        linked_invoice = referenced_invoices_by_id.get(payment.get("invoice_id"))
+        payment_rows.append(
+            _financial_transaction(
+                payment,
+                "Payment",
+                payment.get("amount", 0),
+                description=(
+                    payment.get("customer_name")
+                    or (linked_invoice or {}).get("customer_name")
+                    or payment.get("notes")
+                    or ""
+                ),
+                reference=payment.get("reference") or payment.get("invoice_number") or "",
+            )
+            | {
+                "invoice_id": payment.get("invoice_id"),
+                "invoice_number": (
+                    payment.get("invoice_number")
+                    or (linked_invoice or {}).get("number")
+                    or ""
+                ),
+                "customer_name": (
+                    payment.get("customer_name")
+                    or (linked_invoice or {}).get("customer_name")
+                    or ""
+                ),
+                "method": payment.get("method", ""),
+                "notes": payment.get("notes", ""),
+                "invoice_total": (
+                    r2(linked_invoice.get("total", 0)) if linked_invoice else None
+                ),
+                "balance_remaining": payment_balance_after_by_id.get(payment.get("id")),
+                "invoice_items": (linked_invoice or {}).get("items") or [],
+            }
+        )
 
     expense_rows = [
         _financial_transaction(
@@ -6841,10 +9370,20 @@ async def get_financial_report(
             financial_period_records("grvs", period_start, period_end, date_field="received_date"),
         )
         invoice_ids = [invoice["id"] for invoice in invoices if invoice.get("id")]
+        payment_invoice_ids = list({
+            payment["invoice_id"]
+            for payment in payments
+            if payment.get("invoice_id")
+        } - set(invoice_ids))
+        payment_invoices = await db.invoices.find(
+            {"id": {"$in": payment_invoice_ids}, "archived": {"$ne": True}},
+            {"_id": 0},
+        ).to_list(len(payment_invoice_ids)) if payment_invoice_ids else []
+        linked_invoice_ids = list(set(invoice_ids) | set(payment_invoice_ids))
         linked_payments, invoice_movements = await asyncio.gather(
             db.payments.find({
-                "invoice_id": {"$in": invoice_ids}, "archived": {"$ne": True},
-            }, {"_id": 0}).to_list(None) if invoice_ids else asyncio.sleep(0, result=[]),
+                "invoice_id": {"$in": linked_invoice_ids}, "archived": {"$ne": True},
+            }, {"_id": 0}).to_list(None) if linked_invoice_ids else asyncio.sleep(0, result=[]),
             db.stock_movements.find({
                 "invoice_id": {"$in": invoice_ids}, "type": "invoice",
             }, {"_id": 0}).to_list(None) if invoice_ids else asyncio.sleep(0, result=[]),
@@ -6854,12 +9393,12 @@ async def get_financial_report(
             invoices=invoices, payments=payments, linked_payments=linked_payments,
             expenses=expenses, vehicle_records=vehicle_records, buyings=buyings,
             grvs=grvs, invoice_movements=invoice_movements,
+            payment_invoices=payment_invoices,
         )
 
     try:
         report = await load_period(start, end)
-        previous_end = start - timedelta(days=1)
-        previous_start = previous_end - (end - start)
+        previous_start, previous_end = financial_previous_period_range(period, start, end)
         previous = await load_period(previous_start, previous_end)
     finally:
         active_company_id.reset(company_context)
@@ -6891,6 +9430,7 @@ async def add_expense(body: ExpenseIn, user=Depends(get_current_user)):
     rec = await insert("expenses", d)
     await log_audit("expense", rec["id"], "created", user, after=rec,
                     reason=f"Supervisor approval by {authorization['supervisor_id']}")
+    await emit_workflow_event("expense.recorded", rec)
     return rec
 
 @api.put("/expenses/{eid}")
@@ -6931,6 +9471,7 @@ async def void_expense(eid: str, body: ReasonIn, user=Depends(get_current_user))
     if not rec:
         raise HTTPException(400, "Expense not found or already voided")
     await log_audit("expense", eid, "voided", user, reason=body.reason)
+    await emit_workflow_event("expense.voided", rec)
     return rec
 
 @api.delete("/expenses/{eid}")
@@ -6943,7 +9484,7 @@ def period_starts():
     month = t.replace(day=1).isoformat()
     return week, month
 
-def dashboard_period_ranges(period):
+def dashboard_period_ranges(period, start_date=None, end_date=None):
     end = local_today()
     if period == "today":
         start = end
@@ -6953,11 +9494,45 @@ def dashboard_period_ranges(period):
         start = end.replace(day=1)
     elif period == "year":
         start = end.replace(month=1, day=1)
+    elif period == "custom":
+        if (
+            not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(start_date or ""))
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(end_date or ""))
+        ):
+            raise HTTPException(422, "Custom period requires valid start_date and end_date values")
+        try:
+            start = date.fromisoformat(start_date)
+            end = date.fromisoformat(end_date)
+        except ValueError:
+            raise HTTPException(422, "Custom period dates must be valid YYYY-MM-DD dates")
+        if start > end:
+            raise HTTPException(422, "Custom period start_date cannot be after end_date")
     else:
-        raise HTTPException(400, "Period must be today, week, month or year")
-    duration = end - start
+        raise HTTPException(400, "Period must be today, week, month, year or custom")
+
     previous_end = start - timedelta(days=1)
-    previous_start = previous_end - duration
+    if period == "month":
+        previous_start = previous_end.replace(day=1)
+        selected_month_end = end.replace(
+            day=calendar.monthrange(end.year, end.month)[1],
+        )
+        previous_end = previous_start.replace(
+            day=calendar.monthrange(previous_start.year, previous_start.month)[1]
+            if end == selected_month_end
+            else min(end.day, calendar.monthrange(previous_start.year, previous_start.month)[1]),
+        )
+    elif period == "year":
+        previous_start = previous_end.replace(month=1, day=1)
+        previous_end = previous_end.replace(
+            year=previous_end.year,
+            month=end.month,
+            day=min(end.day, calendar.monthrange(previous_end.year, end.month)[1]),
+        )
+    elif period == "week":
+        previous_start = start - timedelta(days=7)
+        previous_end = previous_start + (end - start)
+    else:
+        previous_start = previous_end - (end - start)
     return (start.isoformat(), end.isoformat()), (previous_start.isoformat(), previous_end.isoformat())
 
 VEHICLE_COST_DONE = ("Done", "done")
@@ -6991,28 +9566,86 @@ def cost_ledger_from_records(expenses, vehicles, vehicle_records, since=None, un
         r["vehicle_name"] = vnames.get(r.get("vehicle_id"), "")
     return [r for r in rows if (not since or (r["date"] or "") >= since) and (not until or (r["date"] or "") <= until)]
 
+def unique_financial_records(records):
+    seen = set()
+    result = []
+    for record in records:
+        record_id = record.get("id")
+        if record_id and record_id in seen:
+            continue
+        if record_id:
+            seen.add(record_id)
+        result.append(record)
+    return result
+
+def dashboard_financial_totals(start, end, *, invoices, payments, expenses, vehicle_records, buyings):
+    start_date = date.fromisoformat(str(start)[:10])
+    end_date = date.fromisoformat(str(end)[:10])
+    valid_invoices = unique_financial_records(invoices)
+    issued_total = dsum(
+        invoice.get("total", 0)
+        for invoice in valid_invoices
+        if not invoice.get("archived")
+        and invoice.get("status") not in ("draft", "void")
+        and invoice.get("number")
+        and not invoice.get("opening_balance")
+        and (invoice_date := financial_record_date(invoice)) is not None
+        and start_date <= invoice_date <= end_date
+    )
+    totals = profit_from_records(
+        start,
+        end,
+        payments=payments,
+        expenses=expenses,
+        vehicle_records=vehicle_records,
+        buyings=buyings,
+    )
+    return {"total_invoiced": issued_total, **totals}
+
+def invoice_outstanding_amount(invoice, paid):
+    if (
+        invoice.get("archived")
+        or invoice.get("status") in ("draft", "void")
+        or not invoice.get("number")
+    ):
+        return 0
+    return r2(max(D(invoice.get("total", 0)) - D(paid), Decimal("0")))
+
 def profit_from_records(since, until=None, *, payments, expenses, vehicle_records, buyings):
+    start_date = date.fromisoformat(str(since)[:10])
+    end_date = date.fromisoformat(str(until)[:10]) if until else None
+
     def in_period(item):
-        record_date = item.get("date") or ""
-        return record_date >= since and (not until or record_date <= until)
+        record_date = financial_record_date(item)
+        return (
+            record_date is not None
+            and record_date >= start_date
+            and (end_date is None or record_date <= end_date)
+        )
 
     revenue = dsum(
         payment.get("amount", 0)
-        for payment in payments
-        if not payment.get("reversed") and in_period(payment)
+        for payment in unique_financial_records(payments)
+        if not payment.get("reversed") and not payment.get("archived") and in_period(payment)
     )
     expense_total = dsum([
-        *(expense.get("amount", 0) for expense in expenses if in_period(expense)),
+        *(
+            expense.get("amount", 0)
+            for expense in unique_financial_records(expenses)
+            if not expense.get("voided") and not expense.get("archived") and in_period(expense)
+        ),
         *(
             record.get("amount", 0)
-            for record in vehicle_records
+            for record in unique_financial_records(vehicle_records)
             if record.get("status") in VEHICLE_COST_DONE
             and (record.get("amount") or 0) > 0
             and in_period(record)
         ),
     ])
     buying_total = dsum(
-        buying.get("amount", 0) for buying in buyings if in_period(buying)
+        buying.get("amount", D(buying.get("quantity", 0)) * D(buying.get("unit_price", 0)))
+        for buying in unique_financial_records(buyings)
+        if not buying.get("voided") and not buying.get("archived") and in_period(buying)
     )
     return {
         "revenue": revenue,
@@ -7022,6 +9655,233 @@ def profit_from_records(since, until=None, *, payments, expenses, vehicle_record
         "label": "Estimated result — payments received minus recorded expenses and buyings",
         "basis": "payment dates, expense dates & buying dates",
     }
+
+async def dashboard_vehicle_licence_alerts(today):
+    rows = await db.vehicle_licence_discs.aggregate([
+        {"$sort": {"created_at": -1}},
+        {"$group": {"_id": "$vehicle_id", "disc": {"$first": "$$ROOT"}}},
+    ]).to_list(None)
+    vehicle_ids = [row["_id"] for row in rows if row.get("_id")]
+    vehicles = await db.vehicles.find(
+        {"id": {"$in": vehicle_ids}, "archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "name": 1, "registration": 1},
+    ).to_list(None)
+    vehicle_by_id = {vehicle["id"]: vehicle for vehicle in vehicles}
+    alerts = []
+    for row in rows:
+        vehicle = vehicle_by_id.get(row.get("_id"))
+        disc = row.get("disc") or {}
+        if not vehicle:
+            continue
+        status = vehicle_licence_disc_status(disc.get("expiry_date"), date.fromisoformat(today))
+        if status["status"] == "VALID":
+            continue
+        alerts.append({
+            "vehicle_id": vehicle["id"],
+            "vehicle_name": vehicle.get("name", ""),
+            "registration": vehicle.get("registration", ""),
+            "expiry_date": disc.get("expiry_date"),
+            **status,
+        })
+    alerts.sort(key=lambda item: item["days_remaining"] if item["days_remaining"] is not None else -1)
+    return {
+        "expiring_soon": sum(item["status"] == "EXPIRING SOON" for item in alerts),
+        "expired": sum(item["status"] == "EXPIRED" for item in alerts),
+        "items": alerts[:10],
+    }
+
+async def dashboard_stock_movement_totals(stock_ids):
+    if not stock_ids:
+        return {}
+    rows = await db.stock_movements.aggregate([
+        {"$match": {"stock_id": {"$in": stock_ids}}},
+        {"$project": {
+            "stock_id": 1,
+            "signed_quantity": {
+                "$multiply": [
+                    "$quantity",
+                    {"$cond": [
+                        {"$in": ["$direction", [1, -1]]},
+                        "$direction",
+                        {"$cond": [{"$in": ["$type", list(INC_TYPES)]}, 1, -1]},
+                    ]},
+                ],
+            },
+        }},
+        {"$group": {"_id": "$stock_id", "quantity": {"$sum": "$signed_quantity"}}},
+    ]).to_list(None)
+    return {row["_id"]: row["quantity"] for row in rows}
+
+async def dashboard_all_time_payment_total():
+    rows = await db.payments.aggregate([
+        {"$match": {"reversed": {"$ne": True}, "archived": {"$ne": True}}},
+        {"$group": {
+            "_id": {"$ifNull": ["$id", "$_id"]},
+            "amount": {"$first": "$amount"},
+        }},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    return r2(rows[0]["total"]) if rows else 0
+
+async def dashboard_all_time_invoice_totals(today):
+    company_id = active_company_id.get()
+    payment_scope = {"company_id": company_id} if company_id else {}
+    rows = await db.invoices.aggregate([
+        {"$match": {
+            "archived": {"$ne": True},
+            "status": {"$nin": ["draft", "void"]},
+            "number": {"$exists": True, "$nin": [None, ""]},
+        }},
+        {"$lookup": {
+            "from": "payments",
+            "let": {"invoice_id": "$id"},
+            "pipeline": [
+                {"$match": {
+                    "$expr": {"$eq": ["$invoice_id", "$$invoice_id"]},
+                    "reversed": {"$ne": True},
+                    "archived": {"$ne": True},
+                    **payment_scope,
+                }},
+                {"$group": {
+                    "_id": {"$ifNull": ["$id", "$_id"]},
+                    "invoice_id": {"$first": "$invoice_id"},
+                    "amount": {"$first": "$amount"},
+                }},
+                {"$group": {"_id": None, "paid": {"$sum": "$amount"}}},
+            ],
+            "as": "payment_totals",
+        }},
+        {"$project": {
+            "total": {"$ifNull": ["$total", 0]},
+            "opening_balance": {"$eq": ["$opening_balance", True]},
+            "due_date": 1,
+            "outstanding": {
+                "$cond": [
+                    {"$gt": [
+                        {"$subtract": [
+                            {"$ifNull": ["$total", 0]},
+                            {"$ifNull": [{"$arrayElemAt": ["$payment_totals.paid", 0]}, 0]},
+                        ]},
+                        0,
+                    ]},
+                    {"$subtract": [
+                        {"$ifNull": ["$total", 0]},
+                        {"$ifNull": [{"$arrayElemAt": ["$payment_totals.paid", 0]}, 0]},
+                    ]},
+                    0,
+                ],
+            },
+        }},
+        {"$group": {
+            "_id": None,
+            "total_invoiced": {
+                "$sum": {"$cond": [{"$eq": ["$opening_balance", False]}, "$total", 0]},
+            },
+            "outstanding": {"$sum": "$outstanding"},
+            "overdue": {"$sum": {
+                "$cond": [
+                    {"$and": [
+                        {"$lt": [{"$ifNull": ["$due_date", "9999-12-31"]}, today]},
+                        {"$gt": ["$outstanding", 0]},
+                    ]},
+                    "$outstanding",
+                    0,
+                ],
+            }},
+        }},
+    ]).to_list(1)
+    if not rows:
+        return {"total_invoiced": 0, "outstanding": 0, "overdue": 0}
+    return {key: r2(rows[0].get(key, 0)) for key in ("total_invoiced", "outstanding", "overdue")}
+
+async def dashboard_payment_totals_by_invoice(invoice_ids):
+    if not invoice_ids:
+        return {}
+    rows = await db.payments.aggregate([
+        {"$match": {
+            "invoice_id": {"$in": invoice_ids},
+            "reversed": {"$ne": True},
+            "archived": {"$ne": True},
+        }},
+        {"$group": {
+            "_id": {
+                "payment_id": {"$ifNull": ["$id", "$_id"]},
+                "invoice_id": "$invoice_id",
+            },
+            "amount": {"$first": "$amount"},
+        }},
+        {"$group": {"_id": "$_id.invoice_id", "paid": {"$sum": "$amount"}}},
+    ]).to_list(None)
+    return {row["_id"]: row["paid"] for row in rows}
+
+async def dashboard_invoice_outstanding_by_id(invoices):
+    valid_invoices = [
+        invoice for invoice in invoices
+        if not invoice.get("archived")
+        and invoice.get("status") not in ("draft", "void")
+        and invoice.get("number")
+    ]
+    payments = await dashboard_payment_totals_by_invoice([
+        invoice["id"] for invoice in valid_invoices if invoice.get("id")
+    ])
+    balances = {}
+    for invoice in invoices:
+        invoice_id = invoice.get("id")
+        if not invoice_id:
+            continue
+        balances[invoice_id] = invoice_outstanding_amount(
+            invoice, payments.get(invoice_id, 0),
+        )
+    return balances
+
+async def dashboard_completed_orders_today(today):
+    records = await financial_period_records(
+        "orders", date.fromisoformat(today), date.fromisoformat(today),
+        date_field="completed_at",
+        conditions={"status": "Delivered", "archived": {"$ne": True}},
+    )
+    return len({
+        record["id"] for record in records
+        if record.get("id") and financial_record_date(record, "completed_at") == date.fromisoformat(today)
+    })
+
+async def dashboard_financial_period(start, end):
+    bounds = date.fromisoformat(str(start)[:10]), date.fromisoformat(str(end)[:10])
+    invoices, payments, expenses, vehicle_records, buyings = await asyncio.gather(
+        financial_period_records(
+            "invoices", *bounds,
+            conditions={
+                "archived": {"$ne": True},
+                "status": {"$nin": ["draft", "void"]},
+                "number": {"$exists": True, "$nin": [None, ""]},
+            },
+        ),
+        financial_period_records(
+            "payments", *bounds,
+            conditions={"reversed": {"$ne": True}, "archived": {"$ne": True}},
+        ),
+        financial_period_records(
+            "expenses", *bounds,
+            conditions={"voided": {"$ne": True}, "archived": {"$ne": True}},
+        ),
+        financial_period_records(
+            "vehicle_records", *bounds,
+            conditions={"status": {"$in": list(VEHICLE_COST_DONE)}, "amount": {"$gt": 0}},
+        ),
+        financial_period_records(
+            "buyings", *bounds,
+            conditions={"voided": {"$ne": True}, "archived": {"$ne": True}},
+        ),
+    )
+    return dashboard_financial_totals(
+        start,
+        end,
+        invoices=invoices,
+        payments=payments,
+        expenses=expenses,
+        vehicle_records=vehicle_records,
+        buyings=buyings,
+    )
 
 async def load_profit_records():
     return await asyncio.gather(
@@ -7067,22 +9927,19 @@ async def compare_dashboard_periods(kind: str, first: str, second: str, user=Dep
                 raise HTTPException(400, f"Invalid year: {value}")
     else:
         raise HTTPException(400, "Comparison kind must be month or year")
-    payments, expenses, vehicle_records, buyings = await load_profit_records()
+    first_totals, second_totals = await asyncio.gather(
+        dashboard_financial_period(*values[0]),
+        dashboard_financial_period(*values[1]),
+    )
     return {
         "kind": kind,
         "first": {
             "value": first, "start": values[0][0], "end": values[0][1],
-            **profit_from_records(
-                *values[0], payments=payments, expenses=expenses,
-                vehicle_records=vehicle_records, buyings=buyings,
-            ),
+            **first_totals,
         },
         "second": {
             "value": second, "start": values[1][0], "end": values[1][1],
-            **profit_from_records(
-                *values[1], payments=payments, expenses=expenses,
-                vehicle_records=vehicle_records, buyings=buyings,
-            ),
+            **second_totals,
         },
     }
 
@@ -7178,6 +10035,7 @@ async def add_vehicle_record(vid: str, body: VehicleRecordIn, user=Depends(get_c
     d["vehicle_name"] = v["name"]
     rec = await insert("vehicle_records", d)
     await log_audit("vehicle_record", rec["id"], "created", user, after=rec)
+    await emit_workflow_event("vehicle_record.created", rec)
     return rec
 
 @api.put("/vehicles/records/{rid}")
@@ -7195,6 +10053,7 @@ async def edit_vehicle_record(rid: str, body: VehicleRecordIn, user=Depends(get_
         data["supervisor_approved_by"] = authorization["supervisor_id"]
     rec = await update_doc("vehicle_records", rid, data)
     await log_audit("vehicle_record", rid, "updated", user, before=before, after=rec)
+    await emit_workflow_event("vehicle_record.updated", rec)
     return rec
 
 async def _cancel_vehicle_record(rid, supervisor_authorization, user):
@@ -7209,6 +10068,7 @@ async def _cancel_vehicle_record(rid, supervisor_authorization, user):
         updates["supervisor_approved_by"] = authorization["supervisor_id"]
     rec = await update_doc("vehicle_records", rid, updates)
     await log_audit("vehicle_record", rid, "cancelled", user, before=before, after=rec)
+    await emit_workflow_event("vehicle_record.cancelled", rec)
     return {"ok": True, "cancelled": True}
 
 @api.delete("/vehicles/records/{rid}")
@@ -7372,6 +10232,7 @@ async def add_sparepart(body: SparePartIn, user=Depends(get_current_user)):
     await sync_part_expense(d, user, supervisor_id)
     rec = await insert("spareparts", d)
     await log_audit("spare_part", rec["id"], "created", user, after=rec)
+    await emit_workflow_event("spare_part.created", rec)
     return rec
 
 @api.put("/spareparts/{pid}")
@@ -7398,6 +10259,7 @@ async def edit_sparepart(pid: str, body: SparePartIn, user=Depends(get_current_u
     await sync_part_expense(d, user, supervisor_id)
     rec = await update_doc("spareparts", pid, d)
     await log_audit("spare_part", pid, "updated", user, before=before, after=rec)
+    await emit_workflow_event("spare_part.updated", rec)
     return rec
 
 @api.delete("/spareparts/{pid}")
@@ -7411,6 +10273,7 @@ async def del_sparepart(pid: str, user=Depends(get_current_user)):
         "archived": True, "archived_at": now_iso(), "archived_by": user.get("id"),
     })
     await log_audit("spare_part", pid, "archived", user, before=p, after=updated)
+    await emit_workflow_event("spare_part.archived", updated)
     return {"ok": True, "archived": True}
 
 @api.post("/spareparts/{pid}/restore")
@@ -7422,6 +10285,7 @@ async def restore_sparepart(pid: str, user=Depends(get_current_user)):
         "archived": False, "archived_at": None, "archived_by": None,
     })
     await log_audit("spare_part", pid, "restored", user, before=before, after=updated)
+    await emit_workflow_event("spare_part.restored", updated)
     return {"ok": True}
 
 # ---------------- Customer import with opening balances ----------------
@@ -7515,7 +10379,10 @@ async def business_snapshot(user):
     drivers = {d["id"]: d["name"] for d in driver_records}
     return {
         "today": today_str(), "timezone": "Africa/Johannesburg", "currency": "ZAR",
-        "totals": {k: dash[k] for k in ("total_invoiced", "payments_received", "outstanding", "overdue", "finished_stock")},
+        "totals": {
+            "total_invoiced": dash["total_invoiced_all_time"],
+            **{k: dash[k] for k in ("payments_received", "outstanding", "overdue", "finished_stock")},
+        },
         "week": dash["week_profit"], "month": dash["month_profit"], "week_start": week, "month_start": month,
         "debtors_outstanding": dict(sorted(debtors.items(), key=lambda x: -x[1])),
         "open_invoices": open_inv[:60],
@@ -7667,6 +10534,8 @@ async def get_orders(include_archived: bool = False, user=Depends(get_current_us
 async def add_order(body: OrderIn, user=Depends(get_current_user)):
     d = body.model_dump()
     d["reference"] = await next_ref("ord", "ORD")
+    if d.get("status") == "Delivered":
+        d["completed_at"] = now_iso()
     if d.get("customer_id"):
         c = await db.customers.find_one({"id": d["customer_id"]})
         if c:
@@ -7681,7 +10550,9 @@ async def add_order(body: OrderIn, user=Depends(get_current_user)):
         if invoice.get("customer_id") != d.get("customer_id"):
             raise HTTPException(400, "Invoice must belong to the selected customer")
         d["invoice_number"] = invoice.get("number") or invoice.get("reference") or ""
-    return await insert("orders", d)
+    record = await insert("orders", d)
+    await emit_workflow_event("order.created", record)
+    return record
 
 @api.put("/orders/{oid}")
 async def edit_order(oid: str, body: OrderIn, user=Depends(get_current_user)):
@@ -7690,6 +10561,12 @@ async def edit_order(oid: str, body: OrderIn, user=Depends(get_current_user)):
         raise HTTPException(404, "Order not found")
     d = body.model_dump()
     d["reference"] = existing.get("reference")
+    if d.get("status") == "Delivered":
+        d["completed_at"] = (
+            now_iso()
+            if existing.get("status") != "Delivered" or not existing.get("completed_at")
+            else existing["completed_at"]
+        )
     if d.get("customer_id"):
         c = await db.customers.find_one({"id": d["customer_id"]})
         if c:
@@ -7704,7 +10581,9 @@ async def edit_order(oid: str, body: OrderIn, user=Depends(get_current_user)):
         if invoice.get("customer_id") != d.get("customer_id"):
             raise HTTPException(400, "Invoice must belong to the selected customer")
         d["invoice_number"] = invoice.get("number") or invoice.get("reference") or ""
-    return await update_doc("orders", oid, d)
+    record = await update_doc("orders", oid, d)
+    await emit_workflow_event("order.updated", record)
+    return record
 
 @api.delete("/orders/{oid}")
 async def del_order(oid: str, user=Depends(get_current_user)):
@@ -7715,6 +10594,7 @@ async def del_order(oid: str, user=Depends(get_current_user)):
         "status": "Cancelled",
     })
     await log_audit("order", oid, "cancelled", user, before=order, after=updated)
+    await emit_workflow_event("order.updated", updated)
     return {"ok": True, "cancelled": True}
 
 # ---------------- Attendance summary ----------------
@@ -7799,6 +10679,10 @@ async def save_daily_prod(body: DailyProdIn, user=Depends(get_current_user)):
     ex = await db.production_daily.find_one({"date": d["date"]}, {"_id": 0})
     rec = await update_doc("production_daily", ex["id"], d) if ex else await insert("production_daily", d)
     await log_audit("production_daily", rec["id"], "saved", user, before=ex, after=rec)
+    await emit_workflow_event("production.daily_saved", {
+        **rec,
+        "total_blocks": sum(item["quantity"] for item in rec.get("blocks", [])),
+    })
     return rec
 
 @api.delete("/production/daily/{pid}")
@@ -7892,6 +10776,12 @@ async def create_production_run(body: ProductionRunIn, user=Depends(get_current_
     })
     rec = await insert("production_runs", data)
     await log_audit("production_run", rec["id"], "planned", user, after=rec)
+    await emit_workflow_event("production.created", {
+        **rec,
+        "quantity": rec["planned_quantity"],
+        "block_ref": rec["product"],
+        "production_date": rec["date"],
+    })
     return rec
 
 @api.post("/production/runs/{run_id}/complete")
@@ -7964,6 +10854,12 @@ async def complete_production_run(run_id: str, body: CompleteProductionRunIn, us
             await update_doc("production_runs", run_id, {"status": "planned"})
             raise
     await log_audit("production_run", run_id, "completed", user, before=run, after=rec)
+    await emit_workflow_event("production.completed", {
+        **rec,
+        "quantity": rec["actual_quantity"],
+        "block_ref": rec["product"],
+        "production_date": rec["date"],
+    })
     return rec
 
 class BulkAttendanceIn(BaseModel):
@@ -8084,22 +10980,7 @@ async def attendance_summary(user=Depends(get_current_user)):
     week, month = period_starts()
     recs = await listall("attendance")
     emps = await listall("employees", {"active": True}, ("name", 1))
-    t = today_str()
-    daily = {}
-    for r in recs:
-        if r.get("date") == t:
-            daily[r["status"]] = daily.get(r["status"], 0) + 1
-    present = ("Present", "Half Day")
-
-    def count(eid, since):
-        return sum(1 for r in recs if r.get("employee_id") == eid and (r.get("date") or "") >= since and r.get("status") in present)
-
-    per_emp = [{"employee_id": e["id"], "name": e["name"], "department": e.get("department", ""),
-                "week": count(e["id"], week), "month": count(e["id"], month)} for e in emps]
-    return {"daily": daily, "daily_total": sum(daily.values()),
-            "week_total": sum(e["week"] for e in per_emp),
-            "month_total": sum(e["month"] for e in per_emp),
-            "per_employee": per_emp, "week_start": week, "month_start": month}
+    return summarize_attendance_records(recs, emps, week, month, today_str())
 
 # ---------------- Seeding ----------------
 async def seed():
@@ -8239,6 +11120,12 @@ async def initialize_multi_company():
         await base_db[collection_name].create_index("company_id")
     for collection_name in ("invoices", "payments", "expenses"):
         await base_db[collection_name].create_index([("company_id", 1), ("date", 1)])
+    await base_db.invoices.create_index(
+        [("company_id", 1), ("idempotency_key", 1)],
+        unique=True,
+        partialFilterExpression={"idempotency_key": {"$type": "string"}},
+        name="invoice_submission_once",
+    )
     await ensure_performance_indexes(base_db)
 
     for company_id in ("iqfoam-manufactoring", "iqfoam-whole-sallers"):
@@ -8279,6 +11166,26 @@ async def initialize_multi_company():
         base_db.user_devices.create_index([("user_id", 1), ("last_seen", -1)]),
     )
     await initialize_company_profile_users()
+
+async def initialize_workflow_indexes():
+    for profile in COMPANY_PROFILES:
+        workflow_db = _workflow_database(profile["id"])
+        await workflow_db.workflows.create_index([("company_id", 1), ("updated_at", -1)])
+        await workflow_db.workflow_runs.create_index(
+            [("company_id", 1), ("workflow_id", 1), ("event_id", 1)],
+            unique=True,
+            name="workflow_event_once",
+        )
+        await workflow_db.workflow_runs.create_index([("company_id", 1), ("started_at", -1)])
+        await workflow_db.workflow_runs.create_index(
+            [("company_id", 1), ("workflow_id", 1), ("started_at", -1)]
+        )
+        await workflow_db.workflow_artifacts.create_index(
+            [("company_id", 1), ("created_at", -1)]
+        )
+        await workflow_db.workflow_artifacts.create_index(
+            [("company_id", 1), ("type", 1), ("status", 1), ("created_at", -1)]
+        )
 
 async def initialize_company_profile_users():
     profiles = [
@@ -8332,7 +11239,18 @@ async def ensure_performance_indexes(database):
         "employees": [[("name", 1)]],
         "drivers": [[("name", 1)]],
         "vehicles": [[("name", 1)]],
-        "vehicle_records": [[("date", -1)], [("vehicle_id", 1), ("date", -1)]],
+        "vehicle_licence_discs": [
+            [("vehicle_id", 1), ("created_at", -1)],
+            [("vehicle_id", 1), ("expiry_date", 1)],
+            [("created_at", -1)],
+        ],
+        "intercompany_prices": [[("stock_id", 1)]],
+        "intercompany_customer_mappings": [[("requesting_company_id", 1)]],
+        "vehicle_records": [
+            [("date", -1)],
+            [("vehicle_id", 1), ("date", -1)],
+            [("vehicle_id", 1), ("status", 1), ("type", 1)],
+        ],
         "buyings": [[("date", -1)]],
         "grvs": [
             [("created_at", -1)],
@@ -8425,13 +11343,55 @@ async def initialize_empty_company(company_id):
         await company_db[coll].create_index(keys, **options)
     for coll in ("invoices", "payments", "expenses"):
         await company_db[coll].create_index([("company_id", 1), ("date", 1)])
+    await company_db.invoices.create_index(
+        "idempotency_key",
+        unique=True,
+        partialFilterExpression={"idempotency_key": {"$type": "string"}},
+        name="invoice_submission_once",
+    )
+    await company_db.vehicle_licence_discs.create_index(
+        [("vehicle_id", 1), ("expiry_date", 1)],
+        unique=True,
+        name="vehicle_licence_expiry_once",
+    )
+    await company_db.vehicles.create_index(
+        "assigned_driver_id", unique=True, sparse=True, name="vehicle_driver_assignment_once",
+    )
+    await company_db.intercompany_prices.create_index(
+        "stock_id", unique=True, name="intercompany_price_stock_once",
+    )
+    await company_db.intercompany_customer_mappings.create_index(
+        "requesting_company_id", unique=True, name="intercompany_customer_mapping_once",
+    )
     await ensure_performance_indexes(company_db)
 
 @app.on_event("startup")
 async def on_startup():
-    global backup_scheduler_task
+    global backup_scheduler_task, fleet_notification_scheduler_task
     await seed()
     await initialize_multi_company()
+    await initialize_workflow_indexes()
+    await base_db.notifications.create_index(
+        [("company_id", 1), ("event_key", 1), ("recipient_user_id", 1)],
+        unique=True,
+        name="notification_event_recipient_once",
+    )
+    await base_db.notifications.create_index(
+        [("company_id", 1), ("recipient_user_id", 1), ("created_at", -1)],
+        name="notification_recipient_feed",
+    )
+    await base_db.intercompany_order_requests.create_index("id", unique=True)
+    await base_db.intercompany_order_requests.create_index(
+        [("requesting_company_id", 1), ("created_at", -1)],
+        name="intercompany_requesting_feed",
+    )
+    await base_db.intercompany_order_requests.create_index(
+        [("supplying_company_id", 1), ("created_at", -1)],
+        name="intercompany_supplier_feed",
+    )
+    fleet_notification_scheduler_task = asyncio.create_task(
+        scheduled_fleet_notification_loop()
+    )
     status = backup_runtime_status()
     if status["configured"] and status["tools_available"]:
         backup_scheduler_task = asyncio.create_task(scheduled_backup_loop(
@@ -8461,6 +11421,17 @@ app.add_middleware(CORSMiddleware, allow_credentials=True,
 async def reset_company_scope(request: Request, call_next):
     token = active_company_id.set(None)
     try:
+        if (
+            request.url.path.startswith("/api/workflow-builder")
+            and request.method != "OPTIONS"
+        ):
+            try:
+                require_global_owner(await get_current_user(request))
+            except HTTPException as error:
+                return JSONResponse(
+                    status_code=error.status_code,
+                    content={"detail": error.detail},
+                )
         return await call_next(request)
     finally:
         active_company_id.reset(token)
@@ -8468,6 +11439,12 @@ logging.basicConfig(level=logging.INFO)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    if fleet_notification_scheduler_task:
+        fleet_notification_scheduler_task.cancel()
+        try:
+            await fleet_notification_scheduler_task
+        except asyncio.CancelledError:
+            pass
     if backup_scheduler_task:
         backup_scheduler_task.cancel()
         try:

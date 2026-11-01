@@ -27,7 +27,9 @@ const weekPeriod = (offset = 0) => {
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 };
 
-function SalaryEmployeeCard({ employee, rate, deduction, saving, onRateChange, onSaveRate, onDeductionChange, onSaveCut, onAddAdvance, onViewHistory, onDelete }) {
+function SalaryEmployeeCard({ employee, weeklySalary, deduction, saving, onWeeklySalaryChange, onSaveSalary, onDeductionChange, onSaveCut, onAddAdvance, onViewHistory, onDelete }) {
+  const fixedWeeklySalary = Number(weeklySalary ?? employee.weekly_salary) || 0;
+  const dailySalary = fixedWeeklySalary / 6;
   const remainingBalance = employee.available_balance - deduction;
   const takeHome = employee.gross_salary - deduction;
   return (
@@ -43,15 +45,16 @@ function SalaryEmployeeCard({ employee, rate, deduction, saving, onRateChange, o
             <p className="mt-1.5 font-mono text-lg font-bold text-slate-800">{fmtMoney(employee.piece_pay)}</p>
             <p className="text-xs text-slate-500">{employee.total_pieces} pieces recorded this period</p>
           </div> : <div className="rounded-lg border border-border/70 p-3">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Hourly rate ({employee.hours_per_week || 45}h week)</p>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Fixed weekly salary</p>
             <div className="mt-1.5 flex items-center gap-2">
               <span className="text-sm text-slate-500">R</span>
-              <input aria-label={`Hourly pay for ${employee.name}`} type="number" min="0.01" step="0.000001" disabled={saving} value={rate ?? employee.hourly_rate}
-                onChange={(event) => onRateChange(event.target.value)}
+              <input aria-label={`Fixed weekly salary for ${employee.name}`} type="number" min="0.01" step="0.01" disabled={saving} value={weeklySalary ?? employee.weekly_salary}
+                onChange={(event) => onWeeklySalaryChange(event.target.value)}
                 className="min-w-0 flex-1 rounded border border-input px-2 py-1.5 font-mono text-sm" data-testid={`salary-rate-${employee.employee_id}`} />
-              <button disabled={saving} onClick={onSaveRate} className="text-xs font-semibold text-primary hover:underline disabled:opacity-50" data-testid={`save-salary-rate-${employee.employee_id}`}>{saving ? "Saving…" : "Save"}</button>
+              <button disabled={saving} onClick={onSaveSalary} className="text-xs font-semibold text-primary hover:underline disabled:opacity-50" data-testid={`save-salary-rate-${employee.employee_id}`}>{saving ? "Saving…" : "Save"}</button>
             </div>
-            <p className="mt-1 text-[11px] text-slate-500">Base weekly salary: {fmtMoney(employee.weekly_salary ?? employee.hourly_rate * 45)}</p>
+            <p className="mt-2 text-[11px] text-slate-500">Monday–Saturday · 45 ordinary hours/week</p>
+            <p className="mt-1 text-[11px] text-slate-500">{fmtMoney(dailySalary)}/day · {fmtMoney(dailySalary / 8)}/hour weekday · {fmtMoney(dailySalary / 5)}/hour Saturday</p>
           </div>}
           <div className="rounded-lg border border-border/70 p-3">
             {employee.pay_type === "piece" ? <>
@@ -102,6 +105,7 @@ function SalaryEmployeeCard({ employee, rate, deduction, saving, onRateChange, o
               <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Pay earned this week</p>
               <p className="mt-1.5 font-mono text-lg font-bold text-slate-800">{fmtMoney(employee.gross_salary)}</p>
               <p className="text-xs text-slate-500">{employee.present_days} full + {employee.half_days} half · {employee.regular_hours + employee.overtime_hours} total hours</p>
+              <p className="mt-1 text-xs text-slate-500">{fmtMoney(employee.regular_pay)} regular · {fmtMoney(employee.overtime_pay)} overtime ({employee.overtime_hours}h × R20)</p>
             </>}
           </div>
         </div>
@@ -158,7 +162,7 @@ export default function Attendance() {
   const [salaryReport, setSalaryReport] = useState(null);
   const [salaryLoading, setSalaryLoading] = useState(false);
   const [salaryCuts, setSalaryCuts] = useState({});
-  const [salaryRates, setSalaryRates] = useState({});
+  const [salaryWeeklySalaries, setSalaryWeeklySalaries] = useState({});
   const [salarySaving, setSalarySaving] = useState({});
   const [historyEmployee, setHistoryEmployee] = useState(null);
   const [historyClearing, setHistoryClearing] = useState(false);
@@ -420,16 +424,16 @@ export default function Attendance() {
       const report = await api.get("/salaries", { start_date: startDate, end_date: endDate });
       setSalaryReport(report);
       setSalaryCuts(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.cut || 0)])));
-      setSalaryRates(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.hourly_rate || 20)])));
+      setSalaryWeeklySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.weekly_salary ?? 0)])));
     } catch (e) { toast.error(apiError(e)); } finally { setSalaryLoading(false); }
   };
   const saveSalaryRate = async (employee) => {
-    const rate = Number(salaryRates[employee.employee_id]);
-    if (!Number.isFinite(rate) || rate <= 0) return toast.error("Hourly pay must be greater than zero");
+    const weeklySalary = Number(salaryWeeklySalaries[employee.employee_id]);
+    if (!Number.isFinite(weeklySalary) || weeklySalary <= 0) return toast.error("Weekly salary must be greater than zero");
     setSalarySaving((current) => ({ ...current, [employee.employee_id]: true }));
     try {
-      await api.put(`/salaries/rates/${employee.employee_id}`, { hourly_rate: rate });
-      toast.success(`Hourly pay updated for ${employee.name}`);
+      await api.put(`/salaries/rates/${employee.employee_id}`, { weekly_salary: weeklySalary });
+      toast.success(`Weekly salary updated for ${employee.name}`);
       await loadSalaries();
     } catch (e) { toast.error(apiError(e)); } finally {
       setSalarySaving((current) => ({ ...current, [employee.employee_id]: false }));
@@ -536,7 +540,7 @@ export default function Attendance() {
               <Btn disabled={salaryLoading} onClick={loadSalaries} data-testid="load-salaries-btn">{salaryLoading ? "Loading..." : "Show salaries"}</Btn>
               <Btn variant="danger" disabled={rosterResetting || salaryLoading} onClick={resetPayrollRosterAndAttendance} data-testid="reset-payroll-roster-btn">{rosterResetting ? "Resetting roster…" : "Reset roster and attendance"}</Btn>
             </div>
-            <p className="border-t border-border pt-3 text-xs leading-relaxed text-slate-500">Chemical employees, Sherif, Abdul Driver and Bilal have 50-hour weeks (9 hours Mon–Fri and 5 on Saturday). Other fixed salaries cover 45 hours Monday–Friday. Hours beyond each employee’s weekly schedule count as overtime.</p>
+            <p className="border-t border-border pt-3 text-xs leading-relaxed text-slate-500">The fixed weekly salary is divided by six paid days: each full day Monday–Saturday earns one sixth of the weekly amount (8 working hours Monday–Friday, including an unpaid break in the 8:00–17:00 shift; 5 hours Saturday). Overtime is paid separately at R20 per hour. Ayanda and Asive remain on piece pay.</p>
           </Card>
           {salaryReport && <Card className="overflow-hidden">
             {salaryReport.employees.length === 0 ? <Empty icon={Users} title="No employees found" /> : <>
@@ -570,11 +574,11 @@ export default function Attendance() {
                 return <SalaryEmployeeCard
                   key={employee.employee_id}
                   employee={employee}
-                  rate={salaryRates[employee.employee_id]}
+                  weeklySalary={salaryWeeklySalaries[employee.employee_id]}
                   deduction={deduction}
                   saving={saving}
-                  onRateChange={(value) => setSalaryRates((current) => ({ ...current, [employee.employee_id]: value }))}
-                  onSaveRate={() => saveSalaryRate(employee)}
+                  onWeeklySalaryChange={(value) => setSalaryWeeklySalaries((current) => ({ ...current, [employee.employee_id]: value }))}
+                  onSaveSalary={() => saveSalaryRate(employee)}
                   onDeductionChange={(value) => setSalaryCuts((current) => ({ ...current, [employee.employee_id]: value }))}
                   onSaveCut={() => saveSalaryCut(employee)}
                   onAddAdvance={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, date: today(), amount: "", notes: "" })}

@@ -1,11 +1,11 @@
 """Seed data constants for SUPER IQ-FOAM ERP."""
 
 EMPLOYEE_PAYROLL_ROSTER = [
-    {"name": "YUSUF", "department": "CHEMICAL", "weekly_salary": 1150, "hours_per_week": 50, "pay_type": "hourly"},
-    {"name": "SEAN", "department": "CHEMICAL", "weekly_salary": 1000, "hours_per_week": 50, "pay_type": "hourly"},
-    {"name": "MANDLENKOSI", "department": "CHEMICAL", "weekly_salary": 1000, "hours_per_week": 50, "pay_type": "hourly"},
-    {"name": "MSIZI", "department": "CHEMICAL", "weekly_salary": 1000, "hours_per_week": 50, "pay_type": "hourly"},
-    {"name": "MTLENI", "department": "CHEMICAL", "weekly_salary": 1000, "hours_per_week": 50, "pay_type": "hourly"},
+    {"name": "YUSUF", "department": "CHEMICAL", "weekly_salary": 1150, "hours_per_week": 45, "pay_type": "hourly"},
+    {"name": "SEAN", "department": "CHEMICAL", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
+    {"name": "MANDLENKOSI", "department": "CHEMICAL", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
+    {"name": "MSIZI", "department": "CHEMICAL", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
+    {"name": "MTLENI", "department": "CHEMICAL", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "SIPHOKAZI", "department": "COVER STITCHING", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "ASIPHE", "department": "COVER STITCHING", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "NONTEMBISO", "department": "COVER STITCHING", "weekly_salary": 900, "hours_per_week": 45, "pay_type": "hourly"},
@@ -20,18 +20,18 @@ EMPLOYEE_PAYROLL_ROSTER = [
     {"name": "ANELE PLASTIC", "department": "MATTRESS PACKING (PLASTING)", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "ZUKO", "department": "MATTRESS PACKING (PLASTING)", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "VIDO", "department": "MATTRESS COVERING AND LOADING", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
-    {"name": "LUNGHISANI", "department": "CHEMICAL", "weekly_salary": 900, "hours_per_week": 50, "pay_type": "hourly"},
+    {"name": "LUNGHISANI", "department": "CHEMICAL", "weekly_salary": 900, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "KHATAZA", "department": "MATTRESS COVERING AND LOADING", "weekly_salary": 900, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "NDIKHO", "department": "MATTRESS COVERING AND LOADING", "weekly_salary": 900, "hours_per_week": 45, "pay_type": "hourly"},
-    {"name": "TMABANE", "department": "CHEMICAL", "weekly_salary": 800, "hours_per_week": 50, "pay_type": "hourly"},
+    {"name": "TMABANE", "department": "CHEMICAL", "weekly_salary": 800, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "THEMMINKOSI", "department": "MATTRESS COVERING AND LOADING", "weekly_salary": 800, "hours_per_week": 45, "pay_type": "hourly"},
-    {"name": "SHERIF", "department": "MATTRESS COVERING AND LOADING", "weekly_salary": 1000, "hours_per_week": 50, "pay_type": "hourly"},
-    {"name": "ABDUL DRIVER", "department": "DRIVING", "weekly_salary": 1550, "hours_per_week": 50, "pay_type": "hourly"},
+    {"name": "SHERIF", "department": "MATTRESS COVERING AND LOADING", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
+    {"name": "ABDUL DRIVER", "department": "DRIVING", "weekly_salary": 1550, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "SIYANDA", "department": "DRIVING", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "AYANDA BHAI", "department": "DRIVING", "weekly_salary": 1300, "hours_per_week": 45, "pay_type": "hourly"},
     {"name": "NTOKOZO", "department": "DRIVING", "weekly_salary": 1100, "hours_per_week": 45, "pay_type": "hourly"},
-    {"name": "BILAL", "department": "DRIVING", "weekly_salary": 1000, "hours_per_week": 50, "pay_type": "hourly"},
-    {"name": "SECURITY GUARD", "department": "SECURITY", "weekly_salary": 1000, "hours_per_week": 50, "pay_type": "hourly"},
+    {"name": "BILAL", "department": "DRIVING", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
+    {"name": "SECURITY GUARD", "department": "SECURITY", "weekly_salary": 1000, "hours_per_week": 45, "pay_type": "hourly"},
 ]
 
 EMPLOYEE_PAYROLL_NAME_ALIASES = {

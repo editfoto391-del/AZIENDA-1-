@@ -29,22 +29,39 @@ export default function Login() {
   const [err, setErr] = useState(location.state?.error || "");
   const [loading, setLoading] = useState(false);
   const [loadingProfiles, setLoadingProfiles] = useState(true);
+  const [profileLoadAttempt, setProfileLoadAttempt] = useState(0);
 
   useEffect(() => {
+    let active = true;
     if (personalAccessToken) {
       api.getUncached(`/worker-access/${encodeURIComponent(personalAccessToken)}`)
         .then((details) => {
+          if (!active) return;
           setAccessLink(details);
           setSelected({ id: details.company_id, username: details.username });
           setUsername(details.username);
           setErr("");
         })
-        .catch((error) => setErr(apiError(error)))
-        .finally(() => setLinkLoading(false));
-      return;
+        .catch((error) => { if (active) setErr(apiError(error)); })
+        .finally(() => { if (active) setLinkLoading(false); });
+      return () => { active = false; };
     }
-    api.get("/companies/profiles").then(setProfiles).catch((e) => setErr(apiError(e))).finally(() => setLoadingProfiles(false));
-  }, [personalAccessToken]);
+    setLoadingProfiles(true);
+    setErr("");
+    api.getUncached("/companies/profiles", undefined, { timeout: 10000 })
+      .then((result) => {
+        if (!Array.isArray(result)) throw new Error("The company profile service returned an invalid response.");
+        if (active) setProfiles(result);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setErr(error.code === "ECONNABORTED"
+          ? "The company profile service is taking too long to respond. Check your connection and try again."
+          : apiError(error));
+      })
+      .finally(() => { if (active) setLoadingProfiles(false); });
+    return () => { active = false; };
+  }, [personalAccessToken, profileLoadAttempt]);
 
   const googleLogin = () => {
     // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
@@ -100,22 +117,28 @@ export default function Login() {
           </div>
           {err && <div className="mx-auto mt-4 max-w-md rounded-md border border-red-200/40 bg-red-950/30 px-3 py-2 text-sm text-red-100" data-testid="login-error">{err}</div>}
           {loadingProfiles ? <p className="mt-8 text-sm text-emerald-50/60">Loading company profiles...</p> : (
-            <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3 sm:gap-6">
-              {profiles.map((profile, index) => {
-                const Icon = PROFILE_ICONS[index] || Building2;
-                return <button key={profile.id} type="button" onClick={() => chooseProfile(profile)} data-testid={`company-profile-${profile.id}`}
-                  className="group flex flex-row items-center gap-4 rounded-xl border border-white/10 bg-white/[0.035] px-5 py-4 text-left transition-all duration-300 hover:-translate-y-1 hover:border-emerald-100/30 hover:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-100/40 sm:flex-col sm:gap-4 sm:border-0 sm:bg-transparent sm:px-3 sm:py-3 sm:text-center sm:hover:bg-transparent motion-reduce:transform-none motion-reduce:transition-none">
-                  <span className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-full border shadow-[0_8px_24px_rgba(0,0,0,0.16)] transition-transform duration-300 group-hover:scale-105 sm:h-24 sm:w-24 ${PROFILE_TONES[index] || PROFILE_TONES[0]} motion-reduce:transition-none`}>
-                    <Icon size={28} strokeWidth={1.5} className="sm:hidden" />
-                    <Icon size={36} strokeWidth={1.4} className="hidden sm:block" />
-                  </span>
-                  <span className="min-w-0">
-                    <span className="block text-sm font-semibold tracking-wide text-white sm:mt-1">{companyProfileName(profile.id)}</span>
-                    <span className="mt-1 block text-xs text-emerald-50/50 sm:hidden">Select workspace</span>
-                  </span>
-                </button>;
-              })}
-            </div>
+            <>
+              {profiles.length > 0 && <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3 sm:gap-6">
+                {profiles.map((profile, index) => {
+                  const Icon = PROFILE_ICONS[index] || Building2;
+                  return <button key={profile.id} type="button" onClick={() => chooseProfile(profile)} data-testid={`company-profile-${profile.id}`}
+                    className="group flex flex-row items-center gap-4 rounded-xl border border-white/10 bg-white/[0.035] px-5 py-4 text-left transition-all duration-300 hover:-translate-y-1 hover:border-emerald-100/30 hover:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-100/40 sm:flex-col sm:gap-4 sm:border-0 sm:bg-transparent sm:px-3 sm:py-3 sm:text-center sm:hover:bg-transparent motion-reduce:transform-none motion-reduce:transition-none">
+                    <span className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-full border shadow-[0_8px_24px_rgba(0,0,0,0.16)] transition-transform duration-300 group-hover:scale-105 sm:h-24 sm:w-24 ${PROFILE_TONES[index] || PROFILE_TONES[0]} motion-reduce:transition-none`}>
+                      <Icon size={28} strokeWidth={1.5} className="sm:hidden" />
+                      <Icon size={36} strokeWidth={1.4} className="hidden sm:block" />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-sm font-semibold tracking-wide text-white sm:mt-1">{companyProfileName(profile.id)}</span>
+                      <span className="mt-1 block text-xs text-emerald-50/50 sm:hidden">Select workspace</span>
+                    </span>
+                  </button>;
+                })}
+              </div>}
+              {!profiles.length && !err && <p className="mt-8 text-sm text-emerald-50/60">No company profiles are currently available.</p>}
+              {err && <button type="button" onClick={() => setProfileLoadAttempt((attempt) => attempt + 1)}
+                className="mt-5 rounded-md border border-white/20 px-4 py-2 text-sm font-semibold text-white hover:bg-white/10"
+                data-testid="retry-company-profiles">Retry loading companies</button>}
+            </>
           )}
           <p className="mt-7 text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-50/35"><LockKeyhole size={12} className="mr-1 inline" /> Secure company access</p>
         </section> : (

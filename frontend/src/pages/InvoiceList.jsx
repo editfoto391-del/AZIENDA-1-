@@ -8,7 +8,7 @@ import { api, apiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { usesUnifiedPriceList } from "@/lib/company";
 
-export default function InvoiceList() {
+export default function InvoiceList({ express = false }) {
   const { user } = useAuth();
   const canManageInvoices = user?.is_admin || user?.role === "admin" || user?.is_owner;
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
@@ -36,14 +36,15 @@ export default function InvoiceList() {
     }
     return customersRequest.current;
   };
-  const load = () => api.get(showArchived ? "/invoices?include_archived=true" : "/invoices")
+  const listPath = express ? "/express-invoices" : "/invoices";
+  const load = () => api.get(`/invoices?express=${express}${showArchived ? "&include_archived=true" : ""}`)
     .then((d) => { setList(d); setSel([]); })
     .catch((e) => toast.error(apiError(e)))
     .finally(() => setLoading(false));
   useEffect(() => {
     load();
     loadCustomers().catch((error) => toast.error(apiError(error)));
-  }, [showArchived]);
+  }, [showArchived, express]);
 
   const view = async (id) => {
     setViewOpen(true);
@@ -101,6 +102,18 @@ export default function InvoiceList() {
       load();
     } catch (e) { toast.error(apiError(e)); }
   };
+  const setDailyReportInclusion = async (invoice) => {
+    const included = !invoice.include_on_daily_report;
+    try {
+      await api.post(`/invoices/${invoice.id}/daily-report`, { included });
+      setList((current) => current.map((item) => item.id === invoice.id
+        ? { ...item, include_on_daily_report: included }
+        : item));
+      toast.success(included ? "Invoice included on the daily report" : "Invoice removed from the daily report");
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
 
   const filtered = list.filter((i) => {
     if (showArchived && !i.archived) return false;
@@ -113,8 +126,8 @@ export default function InvoiceList() {
 
   return (
     <div>
-      <PageHeader title="Invoices" subtitle={loading ? "Loading invoices..." : `${list.length} invoices`}>
-        <Btn onClick={() => nav("/invoices/new")} data-testid="new-invoice-btn"><Plus size={16} /> Create Invoice</Btn>
+      <PageHeader title={express ? "Express Website Invoices" : "Invoices"} subtitle={loading ? "Loading invoices..." : `${list.length} invoices`}>
+        <Btn onClick={() => nav(`${listPath}/new`)} data-testid="new-invoice-btn"><Plus size={16} /> Create Invoice</Btn>
       </PageHeader>
 
       <Card className={`p-4 mb-4 grid grid-cols-1 ${unifiedPriceList ? "sm:grid-cols-4" : "sm:grid-cols-5"} gap-3`}>
@@ -150,7 +163,7 @@ export default function InvoiceList() {
                 {canManageInvoices && <th className="px-3 py-3 w-8"><input type="checkbox" checked={sel.length > 0 && sel.length === filtered.filter((i) => !i.archived && i.status === "draft").length} onChange={(e) => setSel(e.target.checked ? filtered.filter((i) => !i.archived && i.status === "draft").map((i) => i.id) : [])} data-testid="select-all-invoices" /></th>}<th className="px-4 py-3 font-semibold">Invoice</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">Date</th><th className="px-4 font-semibold">Due</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold text-right">Total</th><th className="px-4 font-semibold text-right">Paid</th><th className="px-4 font-semibold text-right">Balance</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{filtered.map((i) => (
-                <tr key={i.id} className="border-b border-border/60 hover:bg-slate-50 cursor-pointer" onClick={() => i.archived ? view(i.id) : nav(`/invoices/${i.id}`)} data-testid={`invoice-row-${i.id}`}>
+                <tr key={i.id} className="border-b border-border/60 hover:bg-slate-50 cursor-pointer" onClick={() => i.archived ? view(i.id) : nav(`${listPath}/${i.id}`)} data-testid={`invoice-row-${i.id}`}>
                   {canManageInvoices && <td className="px-3" onClick={(e) => e.stopPropagation()}>{!i.archived && i.status === "draft" && <input type="checkbox" checked={sel.includes(i.id)} onChange={() => toggle(i.id)} data-testid={`select-invoice-${i.id}`} />}</td>}
                   <td className="px-4 py-3 font-mono font-semibold text-slate-700">{i.number || "DRAFT"}{i.archived && <span className="ml-2 inline-block rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 font-sans">Archived</span>}{i.opening_balance && <span className="ml-2 inline-block rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700 font-sans" data-testid={`opening-badge-${i.id}`}>Opening Balance</span>}</td>
                   <td className="px-4 text-slate-600">{i.customer_name}{i.customer_deleted && <Badge cls="ml-2 border-red-200 bg-red-50 text-red-700">Deleted customer</Badge>}</td>
@@ -174,13 +187,22 @@ export default function InvoiceList() {
                       </>
                     ) : i.status !== "void" && (
                       <>
-                      <button onClick={(e) => { e.stopPropagation(); nav(`/invoices/${i.id}?pdf=1`); }} data-testid={`pdf-invoice-row-${i.id}`} title="Download PDF" className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-1.5 text-slate-600 hover:border-primary hover:text-primary transition-colors">
+                      <button onClick={(e) => { e.stopPropagation(); nav(`${listPath}/${i.id}?pdf=1`); }} data-testid={`pdf-invoice-row-${i.id}`} title="Download PDF" className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-1.5 text-slate-600 hover:border-primary hover:text-primary transition-colors">
                         <Download size={12} />
                       </button>
-                      <button onClick={(e) => { e.stopPropagation(); nav(`/invoices/${i.id}?edit=1`); }} data-testid={`edit-invoice-row-${i.id}`}
+                      <button onClick={(e) => { e.stopPropagation(); nav(`${listPath}/${i.id}?edit=1`); }} data-testid={`edit-invoice-row-${i.id}`}
                         className="ml-2 inline-flex items-center gap-1 rounded-lg border border-primary/40 px-2.5 py-1 text-xs font-semibold text-primary hover:bg-blue-50 transition-colors">
                         <Pencil size={12} /> Edit
                       </button>
+                      {express && i.number && i.status !== "void" && <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setDailyReportInclusion(i); }}
+                        aria-pressed={!!i.include_on_daily_report}
+                        data-testid={`daily-report-inclusion-${i.id}`}
+                        className={`ml-2 inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors ${i.include_on_daily_report ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-white text-slate-600 hover:border-primary hover:text-primary"}`}
+                      >
+                        {i.include_on_daily_report ? "Included in daily report" : "Include on daily report"}
+                      </button>}
                     </>
                   )}
                     {canManageInvoices && !i.archived && <>
@@ -232,10 +254,15 @@ export default function InvoiceList() {
             </div> : <p className="text-slate-500">{viewInvoice.opening_balance ? "Opening balance invoice" : "No invoice items recorded."}</p>}
           </div>
           <div className="ml-auto max-w-sm space-y-2 rounded-lg bg-slate-50 p-4">
-            {[["Subtotal", viewInvoice.subtotal], ["Discount", viewInvoice.discount], ["Additional Charges", viewInvoice.extra_charges], ...(viewInvoice.tax_enabled ? [["Tax", viewInvoice.tax_amount]] : []), ["Total", viewInvoice.total], ["Amount Paid", viewInvoice.amount_paid], ["Outstanding Balance", viewInvoice.outstanding]].map(([label, value]) => (
+            {[["Subtotal", viewInvoice.subtotal], ["Discount", viewInvoice.discount], ...(Number(viewInvoice.delivery_fee) ? [["Delivery Fee", viewInvoice.delivery_fee]] : []), ["Additional Charges", viewInvoice.extra_charges], ...(viewInvoice.tax_enabled ? [["Tax", viewInvoice.tax_amount]] : []), ["Total", viewInvoice.total], ["Amount Paid", viewInvoice.amount_paid], ["Outstanding Balance", viewInvoice.outstanding]].map(([label, value]) => (
               <div key={label} className="flex justify-between gap-4"><span className="font-semibold text-slate-600">{label}</span><span className="font-mono">{fmtMoney(value)}</span></div>
             ))}
           </div>
+          {(viewInvoice.made_by || viewInvoice.client_number || viewInvoice.assigned_driver_name) && <div className="grid gap-3 sm:grid-cols-3 text-sm">
+            {viewInvoice.made_by && <p><span className="font-semibold text-slate-600">Made By:</span> {viewInvoice.made_by}</p>}
+            {viewInvoice.client_number && <p><span className="font-semibold text-slate-600">Client Number:</span> {viewInvoice.client_number}</p>}
+            {viewInvoice.assigned_driver_name && <p><span className="font-semibold text-slate-600">Assigned Driver:</span> {viewInvoice.assigned_driver_name}</p>}
+          </div>}
           {viewInvoice.payment_records?.length > 0 && <div>
             <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Payments</h4>
             <div className="space-y-2">{viewInvoice.payment_records.map((payment) => <div key={payment.id} className="flex flex-wrap justify-between gap-2 rounded-lg border border-border px-3 py-2">
