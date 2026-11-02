@@ -1,11 +1,6 @@
 const UNIFIED_PRICE_COMPANIES = new Set(["iqfoam-manufactoring", "iqfoam-whole-sallers"]);
 
-const DEDICATED_COMPANY_DOMAINS = {
-  "iqfoam-business.emergent.host": {
-    companyId: "superiqfoam",
-    username: "worker",
-  },
-};
+const DEDICATED_COMPANY_DOMAINS = {};
 
 export const dedicatedCompanyDomain = () =>
   DEDICATED_COMPANY_DOMAINS[window.location.hostname.toLowerCase()] || null;
