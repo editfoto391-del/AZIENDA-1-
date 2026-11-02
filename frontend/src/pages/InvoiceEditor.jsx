@@ -348,6 +348,12 @@ export default function InvoiceEditor({ express = false }) {
     setInv((prev) => ({ ...prev, customer_id: "", customer_name: name, client_number: "", destination: "" }));
   };
 
+  const paymentTermOptions = [...new Set([
+    ...(settings.payment_terms || ["Due on Delivery", "7 Days", "30 Days"]),
+    "Cash on Delivery",
+    ...(inv.payment_terms ? [inv.payment_terms] : []),
+  ])];
+  const isCod = (inv.payment_terms || "").trim().toLowerCase() === "cash on delivery";
   const totals = useMemo(() => {
     const subtotal = inv.items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unit_price) || 0), 0);
     const taxed = Math.max(subtotal - Number(inv.discount || 0) + Number(inv.delivery_fee || 0) + Number(inv.extra_charges || 0), 0);
@@ -373,6 +379,8 @@ export default function InvoiceEditor({ express = false }) {
     customer_id: inv.customer_id, customer_name: inv.customer_name, date: inv.date,
     due_date: inv.due_date, zone: inv.zone, payment_terms: inv.payment_terms,
     reference: inv.reference, notes: inv.notes, destination: inv.destination || "",
+    cod_amount_due: isCod && inv.cod_amount_due !== "" && inv.cod_amount_due != null ? Number(inv.cod_amount_due) : null,
+    cod_amount_collected: isCod && inv.cod_amount_collected !== "" && inv.cod_amount_collected != null ? Number(inv.cod_amount_collected) : null,
     items: inv.items.filter((it) => it.size || it.description).map((it) => ({
       qty: Number(it.qty) || 0, category: it.category, size: it.size, description: it.description,
       unit_price: Number(it.unit_price) || 0, price_override: it.price_override, tax: it.tax,
@@ -603,6 +611,7 @@ export default function InvoiceEditor({ express = false }) {
     L.push(`Due Date: ${fmtDate(inv.due_date)}`);
     if (!unifiedPriceList) L.push(`Price Zone: Zone ${inv.zone}`);
     L.push(`Payment Terms: ${inv.payment_terms}`);
+    if (isCod && inv.cod_amount_due != null && inv.cod_amount_due !== "") L.push(`Cash to collect: ${fmtMoney(Number(inv.cod_amount_due))}`);
     if (inv.destination) L.push(`Delivery To: ${inv.destination}`);
     if (inv.reference && !inv.opening_balance) L.push(`Reference: ${inv.reference}`);
     if (!inv.opening_balance && previousInvoices.length > 0) {
@@ -809,8 +818,16 @@ export default function InvoiceEditor({ express = false }) {
                 <div className={`grid ${unifiedPriceList ? "grid-cols-1" : "grid-cols-2"} gap-3`}>{!unifiedPriceList && <Select label="Price Zone" value={inv.zone} onChange={(e) => changeZone(Number(e.target.value))} data-testid="invoice-zone-select">
                   <option value={1}>Zone 1</option><option value={2}>Zone 2</option>
                 </Select>}<Select label="Payment Terms" value={inv.payment_terms} onChange={(e) => setInv({ ...inv, payment_terms: e.target.value })}>
-                  {(settings.payment_terms || ["Due on Delivery", "7 Days", "30 Days"]).map((t) => <option key={t}>{t}</option>)}
-                </Select></div><Input label="Delivery Destination" value={inv.destination || ""} onChange={(e) => setInv({ ...inv, destination: e.target.value })} data-testid="invoice-destination-input" /></div></Card>
+                  {paymentTermOptions.map((t) => <option key={t}>{t}</option>)}
+                </Select></div>
+                {isCod && <div className="grid grid-cols-2 gap-3 rounded-md border border-amber-200 bg-amber-50/50 p-3" data-testid="invoice-cod-fields">
+                  <Input label="Cash to collect (R)" type="number" min="0" step="0.01" value={inv.cod_amount_due ?? ""} placeholder={totals.total ? String(Math.round(totals.total * 100) / 100) : ""} onChange={(e) => setInv({ ...inv, cod_amount_due: e.target.value })} data-testid="invoice-cod-due" />
+                  <Input label="Cash actually collected (R)" type="number" min="0" step="0.01" value={inv.cod_amount_collected ?? ""} onChange={(e) => setInv({ ...inv, cod_amount_collected: e.target.value })} data-testid="invoice-cod-collected" />
+                  {inv.cod_amount_due !== "" && inv.cod_amount_due != null && inv.cod_amount_collected !== "" && inv.cod_amount_collected != null && Number(inv.cod_amount_due) !== Number(inv.cod_amount_collected) && (
+                    <p className="col-span-2 text-xs font-semibold text-amber-700">Difference: {fmtMoney(Number(inv.cod_amount_collected) - Number(inv.cod_amount_due))}</p>
+                  )}
+                </div>}
+                <Input label="Delivery Destination" value={inv.destination || ""} onChange={(e) => setInv({ ...inv, destination: e.target.value })} data-testid="invoice-destination-input" /></div></Card>
               <Card className="p-5"><div className="flex items-center justify-between mb-4"><h3 className="font-bold text-slate-800 font-display">2. Invoice Details</h3><span className="font-mono text-sm font-bold text-primary">{inv.number || nextNum || "DRAFT"}</span></div>
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-3"><Input label="Invoice Date" type="date" value={inv.date} onChange={(e) => setInv({ ...inv, date: e.target.value })} /><Input label="Due Date" type="date" value={inv.due_date} onChange={(e) => setInv({ ...inv, due_date: e.target.value })} /></div>

@@ -17,8 +17,9 @@ export const pageLoaders = {
   "/orders": () => import("@/pages/Orders"),
   "/stock": () => import("@/pages/Stock"),
   "/production": () => import("@/pages/Production"),
+  "/warehouses": () => import("@/pages/Warehouses"),
+  "/warehouses/chemical": () => import("@/pages/ChemicalStock"),
   "/attendance": () => import("@/pages/Attendance"),
-  "/deliveries": () => import("@/pages/Deliveries"),
   "/fleet": () => import("@/pages/Fleet"),
   "/expenses": () => import("@/pages/Expenses"),
   "/costs": () => import("@/pages/Costs"),
@@ -43,8 +44,8 @@ const pageData = {
   "/orders": ["/orders", "/customers", "/vehicles", "/stock", "/settings"],
   "/stock": ["/stock", "/stock/movements"],
   "/production": ["/production/daily"],
+  "/warehouses": [],
   "/attendance": ["/employees", "/attendance", "/attendance/summary"],
-  "/deliveries": ["/deliveries", "/customers", "/drivers", "/vehicles", "/stock"],
   "/fleet": ["/vehicles", "/vehicles/records/all", "/spareparts"],
   "/expenses": ["/expenses", "/reports/profit", "/reports/costs", "/vehicles"],
   "/costs": ["/reports/costs"],
@@ -57,7 +58,8 @@ export function preloadPage(path) {
   const pathname = path.split("?")[0];
   const route = pathname.startsWith("/express-invoices/")
     ? "/express-invoices/new"
-    : pathname.startsWith("/invoices/") ? "/invoices/new" : pathname;
+    : pathname.startsWith("/invoices/") ? "/invoices/new"
+      : pathname.startsWith("/warehouses/") ? "/warehouses" : pathname;
   pageLoaders[route]?.().catch(() => {});
   pageData[route]?.forEach((endpoint) => api.get(endpoint).catch(() => {}));
 }

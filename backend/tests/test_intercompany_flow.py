@@ -338,6 +338,8 @@ def test_intercompany_invoice_uses_saved_price_and_customer_zone_rules(monkeypat
         ))
         assert result["invoice"]["id"] == "invoice-5"
         assert created_invoices[0].zone == 1
+        assert created_invoices[0].made_by
+        assert created_invoices[0].deduct_stock is True
         assert created_invoices[0].items[0].unit_price == 85
         assert created_invoices[0].items[0].qty == 2
         assert created_invoices[0].items[0].unit_price * created_invoices[0].items[0].qty == 170

@@ -5,12 +5,14 @@ import {
   LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
   Truck, Menu, X, LogOut, Search, Bell, Layers,
   ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart, ChevronDown, Building2, Handshake, Settings as Cog, ClipboardCheck, LockKeyhole,
+  Warehouse, FlaskConical, Moon, Sun,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
 import { preloadPage } from "@/lib/pageLoaders";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { companyBrandName, companyProfileName, dedicatedCompanyDomain } from "@/lib/company";
+import { useTheme } from "next-themes";
 
 const NAV_GROUPS = [
   { label: "Overview", items: [
@@ -22,12 +24,9 @@ const NAV_GROUPS = [
     { to: "/invoices", label: "Invoice", icon: ReceiptText, section: "invoices" },
     { to: "/client-payments", label: "Clients payment and balances", icon: HandCoins, section: "client-payments" },
   ] },
-  { label: "Express Websites - Old Invoices and Payments", items: [
+  { label: "Express Websites - Old Invoices and Payments", collapsible: true, items: [
     { to: "/express-invoices", label: "Express Website Invoices", icon: ReceiptText, section: "invoices" },
     { to: "/express-client-payments", label: "Express Website Payments and Balances", icon: HandCoins, section: "client-payments" },
-  ] },
-  { label: "Fulfilment", items: [
-    { to: "/deliveries", label: "Deliveries", icon: Truck, section: "deliveries" },
   ] },
   { label: "Purchasing", items: [
     { to: "/intercompany", label: "Intercompany", icon: Building2, section: "orders" },
@@ -39,6 +38,13 @@ const NAV_GROUPS = [
     { to: "/stock", label: "Stock", icon: Package, section: "stock" },
     { to: "/production", label: "Production", icon: Factory, section: "production" },
     { to: "/fleet", label: "Fleet", icon: CarFront, section: "fleet" },
+    { to: "/warehouses/chemical", label: "Chemical", icon: FlaskConical, section: "warehouses", companyId: "superiqfoam" },
+  ] },
+  { label: "WAREHOUSES", collapsible: true, companyId: "iqfoam-manufactoring", items: [
+    { to: "/warehouses/A", label: "Warehouse A", icon: Warehouse, section: "warehouses", warehouseId: "A" },
+    { to: "/warehouses/B", label: "Warehouse B", icon: Warehouse, section: "warehouses", warehouseId: "B" },
+    { to: "/warehouses/C", label: "Warehouse C", icon: Warehouse, section: "warehouses", warehouseId: "C" },
+    { to: "/warehouses/chemical", label: "Chemical", icon: FlaskConical, section: "warehouses" },
   ] },
   { label: "Finance & team", items: [
     { to: "/expenses", label: "Expenses", icon: Receipt, section: "expenses" },
@@ -67,16 +73,18 @@ function WhatsAppFloatingButton() {
 function SidebarContent({ onNav, companyName, companyId, user }) {
   const reduceMotion = useReducedMotion();
   const [oldExpressOpen, setOldExpressOpen] = useState(false);
+  const [warehousesOpen, setWarehousesOpen] = useState(false);
   const navGroups = NAV_GROUPS.map((group) => ({
     ...group,
     items: group.items.filter((item) =>
       (!item.companyId || item.companyId === companyId)
+      && (!user?.is_worker || !item.warehouseId || item.warehouseId === user.warehouse_id)
       && (!item.globalOwnerOnly || (user?.is_primary_owner && user?.is_owner && !user?.is_worker))
       && (!user?.is_worker
         || user.allowed_sections?.includes(item.section)
         || (item.section === "grv" && user.allowed_sections?.includes("costs")))
     ),
-  })).filter((group) => group.items.length);
+  })).filter((group) => (!group.companyId || group.companyId === companyId) && group.items.length);
   return (
     <>
       <div className="flex items-center gap-3 px-5 h-16 border-b border-white/10">
@@ -89,48 +97,65 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
         </div>
       </div>
       <nav className="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
-        {navGroups.map((group) => (
+        {navGroups.map((group) => {
+          const expanded = group.label === "WAREHOUSES" ? warehousesOpen : oldExpressOpen;
+          const items = group.items.map((n) => (
+            user?.is_worker
+              && !user.allowed_sections?.includes(n.section)
+              && !(n.section === "grv" && user.allowed_sections?.includes("costs"))
+              ? <div key={n.to} aria-disabled="true" title="Your administrator has not granted access to this section" data-testid={`nav-locked-${n.label.toLowerCase()}`}
+                className="flex min-h-9 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium leading-tight text-emerald-50/35">
+                <n.icon size={18} />
+                <span className="flex-1">{n.label}</span>
+                <LockKeyhole size={13} />
+              </div>
+              : <NavLink key={n.to} to={n.to} end={n.end} onClick={onNav} onMouseEnter={() => preloadPage(n.to)} onFocus={() => preloadPage(n.to)} onPointerDown={() => preloadPage(n.to)} data-testid={`nav-${n.label.toLowerCase()}`}
+                className={({ isActive }) => `relative isolate flex min-h-9 items-center gap-2.5 px-2.5 py-1.5 rounded-md text-xs leading-tight font-medium transition-colors ${isActive ? "text-white" : "text-emerald-50/65 hover:bg-white/5 hover:text-white"}`}>
+                {({ isActive }) => <>
+                  {isActive && <motion.span layoutId={`active-nav-${onNav ? "mobile" : "desktop"}`} className="pointer-events-none absolute inset-0 z-0 rounded-md bg-white/10 shadow-[inset_2px_0_0_hsl(72_42%_65%)]" transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 480, damping: 38, mass: 0.5 }} />}
+                  <n.icon className="relative z-10" size={18} />
+                  <span className="relative z-10">{n.label}</span>
+                </>}
+              </NavLink>
+          ));
+          return (
           <div key={group.label} className="mb-2">
-            {group.label === "Express Websites - Old Invoices and Payments" ? (
+            {group.collapsible ? (
               <button
                 type="button"
-                onClick={() => setOldExpressOpen((current) => !current)}
-                aria-expanded={oldExpressOpen}
-                aria-controls="old-express-navigation"
-                data-testid="old-express-navigation-toggle"
-                className="flex w-full items-center justify-between px-3 pt-3 pb-1 text-left text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-100/55 hover:text-emerald-50"
+                onClick={() => {
+                  if (group.label === "WAREHOUSES") setWarehousesOpen((current) => !current);
+                  else setOldExpressOpen((current) => !current);
+                }}
+                aria-expanded={expanded}
+                aria-controls={group.label === "WAREHOUSES" ? "warehouses-navigation" : "old-express-navigation"}
+                data-testid={group.label === "WAREHOUSES" ? "warehouses-navigation-toggle" : "old-express-navigation-toggle"}
+                className={`flex w-full items-center justify-between px-3 pt-3 pb-1 text-left text-[9px] font-bold uppercase tracking-[0.14em] ${group.label === "WAREHOUSES" || group.label === "Express Websites - Old Invoices and Payments" ? "text-yellow-300 hover:text-yellow-200" : "text-emerald-100/55 hover:text-emerald-50"}`}
               >
                 <span>{group.label}</span>
-                <ChevronDown size={13} className={`shrink-0 transition-transform ${oldExpressOpen ? "rotate-180" : ""}`} />
+                <ChevronDown size={13} className={`shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
               </button>
             ) : (
               <p className="px-3 pt-3 pb-1 text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-100/40">{group.label}</p>
             )}
-            {(group.label !== "Express Websites - Old Invoices and Payments" || oldExpressOpen) && (
-              <div id={group.label === "Express Websites - Old Invoices and Payments" ? "old-express-navigation" : undefined}>
-                {group.items.map((n) => (
-              user?.is_worker
-              && !user.allowed_sections?.includes(n.section)
-              && !(n.section === "grv" && user.allowed_sections?.includes("costs"))
-                ? <div key={n.to} aria-disabled="true" title="Your administrator has not granted access to this section" data-testid={`nav-locked-${n.label.toLowerCase()}`}
-                  className="flex min-h-9 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium leading-tight text-emerald-50/35">
-                  <n.icon size={18} />
-                  <span className="flex-1">{n.label}</span>
-                  <LockKeyhole size={13} />
-                </div>
-                : <NavLink key={n.to} to={n.to} end={n.end} onClick={onNav} onMouseEnter={() => preloadPage(n.to)} onFocus={() => preloadPage(n.to)} onPointerDown={() => preloadPage(n.to)} data-testid={`nav-${n.label.toLowerCase()}`}
-                  className={({ isActive }) => `relative isolate flex min-h-9 items-center gap-2.5 px-2.5 py-1.5 rounded-md text-xs leading-tight font-medium transition-colors ${isActive ? "text-white" : "text-emerald-50/65 hover:bg-white/5 hover:text-white"}`}>
-                  {({ isActive }) => <>
-                    {isActive && <motion.span layoutId={`active-nav-${onNav ? "mobile" : "desktop"}`} className="pointer-events-none absolute inset-0 z-0 rounded-md bg-white/10 shadow-[inset_2px_0_0_hsl(72_42%_65%)]" transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 480, damping: 38, mass: 0.5 }} />}
-                    <n.icon className="relative z-10" size={18} />
-                    <span className="relative z-10">{n.label}</span>
-                  </>}
-                </NavLink>
-                ))}
-              </div>
-            )}
+            {group.collapsible ? (
+              <AnimatePresence initial={false}>
+                {expanded && (
+                  <motion.div
+                    id={group.label === "WAREHOUSES" ? "warehouses-navigation" : "old-express-navigation"}
+                    initial={reduceMotion ? false : { height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={reduceMotion ? { duration: 0 } : { duration: 0.22, ease: "easeInOut" }}
+                    style={{ overflow: "hidden" }}
+                  >
+                    {items}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            ) : <div>{items}</div>}
           </div>
-        ))}
+        );})}
       </nav>
     </>
   );
@@ -143,6 +168,7 @@ function AnimatedOutlet() {
 
 export default function Layout() {
   const { user, logout, switchCompany } = useAuth();
+  const { theme, setTheme } = useTheme();
   const reduceMotion = useReducedMotion();
   const [open, setOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
@@ -245,6 +271,16 @@ export default function Layout() {
             </div>
           </div>
           <div className="flex-1 sm:hidden" />
+          <button
+            type="button"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            data-testid="theme-toggle"
+            className="rounded-full p-2 text-slate-500 hover:bg-white/40 hover:text-slate-800"
+          >
+            {theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}
+          </button>
           {user?.can_switch_company && availableProfiles.length > 1 && (
             <div className="relative" onMouseEnter={() => setProfileMenuOpen(true)} onMouseLeave={() => setProfileMenuOpen(false)}>
               <button

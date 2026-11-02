@@ -285,6 +285,10 @@ export default function InvoiceList({ express = false }) {
               ["Due Date", fmtDate(viewInvoice.due_date)],
               ...(!unifiedPriceList ? [["Price Zone", `Zone ${viewInvoice.zone}`]] : []),
               ["Payment Terms", viewInvoice.payment_terms],
+              ...(viewInvoice.payment_terms === "Cash on Delivery" ? [
+                ["Cash to collect", viewInvoice.cod_amount_due != null ? fmtMoney(viewInvoice.cod_amount_due) : "—"],
+                ["Cash collected", viewInvoice.cod_amount_collected != null ? fmtMoney(viewInvoice.cod_amount_collected) : "—"],
+              ] : []),
               ["Reference", viewInvoice.reference],
               ["Destination", viewInvoice.destination],
               ["Status", STATUS_META[viewInvoice.status]?.label || viewInvoice.status],

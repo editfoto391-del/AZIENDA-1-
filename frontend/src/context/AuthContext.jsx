@@ -52,7 +52,10 @@ export function AuthProvider({ children }) {
       setBooting(false);
       return;
     }
-    if (window.location.pathname.startsWith("/shared-invoice/")) {
+    if (
+      window.location.pathname.startsWith("/shared-invoice/")
+      || window.location.pathname.startsWith("/shared-warehouse-report/")
+    ) {
       setUser(false);
       setBooting(false);
       return;
@@ -103,9 +106,9 @@ export function AuthProvider({ children }) {
 
   const switchCompany = async (companyId) => {
     const data = await api.post("/auth/switch-company", { company_id: companyId });
+    // Reload with the new token without re-rendering the current page under the other company's user.
     localStorage.setItem("token", data.token);
-    setUser(data.user);
-    window.location.assign("/");
+    window.location.replace("/");
   };
 
   const logout = async () => {

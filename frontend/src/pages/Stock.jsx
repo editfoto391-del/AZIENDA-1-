@@ -5,7 +5,7 @@ import { fmtDateTime, fmtMoney } from "@/lib/format";
 import { companyProfileName, usesUnifiedPriceList } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
-import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2 } from "lucide-react";
+import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2, Search, X } from "lucide-react";
 import { listViewState, loadListRequest } from "@/lib/listRequest.mjs";
 
 const ProductIdentificationManager = lazy(() => import("@/components/ProductIdentificationManager"));
@@ -32,6 +32,8 @@ export default function Stock() {
   const [prices, setPrices] = useState([]);
   const [costDrafts, setCostDrafts] = useState({});
   const [category, setCategory] = useState("");
+  const [stockSearch, setStockSearch] = useState("");
+  const [showStockSearch, setShowStockSearch] = useState(false);
   const [movementRequest, setMovementRequest] = useState({ items: [], loading: true, error: "" });
   const [addModal, setAddModal] = useState(null);
   const [moveModal, setMoveModal] = useState(null);
@@ -53,7 +55,8 @@ export default function Stock() {
   useEffect(() => { load(); }, []);
 
   const filteredList = (list || []).filter((item) =>
-    !category || (STOCK_CATEGORY[category] || [category]).includes(item.product)
+    (!category || (STOCK_CATEGORY[category] || [category]).includes(item.product))
+    && (!stockSearch.trim() || `${item.product} ${item.size}`.toLowerCase().includes(stockSearch.trim().toLowerCase()))
   );
 
   const run = async (fn, ok) => {
@@ -63,7 +66,12 @@ export default function Stock() {
 
   const saveStock = async () => {
     if (!addModal.product.trim() || !addModal.size.trim()) return toast.error("Product and size are required");
-    if (await run(() => api.post("/stock", addModal), "Stock item added")) setAddModal(null);
+    const price = addModal.selling_price;
+    if (price === "" || price == null || !Number.isFinite(Number(price)) || Number(price) < 0) {
+      return toast.error("Selling price is required");
+    }
+    const payload = { ...addModal, product: addModal.product.trim(), size: addModal.size.trim(), selling_price: Number(price) };
+    if (await run(() => api.post("/stock", payload), "Product and price saved")) setAddModal(null);
   };
 
   const findSellingPrice = (stock, zone) => {
@@ -142,12 +150,36 @@ export default function Stock() {
   return (
     <div>
       <PageHeader title="Finished Stock" subtitle="Calculated from the stock movement ledger">
+        <Btn
+          variant="outline"
+          onClick={() => {
+            setShowStockSearch((visible) => !visible);
+            setStockSearch("");
+          }}
+          aria-expanded={showStockSearch}
+          aria-controls="stock-search-input"
+          data-testid="stock-search-toggle"
+        >
+          {showStockSearch ? <X size={16} /> : <Search size={16} />}
+          {showStockSearch ? "Close search" : "Search stock"}
+        </Btn>
         <Btn variant="outline" onClick={() => setShowProductIds(true)} data-testid="product-identification-btn"><Boxes size={16} /> Product IDs & Labels</Btn>
         <Btn variant="outline" onClick={() => setShowHist(true)} data-testid="stock-history-btn"><History size={16} /> Ledger</Btn>
-        <Btn onClick={() => setAddModal({ product: "", size: "", opening: 0, threshold: 5 })} data-testid="add-stock-btn"><Plus size={16} /> Add Product</Btn>
+        <Btn onClick={() => setAddModal({ product: "", size: "", opening: 0, threshold: 5, selling_price: "", zone: 1 })} data-testid="add-stock-btn"><Plus size={16} /> Add Product</Btn>
       </PageHeader>
 
-      <div className="mb-4 max-w-xs">
+      <div className="mb-4 grid max-w-2xl gap-3 sm:grid-cols-2">
+        {showStockSearch && (
+          <Input
+            id="stock-search-input"
+            label="Search stock"
+            type="search"
+            placeholder="Product or size"
+            value={stockSearch}
+            onChange={(event) => setStockSearch(event.target.value)}
+            data-testid="stock-search-input"
+          />
+        )}
         <Select label="Filter by category" value={category} onChange={(event) => setCategory(event.target.value)} data-testid="stock-category-filter">
           <option value="">All categories</option>
           {CATEGORIES.map((item) => <option key={item} value={item}>{item}</option>)}
@@ -155,7 +187,7 @@ export default function Stock() {
       </div>
 
       <Card className="overflow-hidden">
-        {list === null ? <p className="p-6 text-sm text-slate-400">Loading stock...</p> : filteredList.length === 0 ? <Empty icon={Boxes} title={category ? "No stock items in this category" : "No stock records"} /> : (
+        {list === null ? <p className="p-6 text-sm text-slate-400">Loading stock...</p> : filteredList.length === 0 ? <Empty icon={Boxes} title={stockSearch.trim() ? "No stock matches your search" : category ? "No stock items in this category" : "No stock records"} /> : (
           <div className="overflow-x-auto">
             <table className={`w-full text-sm ${user?.is_worker ? "min-w-[900px]" : "min-w-[1180px]"}`}>
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
@@ -197,7 +229,11 @@ export default function Stock() {
             <Input label="Size *" value={addModal.size} onChange={(e) => setAddModal({ ...addModal, size: e.target.value })} placeholder="910x100" data-testid="stock-size-input" />
             <Input label="Opening Balance" type="number" value={addModal.opening} onChange={(e) => setAddModal({ ...addModal, opening: Number(e.target.value) })} data-testid="stock-opening-input" />
           </div>
-          <Input label="Minimum Stock" type="number" value={addModal.threshold} onChange={(e) => setAddModal({ ...addModal, threshold: Number(e.target.value) })} data-testid="stock-threshold-input" />
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="Minimum Stock" type="number" value={addModal.threshold} onChange={(e) => setAddModal({ ...addModal, threshold: Number(e.target.value) })} data-testid="stock-threshold-input" />
+            <Input label="Selling Price (R) *" type="number" min="0" step="0.01" value={addModal.selling_price} onChange={(e) => setAddModal({ ...addModal, selling_price: e.target.value })} data-testid="stock-price-input" />
+          </div>
+          {!unifiedPriceList && <Select label="Price zone" value={addModal.zone} onChange={(e) => setAddModal({ ...addModal, zone: Number(e.target.value) })}><option value={1}>Zone 1</option><option value={2}>Zone 2</option></Select>}
           <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setAddModal(null)}>Cancel</Btn><Btn disabled={busy} onClick={saveStock} data-testid="save-stock-btn">Add</Btn></div>
         </div>}
       </Modal>
@@ -249,7 +285,7 @@ export default function Stock() {
           onProductUpdated={load}
           onCreateProduct={() => {
             setShowProductIds(false);
-            setAddModal({ product: "", size: "", opening: 0, threshold: 5 });
+            setAddModal({ product: "", size: "", opening: 0, threshold: 5, selling_price: "", zone: 1 });
           }}
           onClose={() => setShowProductIds(false)}
           onStockMovement={(product) => setMoveModal({

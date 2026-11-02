@@ -6,13 +6,14 @@ load_dotenv(ROOT_DIR / '.env')
 load_dotenv(ROOT_DIR / '.env.multicompany')
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, Query
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 import json, re
 import shutil
 import calendar
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel as _PydanticBaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import List, Optional, Any, Literal
 from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -67,7 +68,15 @@ db = ScopedDatabase(client, base_db)
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALGO = "HS256"
 
+class BaseModel(_PydanticBaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
 app = FastAPI()
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    errors = [{"type": e.get("type"), "loc": list(e.get("loc", [])), "msg": e.get("msg")} for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
 api = APIRouter(prefix="/api")
 backup_scheduler_task = None
 fleet_notification_scheduler_task = None
@@ -94,6 +103,17 @@ COMPANY_PROFILES = [
 ]
 
 WHOLESALERS_COMPANY_ID = "iqfoam-whole-sallers"
+MANUFACTURING_COMPANY_ID = "iqfoam-manufactoring"
+WAREHOUSE_IDS = {"A", "B", "C"}
+WORKER_SUPERVISOR_ACTION_SECTIONS = {
+    "invoice_edit": {"invoices"},
+    "price_edit": {"settings"},
+    "price_delete": {"settings"},
+    "customer_delete": {"customers"},
+    "stock_delete": {"stock"},
+    "balance_payment_delete": {"customers", "client-payments"},
+}
+WORKER_SUPERVISOR_ACTIONS = set(WORKER_SUPERVISOR_ACTION_SECTIONS)
 
 COMPANY_INVOICE_DETAILS = {
     "iqfoam-manufactoring": {
@@ -267,7 +287,7 @@ OWNER_EMAIL_ALIASES = {"2j2skp87z8@privaterelay.appleid.com"}
 WORKER_SECTIONS = {
     "customers", "suppliers", "buyings", "invoices", "orders", "stock",
     "production", "attendance", "deliveries", "fleet", "expenses",
-    "costs", "grv", "daily-report", "client-payments", "settings",
+    "costs", "grv", "daily-report", "client-payments", "settings", "warehouses",
 }
 
 def canonical_email(email):
@@ -333,14 +353,42 @@ async def authorize_company(user, company_id, session_id=None):
             {"$set": {"company_id": company_id, "last_seen": now_iso()}})
     return user
 
+WORKER_SUPERVISOR_ROUTES = (
+    ("PUT", r"invoices/[^/]+", "invoice_edit"),
+    ("POST", r"prices", "price_edit"),
+    ("PUT", r"prices/[^/]+", "price_edit"),
+    ("DELETE", r"prices/[^/]+", "price_delete"),
+    ("DELETE", r"customers/[^/]+", "customer_delete"),
+    ("DELETE", r"stock/[^/]+", "stock_delete"),
+    ("DELETE", r"payments/[^/]+/other-balance", "balance_payment_delete"),
+)
+
+def worker_supervisor_action(path, method):
+    normalized_path = path.removeprefix("/api/").strip("/")
+    normalized_method = method.upper()
+    for route_method, pattern, action in WORKER_SUPERVISOR_ROUTES:
+        if normalized_method == route_method and re.fullmatch(pattern, normalized_path):
+            return action
+    return None
+
 def enforce_worker_api_access(request, user):
     if not user.get("is_worker"):
         return
     path = request.url.path.removeprefix("/api/").strip("/")
     method = request.method.upper()
     allowed = set(user.get("worker_allowed_sections") or [])
+    sensitive_action = worker_supervisor_action(request.url.path, method)
+    if sensitive_action and "worker_is_supervisor" in user:
+        if not user.get("worker_is_supervisor"):
+            raise HTTPException(403, "Only a designated worker supervisor can make this change")
+        required_sections = WORKER_SUPERVISOR_ACTION_SECTIONS[sensitive_action]
+        if not required_sections & allowed:
+            raise HTTPException(403, f"This worker account cannot access the {sorted(required_sections)[0]} section")
 
-    if path in {"auth/me", "auth/logout", "auth/device", "companies/profiles"}:
+    if path in {
+        "auth/me", "auth/logout", "auth/device", "companies/profiles",
+        "settings/supervisor-password/authorize",
+    }:
         return
     if (
         (path == "notifications" and method == "GET")
@@ -487,6 +535,7 @@ def enforce_worker_api_access(request, user):
         "settings": "settings",
         "payments": "client-payments",
         "dashboard": "dashboard",
+        "warehouses": "warehouses",
     }
     section = next(
         (section for prefix, section in section_prefixes.items()
@@ -533,39 +582,58 @@ def is_supervisor_password_endpoint(path):
     )
 
 async def require_supervisor_for_company_write(request, user):
-    if (
-        request.method in ("GET", "HEAD", "OPTIONS")
-        or user.get("role") == "owner"
-        or not is_delegated_company_admin(user)
-        or user.get("_active_company_id") != DEFAULT_COMPANY_ID
-        or (
-            request.method == "DELETE"
-            and re.fullmatch(r"/api/grvs/[^/]+", request.url.path)
-        )
-        or is_supervisor_password_endpoint(request.url.path)
-    ):
+    if request.method in ("GET", "HEAD", "OPTIONS") or user.get("role") == "owner" \
+            or is_supervisor_password_endpoint(request.url.path):
         return
+
+    action = None
+    if user.get("is_worker"):
+        action = worker_supervisor_action(request.url.path, request.method)
+        if (
+            user.get("_active_company_id") != MANUFACTURING_COMPANY_ID
+            or not user.get("worker_is_supervisor")
+            or action not in set(user.get("worker_supervisor_password_actions") or [])
+        ):
+            return
+        grant_scope = "supervisor_worker_action"
+        grant_company_id = MANUFACTURING_COMPANY_ID
+    else:
+        if (
+            not is_delegated_company_admin(user)
+            or user.get("_active_company_id") != DEFAULT_COMPANY_ID
+            or (
+                request.method == "DELETE"
+                and re.fullmatch(r"/api/grvs/[^/]+", request.url.path)
+            )
+        ):
+            return
+        grant_scope = "supervisor_company_write"
+        grant_company_id = DEFAULT_COMPANY_ID
 
     encoded_grant = request.headers.get("X-Supervisor-Authorization", "")
     try:
         grant = jwt.decode(encoded_grant, JWT_SECRET, algorithms=[JWT_ALGO])
     except jwt.InvalidTokenError:
-        raise HTTPException(428, "Supervisor password is required for changes to this company")
+        raise HTTPException(428, "Supervisor password is required for this change")
     if (
-        grant.get("scope") != "supervisor_company_write"
+        grant.get("scope") != grant_scope
         or grant.get("sub") != user.get("id")
-        or grant.get("company_id") != DEFAULT_COMPANY_ID
+        or grant.get("company_id") != grant_company_id
         or grant.get("sid") != user.get("_session_id")
+        or (action is not None and grant.get("action") != action)
     ):
-        raise HTTPException(428, "Supervisor password is required for changes to this company")
+        raise HTTPException(428, "Supervisor password is required for this change")
 
-    consumed = await base_db.supervisor_action_grants.delete_one({
+    grant_query = {
         "id": grant.get("jti"),
         "user_id": user["id"],
-        "company_id": DEFAULT_COMPANY_ID,
+        "company_id": grant_company_id,
         "session_id": user.get("_session_id"),
         "expires_at": {"$gt": datetime.now(timezone.utc)},
-    })
+    }
+    if action is not None:
+        grant_query.update({"scope": grant_scope, "action": action})
+    consumed = await base_db.supervisor_action_grants.delete_one(grant_query)
     if not consumed.deleted_count:
         raise HTTPException(428, "Supervisor approval has expired or was already used")
 
@@ -664,11 +732,17 @@ class CreateWorkerIn(BaseModel):
     allowed_sections: List[str]
     stock_only: bool = False
     email: Optional[str] = ""
+    is_supervisor: bool = False
+    warehouse_id: Optional[str] = None
+    supervisor_password_actions: List[str] = Field(default_factory=list)
 
 class WorkerAccessUpdateIn(BaseModel):
     worker_role: str
     allowed_sections: List[str]
     stock_only: bool = False
+    is_supervisor: bool = False
+    warehouse_id: Optional[str] = None
+    supervisor_password_actions: List[str] = Field(default_factory=list)
 
 class UserStatusIn(BaseModel):
     active: bool
@@ -689,6 +763,7 @@ class SupervisorPasswordIn(BaseModel):
 
 class SupervisorWriteAuthorizationIn(BaseModel):
     password: str
+    action: Optional[str] = None
 
 class BackupRestoreIn(BaseModel):
     key: str
@@ -751,6 +826,8 @@ def public_user(u):
             "is_worker": u.get("is_worker", False),
             "is_stock_only_worker": u.get("is_worker", False) and u.get("worker_stock_only", False),
             "worker_role": u.get("worker_role", ""),
+            "is_supervisor": u.get("is_worker", False) and u.get("worker_is_supervisor", False),
+            "warehouse_id": u.get("worker_warehouse_id"),
             "allowed_sections": u.get("worker_allowed_sections", []),
             "admin_company_ids": admin_company_ids,
             "company_id": company_id, "company_ids": allowed_company_ids(u), "picture": u.get("picture", "")}
@@ -766,6 +843,39 @@ def worker_sections(sections, stock_only=False):
     if not normalized or any(section not in WORKER_SECTIONS for section in normalized):
         raise HTTPException(400, "Choose at least one valid section")
     return normalized
+
+def validate_worker_company_sections(company_id, sections):
+    if "warehouses" in sections and company_id != MANUFACTURING_COMPANY_ID:
+        raise HTTPException(400, "Warehouse access is only available in IQFOAM Manufacturing")
+
+def worker_supervisor_settings(company_id, is_supervisor, warehouse_id, protected_actions):
+    if company_id == MANUFACTURING_COMPANY_ID:
+        if warehouse_id not in WAREHOUSE_IDS:
+            raise HTTPException(400, "Select a warehouse for Manufacturing workers")
+    elif warehouse_id:
+        raise HTTPException(400, "Warehouse assignment is only available for Manufacturing workers")
+
+    actions = list(dict.fromkeys(protected_actions))
+    if any(action not in WORKER_SUPERVISOR_ACTIONS for action in actions):
+        raise HTTPException(400, "Choose valid supervisor-password actions")
+    if actions and (company_id != MANUFACTURING_COMPANY_ID or not is_supervisor):
+        raise HTTPException(
+            400,
+            "Only Manufacturing worker supervisors can have supervisor-password actions",
+        )
+    return warehouse_id if company_id == MANUFACTURING_COMPANY_ID else None, actions
+
+def validate_worker_supervisor_sections(sections, protected_actions):
+    missing = {
+        action
+        for action in protected_actions
+        if not WORKER_SUPERVISOR_ACTION_SECTIONS[action] & set(sections)
+    }
+    if missing:
+        raise HTTPException(
+            400,
+            "Grant the matching section before configuring its supervisor-protected action",
+        )
 
 def require_profile_owner(user):
     if user.get("role") != "owner" and user.get("_active_role") != "owner":
@@ -1532,6 +1642,9 @@ async def get_workers(company_id: str = "", user=Depends(get_current_user)):
         "worker_role": worker.get("worker_role", ""),
         "allowed_sections": worker.get("worker_allowed_sections", []),
         "stock_only": worker.get("worker_stock_only", False),
+        "is_supervisor": worker.get("worker_is_supervisor", False),
+        "warehouse_id": worker.get("worker_warehouse_id"),
+        "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
         "company_id": company_id,
         "active": worker.get("active", True),
     } for worker in workers]
@@ -1561,6 +1674,9 @@ async def worker_access_details(worker_id, company_id, user):
         "company_name": profile["name"],
         "allowed_sections": worker.get("worker_allowed_sections", []),
         "stock_only": worker.get("worker_stock_only", False),
+        "is_supervisor": worker.get("worker_is_supervisor", False),
+        "warehouse_id": worker.get("worker_warehouse_id"),
+        "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
         "active": worker.get("active", True),
         "can_regenerate": worker.get("active", True) is not False
                           or worker.get("personal_access_revoked", False),
@@ -1690,6 +1806,13 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
     if len(body.password) < 8:
         raise HTTPException(400, "Password must contain at least 8 characters")
     sections = worker_sections(body.allowed_sections, body.stock_only)
+    validate_worker_company_sections(company_id, sections)
+    warehouse_id, protected_actions = worker_supervisor_settings(
+        company_id, body.is_supervisor, body.warehouse_id, body.supervisor_password_actions,
+    )
+    if body.stock_only and body.is_supervisor:
+        raise HTTPException(400, "Stock-only workers cannot be supervisors")
+    validate_worker_supervisor_sections(sections, protected_actions)
     email = (body.email or "").strip().lower()
     if email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
         raise HTTPException(400, "Enter a valid email address")
@@ -1711,6 +1834,9 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "worker_role": worker_role,
         "worker_allowed_sections": sections,
         "worker_stock_only": body.stock_only,
+        "worker_is_supervisor": body.is_supervisor,
+        "worker_warehouse_id": warehouse_id,
+        "worker_supervisor_password_actions": protected_actions,
         "active": True,
         "auth_provider": "password",
         "created_at": now_iso(),
@@ -1724,6 +1850,9 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
             "company_id": company_id,
             "allowed_sections": sections,
             "stock_only": body.stock_only,
+            "is_supervisor": body.is_supervisor,
+            "warehouse_id": warehouse_id,
+            "supervisor_password_actions": protected_actions,
         })
     finally:
         active_company_id.reset(company_context)
@@ -1735,6 +1864,9 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "company_id": company_id,
         "allowed_sections": sections,
         "stock_only": body.stock_only,
+        "is_supervisor": body.is_supervisor,
+        "warehouse_id": warehouse_id,
+        "supervisor_password_actions": protected_actions,
         "active": True,
     }
 
@@ -1752,18 +1884,34 @@ async def update_worker_access(
         raise HTTPException(404, "Worker not found in this company")
     worker_role = body.worker_role.strip()
     sections = worker_sections(body.allowed_sections, body.stock_only)
+    validate_worker_company_sections(company_id, sections)
+    warehouse_id, protected_actions = worker_supervisor_settings(
+        company_id, body.is_supervisor, body.warehouse_id, body.supervisor_password_actions,
+    )
+    if body.stock_only and body.is_supervisor:
+        raise HTTPException(400, "Stock-only workers cannot be supervisors")
+    validate_worker_supervisor_sections(sections, protected_actions)
     if not worker_role:
         raise HTTPException(400, "Worker role is required")
     before = {"worker_role": worker.get("worker_role", ""),
               "allowed_sections": worker.get("worker_allowed_sections", []),
-              "stock_only": worker.get("worker_stock_only", False)}
+              "stock_only": worker.get("worker_stock_only", False),
+              "is_supervisor": worker.get("worker_is_supervisor", False),
+              "warehouse_id": worker.get("worker_warehouse_id"),
+              "supervisor_password_actions": worker.get("worker_supervisor_password_actions", [])}
     await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": {
         "worker_role": worker_role, "worker_allowed_sections": sections,
         "worker_stock_only": body.stock_only,
+        "worker_is_supervisor": body.is_supervisor,
+        "worker_warehouse_id": warehouse_id,
+        "worker_supervisor_password_actions": protected_actions,
     }})
     await log_audit("user", worker_id, "worker_access_updated", user, before=before,
                     after={"worker_role": worker_role, "allowed_sections": sections,
-                           "stock_only": body.stock_only})
+                           "stock_only": body.stock_only,
+                           "is_supervisor": body.is_supervisor,
+                           "warehouse_id": warehouse_id,
+                           "supervisor_password_actions": protected_actions})
     return {
         "id": worker_id,
         "name": worker.get("name", ""),
@@ -1772,6 +1920,9 @@ async def update_worker_access(
         "company_id": company_id,
         "allowed_sections": sections,
         "stock_only": body.stock_only,
+        "is_supervisor": body.is_supervisor,
+        "warehouse_id": warehouse_id,
+        "supervisor_password_actions": protected_actions,
         "active": worker.get("active", True),
     }
 
@@ -2154,6 +2305,547 @@ async def listall(coll, flt=None, sort=None, limit=5000):
         cur = cur.sort(sort[0], sort[1])
     return await cur.to_list(limit)
 
+# ---------------- Warehouse A reports ----------------
+class WarehouseReportLineIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    quantity: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+
+
+class WarehouseChemicalUsageIn(WarehouseReportLineIn):
+    chemical: str = Field(min_length=1, max_length=120)
+    unit: str = Field(min_length=1, max_length=20)
+
+    @field_validator("chemical", "unit")
+    @classmethod
+    def validate_nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("This field cannot be blank")
+        return value.strip()
+
+
+class WarehouseBlockQuantityIn(WarehouseReportLineIn):
+    quantity: int = Field(gt=0, le=1_000_000_000)
+    block_type: str = Field(min_length=1, max_length=120)
+    size: str = Field(min_length=1, max_length=120)
+
+    @field_validator("block_type", "size")
+    @classmethod
+    def validate_nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("This field cannot be blank")
+        return value.strip()
+
+
+class WarehouseFoamCutIn(WarehouseReportLineIn):
+    size: str = Field(min_length=1, max_length=120)
+    unit: str = Field(min_length=1, max_length=20)
+
+    @field_validator("size", "unit")
+    @classmethod
+    def validate_nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("This field cannot be blank")
+        return value.strip()
+
+
+class WarehouseSheetCutIn(WarehouseReportLineIn):
+    quantity: int = Field(gt=0, le=1_000_000_000)
+    size: str = Field(min_length=1, max_length=120)
+
+    @field_validator("size")
+    @classmethod
+    def validate_nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("This field cannot be blank")
+        return value.strip()
+
+
+class WarehouseReportIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    date: str = Field(default_factory=today_str, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    chemicals: List[WarehouseChemicalUsageIn] = Field(default_factory=list, max_length=100)
+    manufactured_blocks: List[WarehouseBlockQuantityIn] = Field(default_factory=list, max_length=100)
+    foam_cut: List[WarehouseFoamCutIn] = Field(default_factory=list, max_length=100)
+    damaged_blocks: List[WarehouseBlockQuantityIn] = Field(default_factory=list, max_length=100)
+    sheets_cut: List[WarehouseSheetCutIn] = Field(default_factory=list, max_length=100)
+    notes: str = Field(default="", max_length=2000)
+
+    @field_validator("date")
+    @classmethod
+    def validate_report_date(cls, value):
+        try:
+            date.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("Enter a valid report date") from error
+        return value
+
+    @model_validator(mode="after")
+    def require_report_data(self):
+        if not any((
+            self.chemicals, self.manufactured_blocks, self.foam_cut,
+            self.damaged_blocks, self.sheets_cut,
+        )):
+            raise ValueError("Add at least one warehouse activity before saving")
+        return self
+
+
+class WarehouseFoamReceivedIn(WarehouseReportLineIn):
+    unit: str = Field(min_length=1, max_length=20)
+
+    @field_validator("unit")
+    @classmethod
+    def validate_nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("This field cannot be blank")
+        return value.strip()
+
+
+class WarehouseMattressQuantityIn(WarehouseReportLineIn):
+    quantity: int = Field(gt=0, le=1_000_000_000)
+    size: str = Field(min_length=1, max_length=120)
+
+    @field_validator("size")
+    @classmethod
+    def validate_nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("This field cannot be blank")
+        return value.strip()
+
+
+class WarehouseBReportIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    date: str = Field(default_factory=today_str, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    foam_received: List[WarehouseFoamReceivedIn] = Field(default_factory=list, max_length=100)
+    mattresses_received: List[WarehouseMattressQuantityIn] = Field(default_factory=list, max_length=100)
+    mattresses_completed: List[WarehouseMattressQuantityIn] = Field(default_factory=list, max_length=100)
+    notes: str = Field(default="", max_length=2000)
+
+    @field_validator("date")
+    @classmethod
+    def validate_report_date(cls, value):
+        try:
+            date.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("Enter a valid report date") from error
+        return value
+
+    @model_validator(mode="after")
+    def require_report_data(self):
+        if not any((self.foam_received, self.mattresses_received, self.mattresses_completed)):
+            raise ValueError("Add at least one warehouse activity before saving")
+        return self
+
+
+class WarehouseCCompletedStockIn(WarehouseReportLineIn):
+    quantity: int = Field(gt=0, le=1_000_000_000)
+    size: str = Field(min_length=1, max_length=120)
+
+    @field_validator("size")
+    @classmethod
+    def validate_nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("This field cannot be blank")
+        return value.strip()
+
+
+class WarehouseCDispatchLineIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    customer_name: str = Field(min_length=1, max_length=200)
+    invoice_number: str = Field(min_length=1, max_length=80)
+    size: str = Field(min_length=1, max_length=120)
+    ordered_quantity: int = Field(gt=0, le=1_000_000_000)
+    loaded_quantity: int = Field(ge=0, le=1_000_000_000)
+
+    @field_validator("customer_name", "invoice_number", "size")
+    @classmethod
+    def validate_nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("This field cannot be blank")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def loaded_quantity_cannot_exceed_order(self):
+        if self.loaded_quantity > self.ordered_quantity:
+            raise ValueError("Loaded quantity cannot exceed the ordered quantity")
+        return self
+
+
+class WarehouseCReportIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    date: str = Field(default_factory=today_str, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    completed_stock: List[WarehouseCCompletedStockIn] = Field(default_factory=list, max_length=100)
+    dispatches: List[WarehouseCDispatchLineIn] = Field(default_factory=list, max_length=200)
+    notes: str = Field(default="", max_length=2000)
+
+    @field_validator("date")
+    @classmethod
+    def validate_report_date(cls, value):
+        try:
+            date.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("Enter a valid report date") from error
+        return value
+
+    @model_validator(mode="after")
+    def require_report_data(self):
+        if not self.completed_stock and not self.dispatches:
+            raise ValueError("Add completed stock or a customer dispatch before saving")
+        return self
+
+
+def require_warehouse_report_access(user, warehouse_id):
+    if user.get("_active_company_id") != MANUFACTURING_COMPANY_ID:
+        raise HTTPException(403, "Warehouse reports are only available in IQFOAM Manufacturing")
+    if user.get("is_worker") and (
+        "warehouses" not in user.get("worker_allowed_sections", [])
+        or user.get("worker_warehouse_id") != warehouse_id
+    ):
+        raise HTTPException(403, f"This worker account cannot access Warehouse {warehouse_id} reports")
+
+
+class ChemicalLineIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    chemical: str = Field(min_length=1, max_length=120)
+    unit: str = Field(default="kg", max_length=20)
+    used_quantity: float = Field(default=0, ge=0, le=1_000_000_000)
+    initial_quantity: Optional[float] = Field(default=None, ge=0, le=1_000_000_000)
+    remaining_estimate: Optional[float] = Field(default=None, ge=0, le=1_000_000_000)
+
+    @model_validator(mode="after")
+    def remaining_defaults_to_initial(self):
+        if self.remaining_estimate is None:
+            if self.initial_quantity is None:
+                raise ValueError("Enter the estimated remaining or the initial quantity")
+            self.remaining_estimate = round(self.initial_quantity - self.used_quantity, 4)
+            if self.remaining_estimate < 0:
+                raise ValueError("Used quantity cannot exceed the initial quantity")
+        return self
+
+    @field_validator("chemical", "unit")
+    @classmethod
+    def strip_text(cls, value):
+        return value.strip()
+
+    @field_validator("chemical")
+    @classmethod
+    def chemical_not_blank(cls, value):
+        if not value:
+            raise ValueError("Chemical name is required")
+        return value
+
+    @field_validator("used_quantity", "remaining_estimate", "initial_quantity")
+    @classmethod
+    def finite_quantity(cls, value):
+        if value is not None and not math.isfinite(value):
+            raise ValueError("Enter a valid quantity")
+        return value
+
+
+class ChemicalLogIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    date: str = Field(default_factory=today_str, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    lines: List[ChemicalLineIn] = Field(min_length=1, max_length=100)
+    notes: str = Field(default="", max_length=2000)
+
+    @field_validator("date")
+    @classmethod
+    def validate_log_date(cls, value):
+        try:
+            date.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("Enter a valid date") from error
+        return value
+
+
+CHEMICAL_COMPANY_IDS = {MANUFACTURING_COMPANY_ID, DEFAULT_COMPANY_ID}
+
+
+def require_chemical_access(user):
+    if user.get("_active_company_id") not in (MANUFACTURING_COMPANY_ID, DEFAULT_COMPANY_ID):
+        raise HTTPException(403, "Chemical stock is not available for this company")
+    if user.get("is_worker") and "warehouses" not in user.get("worker_allowed_sections", []):
+        raise HTTPException(403, "This worker account cannot access the Chemical section")
+
+
+@api.get("/warehouses/chemical/logs")
+async def get_chemical_logs(user=Depends(get_current_user)):
+    require_chemical_access(user)
+    return await listall("chemical_logs", sort=("date", -1), limit=500)
+
+
+@api.post("/warehouses/chemical/logs")
+async def save_chemical_log(body: ChemicalLogIn, user=Depends(get_current_user)):
+    require_chemical_access(user)
+    log = await insert("chemical_logs", {
+        **body.model_dump(),
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("username") or "",
+    })
+    await log_audit("chemical_log", log["id"], "created", user, after=log)
+    return log
+
+
+@api.delete("/warehouses/chemical/logs/{log_id}")
+async def delete_chemical_log(log_id: str, user=Depends(get_current_user)):
+    require_chemical_access(user)
+    require_profile_owner(user)
+    log = await db.chemical_logs.find_one({"id": log_id}, {"_id": 0})
+    if not log:
+        raise HTTPException(404, "Chemical entry not found")
+    await db.chemical_logs.delete_one({"id": log_id})
+    await log_audit("chemical_log", log_id, "permanently_deleted", user,
+                    before=log, after={"deleted": True})
+    return {"ok": True, "deleted": True}
+
+
+@api.get("/warehouses/A/reports")
+async def get_warehouse_a_reports(user=Depends(get_current_user)):
+    require_warehouse_report_access(user, "A")
+    return await listall(
+        "warehouse_reports",
+        {"warehouse_id": "A"},
+        sort=("date", -1),
+        limit=500,
+    )
+
+
+@api.post("/warehouses/A/reports")
+async def save_warehouse_a_report(body: WarehouseReportIn, user=Depends(get_current_user)):
+    require_warehouse_report_access(user, "A")
+    report = await insert("warehouse_reports", {
+        **body.model_dump(),
+        "warehouse_id": "A",
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("username") or "",
+    })
+    await log_audit("warehouse_report", report["id"], "created", user, after=report)
+    return report
+
+
+@api.delete("/warehouses/A/reports/{report_id}")
+async def delete_warehouse_a_report(report_id: str, user=Depends(get_current_user)):
+    require_warehouse_report_access(user, "A")
+    require_profile_owner(user)
+    report = await db.warehouse_reports.find_one(
+        {"id": report_id, "warehouse_id": "A"},
+        {"_id": 0},
+    )
+    if not report:
+        raise HTTPException(404, "Warehouse A report not found")
+    result = await db.warehouse_reports.delete_one(
+        {"id": report_id, "warehouse_id": "A"},
+    )
+    if not result.deleted_count:
+        raise HTTPException(404, "Warehouse A report not found")
+    await db.warehouse_report_share_links.delete_one({
+        "warehouse_report_id": report_id, "warehouse_id": "A",
+    })
+    await log_audit(
+        "warehouse_report", report_id, "permanently_deleted", user,
+        before=report, after={"deleted": True},
+    )
+    return {"ok": True, "deleted": True}
+
+
+@api.get("/warehouses/B/reports")
+async def get_warehouse_b_reports(user=Depends(get_current_user)):
+    require_warehouse_report_access(user, "B")
+    return await listall(
+        "warehouse_reports",
+        {"warehouse_id": "B"},
+        sort=("date", -1),
+        limit=500,
+    )
+
+
+@api.post("/warehouses/B/reports")
+async def save_warehouse_b_report(body: WarehouseBReportIn, user=Depends(get_current_user)):
+    require_warehouse_report_access(user, "B")
+    report = await insert("warehouse_reports", {
+        **body.model_dump(),
+        "warehouse_id": "B",
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("username") or "",
+    })
+    await log_audit("warehouse_report", report["id"], "created", user, after=report)
+    return report
+
+
+@api.delete("/warehouses/B/reports/{report_id}")
+async def delete_warehouse_b_report(report_id: str, user=Depends(get_current_user)):
+    require_warehouse_report_access(user, "B")
+    require_profile_owner(user)
+    report = await db.warehouse_reports.find_one(
+        {"id": report_id, "warehouse_id": "B"},
+        {"_id": 0},
+    )
+    if not report:
+        raise HTTPException(404, "Warehouse B report not found")
+    result = await db.warehouse_reports.delete_one(
+        {"id": report_id, "warehouse_id": "B"},
+    )
+    if not result.deleted_count:
+        raise HTTPException(404, "Warehouse B report not found")
+    await db.warehouse_report_share_links.delete_one({
+        "warehouse_report_id": report_id, "warehouse_id": "B",
+    })
+    await log_audit(
+        "warehouse_report", report_id, "permanently_deleted", user,
+        before=report, after={"deleted": True},
+    )
+    return {"ok": True, "deleted": True}
+
+
+@api.get("/warehouses/C/reports")
+async def get_warehouse_c_reports(user=Depends(get_current_user)):
+    require_warehouse_report_access(user, "C")
+    return await listall(
+        "warehouse_reports",
+        {"warehouse_id": "C"},
+        sort=("date", -1),
+        limit=500,
+    )
+
+
+@api.post("/warehouses/C/reports")
+async def save_warehouse_c_report(body: WarehouseCReportIn, user=Depends(get_current_user)):
+    require_warehouse_report_access(user, "C")
+    data = body.model_dump()
+    data["total_quantity_loaded"] = sum(
+        dispatch["loaded_quantity"] for dispatch in data["dispatches"]
+    )
+    report = await insert("warehouse_reports", {
+        **data,
+        "warehouse_id": "C",
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("username") or "",
+    })
+    await log_audit("warehouse_report", report["id"], "created", user, after=report)
+    return report
+
+
+@api.delete("/warehouses/C/reports/{report_id}")
+async def delete_warehouse_c_report(report_id: str, user=Depends(get_current_user)):
+    require_warehouse_report_access(user, "C")
+    require_profile_owner(user)
+    report = await db.warehouse_reports.find_one(
+        {"id": report_id, "warehouse_id": "C"},
+        {"_id": 0},
+    )
+    if not report:
+        raise HTTPException(404, "Warehouse C report not found")
+    result = await db.warehouse_reports.delete_one(
+        {"id": report_id, "warehouse_id": "C"},
+    )
+    if not result.deleted_count:
+        raise HTTPException(404, "Warehouse C report not found")
+    await db.warehouse_report_share_links.delete_one({
+        "warehouse_report_id": report_id, "warehouse_id": "C",
+    })
+    await log_audit(
+        "warehouse_report", report_id, "permanently_deleted", user,
+        before=report, after={"deleted": True},
+    )
+    return {"ok": True, "deleted": True}
+
+
+async def issue_warehouse_report_share_link(warehouse_id, report_id, user):
+    report = await db.warehouse_reports.find_one(
+        {"id": report_id, "warehouse_id": warehouse_id},
+        {"_id": 0, "id": 1},
+    )
+    if not report:
+        raise HTTPException(404, f"Warehouse {warehouse_id} report not found")
+    link = await db.warehouse_report_share_links.find_one(
+        {"warehouse_report_id": report_id, "warehouse_id": warehouse_id},
+        {"_id": 0},
+    )
+    if not link:
+        token = secrets.token_urlsafe(32)
+        try:
+            await insert("warehouse_report_share_links", {
+                "warehouse_report_id": report_id,
+                "warehouse_id": warehouse_id,
+                "token_hash": worker_access_token_hash(token),
+                "token_encrypted": encrypt_worker_access_token(token),
+            })
+            await log_audit(
+                "warehouse_report", report_id, "share_link_created", user,
+                after={"warehouse_id": warehouse_id},
+            )
+            return token
+        except DuplicateKeyError:
+            link = await db.warehouse_report_share_links.find_one(
+                {"warehouse_report_id": report_id, "warehouse_id": warehouse_id},
+                {"_id": 0},
+            )
+            if not link:
+                raise
+
+    try:
+        token = decrypt_worker_access_token(link.get("token_encrypted", ""))
+    except InvalidToken as error:
+        raise HTTPException(500, "The warehouse report share link could not be recovered") from error
+    if not secrets.compare_digest(link.get("token_hash", ""), worker_access_token_hash(token)):
+        raise HTTPException(500, "The warehouse report share link is invalid; delete and recreate the report link")
+    return token
+
+
+@api.post("/warehouses/{warehouse_id}/reports/{report_id}/share-link")
+async def create_warehouse_report_share_link(
+    warehouse_id: str,
+    report_id: str,
+    response: Response,
+    user=Depends(get_current_user),
+):
+    if warehouse_id not in WAREHOUSE_IDS:
+        raise HTTPException(404, "Warehouse not found")
+    require_warehouse_report_access(user, warehouse_id)
+    response.headers["Cache-Control"] = "no-store"
+    return {"token": await issue_warehouse_report_share_link(warehouse_id, report_id, user)}
+
+
+@api.get("/public/warehouse-reports/{token}")
+async def get_public_warehouse_report_share(token: str, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token or ""):
+        raise HTTPException(404, "Warehouse report link not found")
+
+    token_hash = worker_access_token_hash(token)
+    company_db = tenant_database(client, base_db, MANUFACTURING_COMPANY_ID)
+    link = await company_db.warehouse_report_share_links.find_one(
+        {"token_hash": token_hash},
+        {"_id": 0},
+    )
+    if not link or link.get("warehouse_id") not in WAREHOUSE_IDS:
+        raise HTTPException(404, "Warehouse report link not found")
+    report = await company_db.warehouse_reports.find_one(
+        {"id": link["warehouse_report_id"], "warehouse_id": link["warehouse_id"]},
+        {"_id": 0},
+    )
+    if not report:
+        raise HTTPException(404, "Warehouse report link not found")
+    fields_by_warehouse = {
+        "A": ("chemicals", "manufactured_blocks", "foam_cut", "damaged_blocks", "sheets_cut"),
+        "B": ("foam_received", "mattresses_received", "mattresses_completed"),
+        "C": ("completed_stock", "dispatches", "total_quantity_loaded"),
+    }
+    public_report = {
+        key: report.get(key)
+        for key in ("date", "warehouse_id", "notes", *fields_by_warehouse[link["warehouse_id"]])
+        if key in report
+    }
+    return {"report": public_report}
+
 # ---------------- Customers ----------------
 class CustomerIn(BaseModel):
     name: str
@@ -2163,9 +2855,19 @@ class CustomerIn(BaseModel):
     address: Optional[str] = ""
     city: Optional[str] = ""
     default_zone: int = 1
+    other_balance: Optional[float] = Field(default=0, ge=0, le=1_000_000_000)
+    other_balance_express: bool = False
     payment_terms: Optional[str] = "Due on Delivery"
     active: bool = True
     notes: Optional[str] = ""
+
+    @field_validator("name")
+    @classmethod
+    def customer_name_required(cls, value):
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Customer name is required")
+        return value
 
 @api.get("/customers")
 async def get_customers(user=Depends(get_current_user)):
@@ -2183,10 +2885,51 @@ async def add_customer(body: CustomerIn, user=Depends(get_current_user)):
 @api.put("/customers/{cid}")
 async def edit_customer(cid: str, body: CustomerIn, user=Depends(get_current_user)):
     data = body.model_dump()
+    for field in ("other_balance", "other_balance_express"):
+        if field not in body.model_fields_set:
+            data.pop(field, None)
     if uses_unified_price_list(active_company_id.get()):
         data["default_zone"] = 1
     record = await update_doc("customers", cid, data)
     await emit_workflow_event("customer.updated", record)
+    return record
+
+class OtherBalancePayIn(BaseModel):
+    amount: float = Field(gt=0, le=1_000_000_000)
+    note: Optional[str] = ""
+    method: str = "Cash"
+    receiving_on: Optional[str] = ""
+    date: str = Field(default_factory=today_str)
+    reference: Optional[str] = ""
+    express: bool = False
+
+@api.post("/customers/{cid}/other-balance/pay")
+async def pay_other_balance(cid: str, body: OtherBalancePayIn, user=Depends(get_current_user)):
+    customer = await db.customers.find_one({"id": cid}, {"_id": 0})
+    if not customer:
+        raise HTTPException(404, "Customer not found")
+    current = Decimal(str(customer.get("other_balance") or 0))
+    amount = Decimal(str(body.amount))
+    if amount > current:
+        raise HTTPException(400, "Payment is greater than the other balance")
+    remaining = float(current - amount)
+    history = list(customer.get("other_balance_payments") or [])
+    history.append({
+        "amount": float(amount), "note": body.note or "", "date": now_iso(),
+        "by": user.get("id"), "balance_after": remaining,
+    })
+    pay_rec = await insert("payments", {
+        "amount": float(amount), "method": body.method, "receiving_on": body.receiving_on or "",
+        "date": body.date, "reference": body.reference or "", "notes": body.note or "",
+        "invoice_id": None, "invoice_number": "Other balance", "other_balance_payment": True,
+        "express": body.express, "customer_id": cid, "customer_name": customer.get("name"),
+        "reversed": False, "user": user["email"],
+    })
+    history[-1]["payment_id"] = pay_rec["id"]
+    record = await update_doc("customers", cid, {
+        "other_balance": remaining, "other_balance_payments": history,
+    })
+    await log_audit("customer", cid, "other_balance_paid", user, before=customer, after=record)
     return record
 
 @api.delete("/customers/{cid}")
@@ -2248,9 +2991,23 @@ async def customer_summary(
     for i in invs:
         i["status"] = derive_status(i)
     valid = [i for i in invs if i["status"] not in ("void", "draft")]
-    pays = [p for p in payment_records if not p.get("reversed") and not p.get("archived")]
+    other_balance_history = [
+        p for p in await listall(
+            "payments", {"customer_id": cid, "other_balance_payment": True, "archived": {"$ne": True}},
+            ("created_at", -1),
+        )
+        if bool(p.get("express")) == express_only
+    ]
+    pays = [p for p in payment_records
+            if not p.get("reversed") and not p.get("archived") and not p.get("other_balance_payment")]
+    other_balance_record = await db.customers.find_one({"id": cid}, {"_id": 0, "other_balance": 1})
+    other_balance = (other_balance_record or {}).get("other_balance") or 0
+    invoices_outstanding = dsum(i.get("outstanding", 0) for i in valid)
     return {"invoices": invs, "payments": pays,
-            "outstanding": dsum(i.get("outstanding", 0) for i in valid),
+            "other_balance_payments": other_balance_history,
+            "invoices_outstanding": invoices_outstanding,
+            "other_balance": other_balance or 0,
+            "outstanding": invoices_outstanding,
             "overdue": dsum(i.get("outstanding", 0) for i in valid if i["status"] == "overdue"),
             "total_invoiced": dsum(i.get("total", 0) for i in valid if not i.get("opening_balance")),
             "opening_balance": dsum(i.get("outstanding", 0) for i in valid if i.get("opening_balance")),
@@ -2266,6 +3023,21 @@ class PriceIn(BaseModel):
     price: Optional[float] = None
     active: bool = True
     confirmed: bool = True
+
+    @field_validator("price")
+    @classmethod
+    def price_not_negative(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("Price cannot be negative")
+        return value
+
+    @field_validator("category", "size")
+    @classmethod
+    def price_label_required(cls, value):
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Category and size are required")
+        return value
 
 @api.get("/prices")
 async def get_prices(user=Depends(get_current_user)):
@@ -2294,6 +3066,9 @@ async def edit_price(pid: str, body: PriceIn, user=Depends(get_current_user)):
         d["category"] = "Simple" if uses_unified_price_list(active_company_id.get()) else "Standard"
     if uses_unified_price_list(active_company_id.get()):
         d["zone"] = 1
+    clash = await db.prices.find_one({"zone": d["zone"], "category": d["category"], "size": d["size"], "id": {"$ne": pid}})
+    if clash:
+        raise HTTPException(400, "A price for this zone, category and size already exists")
     d["confirmed"] = d.get("price") is not None and d.get("confirmed", True)
     rec = await update_doc("prices", pid, d)
     await log_audit("price", pid, "updated", user, before=before, after=rec)
@@ -2414,6 +3189,13 @@ class InvoiceItem(BaseModel):
     tax: bool = False
     order_id: Optional[str] = ""
 
+    @field_validator("qty", "unit_price")
+    @classmethod
+    def finite_item_number(cls, value):
+        if value is not None and not math.isfinite(value):
+            raise ValueError("Enter a valid number")
+        return value
+
 class PreviousInvoiceBalanceIn(BaseModel):
     id: str
     date: str = ""
@@ -2451,6 +3233,22 @@ class InvoiceIn(BaseModel):
     deduct_stock: bool = False
     allow_negative_stock: bool = False
     supervisor_authorization: Optional[str] = None
+    cod_amount_due: Optional[float] = Field(default=None, ge=0, le=1_000_000_000)
+    cod_amount_collected: Optional[float] = Field(default=None, ge=0, le=1_000_000_000)
+
+    @field_validator("cod_amount_due", "cod_amount_collected")
+    @classmethod
+    def finite_cod_amount(cls, value):
+        if value is not None and not math.isfinite(value):
+            raise ValueError("Enter a valid cash amount")
+        return value
+
+    @field_validator("discount", "extra_charges", "delivery_fee", "tax_rate")
+    @classmethod
+    def finite_invoice_number(cls, value):
+        if not math.isfinite(value):
+            raise ValueError("Enter a valid number")
+        return value
 
 class InvoiceEditAuthorizationIn(BaseModel):
     password: str
@@ -2931,6 +3729,9 @@ async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
     inv.pop("deduct_stock", None)
     inv.pop("allow_negative_stock", None)
     inv.pop("supervisor_authorization", None)
+    if (inv.get("payment_terms") or "").strip().casefold() != "cash on delivery":
+        inv["cod_amount_due"] = None
+        inv["cod_amount_collected"] = None
     inv["customer_id"] = customer_id
     if not inv.get("idempotency_key"):
         inv.pop("idempotency_key", None)
@@ -2942,6 +3743,11 @@ async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
         raise HTTPException(400, "Discount, additional charges, delivery fee and tax rate cannot be negative")
     if any((it.get("unit_price") or 0) < 0 for it in inv.get("items", [])):
         raise HTTPException(400, "Unit prices cannot be negative")
+    if inv.get("tax_rate", 0) > 100:
+        raise HTTPException(400, "Tax rate cannot be above 100%")
+    items_subtotal = sum(D(it.get("qty")) * D(it.get("unit_price")) for it in inv.get("items", []))
+    if inv.get("items") and D(inv.get("discount")) > items_subtotal:
+        raise HTTPException(400, "Discount cannot be greater than the invoice subtotal")
     inv["customer_name"] = cust["name"] if cust else body.customer_name.strip()
     submitted_client_number = (body.client_number or "").strip()
     can_edit_client_number = bool(
@@ -3275,19 +4081,41 @@ async def reverse_payment(pid: str, body: ReasonIn, user=Depends(get_current_use
     payment = await db.payments.find_one({"id": pid, "reversed": {"$ne": True}}, {"_id": 0})
     if not payment:
         raise HTTPException(400, "Payment not found or already reversed")
-    await consume_invoice_action_authorization(
-        body.supervisor_authorization, payment["invoice_id"], "reverse_payment", user, pid,
-    )
+    if not payment.get("other_balance_payment"):
+        await consume_invoice_action_authorization(
+            body.supervisor_authorization, payment["invoice_id"], "reverse_payment", user, pid,
+        )
     p = await db.payments.find_one_and_update(
         {"id": pid, "reversed": {"$ne": True}},
         {"$set": {"reversed": True, "reversed_reason": body.reason, "reversed_at": now_iso(), "reversed_by": user["email"]}},
         projection={"_id": 0}, return_document=ReturnDocument.AFTER)
     if not p:
         raise HTTPException(400, "Payment not found or already reversed")
-    await recalc_invoice_payments(p["invoice_id"])
+    if p.get("other_balance_payment"):
+        await db.customers.update_one(
+            {"id": p["customer_id"]}, {"$inc": {"other_balance": r2(p.get("amount", 0))}},
+        )
+        await db.customers.update_one(
+            {"id": p["customer_id"], "other_balance_payments.payment_id": pid},
+            {"$set": {"other_balance_payments.$.reversed": True}},
+        )
+    else:
+        await recalc_invoice_payments(p["invoice_id"])
     await log_audit("payment", pid, "reversed", user, before={"reversed": False}, after={"reversed": True}, reason=body.reason)
     await emit_workflow_event("payment.reversed", p)
     return p
+
+@api.delete("/payments/{pid}/other-balance")
+async def delete_other_balance_payment(pid: str, user=Depends(get_current_user)):
+    payment = await db.payments.find_one({"id": pid, "other_balance_payment": True}, {"_id": 0})
+    if not payment:
+        raise HTTPException(404, "Other balance payment not found")
+    await db.customers.update_one(
+        {"id": payment["customer_id"]}, {"$pull": {"other_balance_payments": {"payment_id": pid}}},
+    )
+    await db.payments.delete_one({"id": pid})
+    await log_audit("payment", pid, "deleted", user, before=payment, after=None)
+    return {"ok": True, "deleted": True}
 
 @api.get("/payments")
 async def get_payments(include_archived: bool = False, user=Depends(get_current_user)):
@@ -3309,9 +4137,21 @@ async def get_express_payments(payment_date: str, user=Depends(get_current_user)
         {"archived": {"$ne": True}, "reversed": {"$ne": True}},
         "created_at",
     )
+    other_balance_rows = [
+        {
+            "id": payment.get("id"), "invoice_id": None, "date": payment.get("date"),
+            "amount": r2(payment.get("amount", 0)), "method": payment.get("method") or "",
+            "receiving_on": payment.get("receiving_on") or "", "reference": payment.get("reference") or "",
+            "notes": payment.get("notes") or "", "invoice_number": "Other balance",
+            "customer_name": payment.get("customer_name") or "",
+            "include_on_daily_report": bool(payment.get("include_on_daily_report")),
+        }
+        for payment in payments
+        if payment.get("other_balance_payment") and payment.get("express")
+    ]
     payment_invoice_ids = list({payment.get("invoice_id") for payment in payments if payment.get("invoice_id")})
     if not payment_invoice_ids:
-        return []
+        return other_balance_rows
     invoices = await db.invoices.find(
         {
             "id": {"$in": payment_invoice_ids},
@@ -3322,9 +4162,9 @@ async def get_express_payments(payment_date: str, user=Depends(get_current_user)
     ).to_list(None)
     invoice_by_id = {invoice["id"]: invoice for invoice in invoices}
     if not invoice_by_id:
-        return []
+        return other_balance_rows
 
-    return [
+    return other_balance_rows + [
         {
             "id": payment.get("id"),
             "invoice_id": payment.get("invoice_id"),
@@ -3387,12 +4227,21 @@ class StockIn(BaseModel):
     opening: float = 0
     threshold: float = 5
     unit_cost: Optional[float] = None
+    selling_price: Optional[float] = None
+    zone: int = 1
 
-    @field_validator("unit_cost")
+    @field_validator("opening", "threshold")
+    @classmethod
+    def stock_quantity_not_negative(cls, value):
+        if value < 0:
+            raise ValueError("Quantity cannot be negative")
+        return value
+
+    @field_validator("unit_cost", "selling_price")
     @classmethod
     def validate_unit_cost(cls, value):
         if value is not None and (not math.isfinite(value) or value < 0):
-            raise ValueError("Unit cost must be a finite non-negative amount")
+            raise ValueError("Amount must be a finite non-negative number")
         return value
 
 
@@ -4297,9 +5146,48 @@ async def get_stock(user=Depends(get_current_user)):
 @api.post("/stock")
 async def add_stock(body: StockIn, user=Depends(get_current_user)):
     data = body.model_dump()
+    selling_price = data.pop("selling_price", None)
+    zone = data.pop("zone", 1)
+    data["product"] = data["product"].strip()
+    data["size"] = data["size"].strip()
+    if not data["product"] or not data["size"]:
+        raise HTTPException(400, "Product and size are required")
     if user.get("is_worker"):
         data.pop("unit_cost", None)
+        selling_price = None
+    for item in await listall("stock"):
+        if (str(item.get("product", "")).strip().casefold() == data["product"].casefold()
+                and str(item.get("size", "")).strip().casefold() == data["size"].casefold()):
+            raise HTTPException(400, "This product and size already exist in stock")
+    unified = uses_unified_price_list(active_company_id.get())
+    category, price_zone, existing_price = None, None, None
+    if selling_price is not None:
+        category = data["product"]
+        if category == "Simple" and not unified:
+            category = "Standard"
+        elif category == "Candy":
+            category = "Ribbon Black"
+        price_zone = 1 if unified else zone
+        existing_price = await db.prices.find_one(
+            {"zone": price_zone, "category": category, "size": data["size"]}, {"_id": 0})
     stock = await insert("stock", data)
+    if selling_price is not None:
+        try:
+            if existing_price:
+                rec = await update_doc("prices", existing_price["id"], {
+                    "price": selling_price, "confirmed": True, "active": True,
+                    "archived": False, "archived_at": None, "archived_by": None})
+                await log_audit("price", existing_price["id"], "updated", user, before=existing_price, after=rec)
+            else:
+                rec = await insert("prices", {
+                    "zone": price_zone, "category": category, "size": data["size"],
+                    "price": selling_price, "active": True, "confirmed": True,
+                    "archived": False, "archived_at": None, "archived_by": None,
+                    "updated_at": now_iso()})
+                await log_audit("price", rec["id"], "created", user, after=rec)
+        except Exception:
+            await db.stock.delete_one({"id": stock["id"]})
+            raise
     await ensure_product_identification(stock, user.get("_active_company_id") or DEFAULT_COMPANY_ID)
     return stock_for_user(stock, user)
 
@@ -4336,6 +5224,17 @@ async def edit_stock(sid: str, body: StockIn, user=Depends(get_current_user)):
     if not before:
         raise HTTPException(404, "Stock item not found")
     d = body.model_dump()
+    d["product"] = d["product"].strip()
+    d["size"] = d["size"].strip()
+    if not d["product"] or not d["size"]:
+        raise HTTPException(400, "Product and size are required")
+    clash = await db.stock.find_one({
+        "id": {"$ne": sid},
+        "product": {"$regex": f"^\\s*{re.escape(d['product'])}\\s*$", "$options": "i"},
+        "size": {"$regex": f"^\\s*{re.escape(d['size'])}\\s*$", "$options": "i"},
+    }, {"_id": 0})
+    if clash and clash.get("id") != sid:
+        raise HTTPException(400, "This product and size already exist in stock")
     if user.get("is_worker"):
         d.pop("unit_cost", None)
     if r2(d["opening"]) != r2(before.get("opening", 0)) and await db.stock_movements.count_documents({"stock_id": sid}):
@@ -4410,6 +5309,21 @@ class ProductionIn(BaseModel):
     status: str = "Planned"
     planned_cutting: Optional[str] = None
     notes: Optional[str] = ""
+
+    @field_validator("block_ref")
+    @classmethod
+    def block_ref_required(cls, value):
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Block reference is required")
+        return value
+
+    @field_validator("quantity")
+    @classmethod
+    def production_quantity_positive(cls, value):
+        if value <= 0:
+            raise ValueError("Quantity must be greater than 0")
+        return value
 
 async def resting_hours():
     s = await db.settings.find_one({"id": "singleton"}) or {}
@@ -4542,6 +5456,8 @@ async def edit_production(pid: str, body: ProductionIn, user=Depends(get_current
     if not existing:
         raise HTTPException(404, "Not found")
     d = body.model_dump()
+    if existing.get("stock_added") and d["status"] != "Completed":
+        raise HTTPException(400, "This production was already received into stock and must stay Completed")
     hours = await resting_hours()
     await check_production_rules(d, existing, hours)
     d = {k: v for k, v in d.items() if k not in ("ready_at", "rest_elapsed")}
@@ -4614,6 +5530,14 @@ class EmployeeIn(BaseModel):
     skills: Optional[str] = ""
     notes: Optional[str] = ""
     active: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def employee_name_required(cls, value):
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Employee name is required")
+        return value
 
 @api.get("/employees")
 async def get_employees(user=Depends(get_current_user)):
@@ -4843,11 +5767,23 @@ async def delete_employee(eid: str, user=Depends(get_current_user)):
                     before=employee, after={"deleted_at": deleted_at})
     return {"ok": True, "deleted": True}
 
+def validate_iso_date(value):
+    try:
+        datetime.strptime(value or "", "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("Date must use YYYY-MM-DD format")
+    return value
+
 class AttendanceIn(BaseModel):
     employee_id: str
     date: str
     status: str = "Present"
-    overtime_hours: Optional[float] = Field(default=None, ge=0)
+    overtime_hours: Optional[float] = Field(default=None, ge=0, le=24)
+
+    @field_validator("date")
+    @classmethod
+    def attendance_date_valid(cls, value):
+        return validate_iso_date(value)
     start_time: Optional[str] = None
     end_time: Optional[str] = None
     notes: Optional[str] = ""
@@ -4920,6 +5856,11 @@ class PieceProductionIn(BaseModel):
     employee_id: str
     date: str
     pieces: int = Field(ge=0)
+
+    @field_validator("date")
+    @classmethod
+    def piece_date_valid(cls, value):
+        return validate_iso_date(value)
 
 @api.get("/piece-production")
 async def get_piece_production(start_date: str, end_date: str, user=Depends(get_current_user)):
@@ -5257,6 +6198,14 @@ class DriverIn(BaseModel):
     size_pref: str = "small"
     active: bool = True
 
+    @field_validator("name")
+    @classmethod
+    def name_required(cls, value):
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Driver name is required")
+        return value
+
 @api.get("/drivers")
 async def get_drivers(user=Depends(get_current_user)):
     return await listall("drivers", sort=("name", 1))
@@ -5286,6 +6235,21 @@ class VehicleIn(BaseModel):
     consumption_max: Optional[float] = None
     payload_kg: Optional[float] = None
     tank_litres: Optional[float] = None
+
+    @field_validator("name")
+    @classmethod
+    def name_required(cls, value):
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Vehicle name is required")
+        return value
+
+    @field_validator("consumption_min", "consumption_max", "payload_kg", "tank_litres")
+    @classmethod
+    def vehicle_number_not_negative(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("Value cannot be negative")
+        return value
 
 class VehicleDriverAssignmentIn(BaseModel):
     driver_id: Optional[str] = Field(default=None, max_length=100)
@@ -6252,6 +7216,8 @@ async def create_intercompany_invoice(
             invoice_type="standard",
             intercompany_request_id=request_id,
             idempotency_key=idempotency_key,
+            made_by=(user.get("name") or user.get("email") or user.get("username") or "Intercompany").strip(),
+            deduct_stock=True,
         )
         invoice = await create_invoice(invoice_body, user=user)
     sent_now = body.send_to_requesting_company and not request.get("invoice_sent")
@@ -6704,8 +7670,16 @@ class DeliveryIn(BaseModel):
     actual_arrival: Optional[str] = None
     status: str = "Planned"
     notes: Optional[str] = ""
-    cash_collected: float = 0
+    cash_collected: float = Field(default=0, ge=0)
     items: List[dict] = []  # [{stock_id, product, size, qty}]
+
+    @field_validator("status")
+    @classmethod
+    def valid_delivery_status(cls, value):
+        allowed = ("Planned", "Assigned", "Ready", "Dispatched", "Partially Delivered", "Delivered", "Cancelled", "Failed")
+        if value not in allowed:
+            raise ValueError(f"Status must be one of: {', '.join(allowed)}")
+        return value
 
 @api.get("/deliveries")
 async def get_deliveries(include_archived: bool = False, user=Depends(get_current_user)):
@@ -6940,12 +7914,28 @@ async def authorize_supervisor_company_change(
     body: SupervisorWriteAuthorizationIn,
     user=Depends(get_current_user),
 ):
-    if not is_delegated_company_admin(user) or user.get("_active_company_id") != DEFAULT_COMPANY_ID:
-        raise HTTPException(403, "This authorization is only available to company owners in SUPERIQFOAM")
+    if user.get("is_worker"):
+        action = body.action
+        if (
+            user.get("_active_company_id") != MANUFACTURING_COMPANY_ID
+            or not user.get("worker_is_supervisor")
+            or action not in WORKER_SUPERVISOR_ACTIONS
+            or action not in set(user.get("worker_supervisor_password_actions") or [])
+        ):
+            raise HTTPException(403, "This worker is not authorized for that supervisor-protected action")
+        grant_scope = "supervisor_worker_action"
+        grant_company_id = MANUFACTURING_COMPANY_ID
+    else:
+        if not is_delegated_company_admin(user) or user.get("_active_company_id") != DEFAULT_COMPANY_ID:
+            raise HTTPException(403, "This authorization is only available to company owners in SUPERIQFOAM")
+        action = None
+        grant_scope = "supervisor_company_write"
+        grant_company_id = DEFAULT_COMPANY_ID
+
     settings = await db.settings.find_one({"id": "singleton"}, {"_id": 0, "supervisor_password_hash": 1})
     password_hash = (settings or {}).get("supervisor_password_hash")
     if not password_hash:
-        raise HTTPException(403, "Set a Supervisor Password for SUPERIQFOAM before making changes")
+        raise HTTPException(403, "Set a Supervisor Password for this company before making changes")
     if not verify_pw(body.password, password_hash):
         raise HTTPException(403, "Supervisor password is incorrect")
 
@@ -6954,23 +7944,30 @@ async def authorize_supervisor_company_change(
     })
     grant_id = new_id()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=2)
-    await base_db.supervisor_action_grants.insert_one({
+    grant_record = {
         "id": grant_id,
         "user_id": user["id"],
-        "company_id": DEFAULT_COMPANY_ID,
+        "company_id": grant_company_id,
         "session_id": user.get("_session_id"),
         "expires_at": expires_at,
-    })
-    authorization = jwt.encode({
+    }
+    if action is not None:
+        grant_record.update({"scope": grant_scope, "action": action})
+    await base_db.supervisor_action_grants.insert_one(grant_record)
+    grant_payload = {
         "sub": user["id"],
-        "company_id": DEFAULT_COMPANY_ID,
+        "company_id": grant_company_id,
         "sid": user.get("_session_id"),
-        "scope": "supervisor_company_write",
+        "scope": grant_scope,
         "jti": grant_id,
         "exp": expires_at,
-    }, JWT_SECRET, algorithm=JWT_ALGO)
+    }
+    if action is not None:
+        grant_payload["action"] = action
+    authorization = jwt.encode(grant_payload, JWT_SECRET, algorithm=JWT_ALGO)
     await log_audit("auth", user["id"], "supervisor_write_authorized", user,
-                    after={"company_id": DEFAULT_COMPANY_ID, "expires_at": expires_at.isoformat()})
+                    after={"company_id": grant_company_id, "action": action,
+                           "expires_at": expires_at.isoformat()})
     return {"authorization": authorization}
 
 @api.put("/settings/supervisor-password")
@@ -7000,6 +7997,16 @@ async def update_supervisor_password(body: SupervisorPasswordIn, user=Depends(ge
 
 @api.put("/settings")
 async def update_settings(body: dict, user=Depends(get_current_user)):
+    def _finite(v):
+        if isinstance(v, float):
+            return math.isfinite(v)
+        if isinstance(v, dict):
+            return all(_finite(x) for x in v.values())
+        if isinstance(v, list):
+            return all(_finite(x) for x in v)
+        return True
+    if not _finite(body):
+        raise HTTPException(422, "Settings contain invalid numbers")
     body.pop("_id", None)
     body.pop("unified_price_list", None)
     for key in (
@@ -7071,42 +8078,43 @@ async def dashboard(
             (previous_start, previous_end),
         )
     ]
-    order_open_filter = {
-        "status": {"$in": OPEN_ORDER_STATUSES},
-        "archived": {"$ne": True},
-    }
     fleet_filters = vehicle_operational_filters()
     active_order_vehicle_filter = fleet_filters["orders"]
     active_delivery_vehicle_filter = fleet_filters["deliveries"]
     maintenance_filter = fleet_filters["maintenance"]
     stock_task = asyncio.create_task(listall("stock"))
     (
-        recent_invoices, prod, att_today, deliveries, orders_to_send, open_order_count,
-        urgent_orders, vehicles, maintenance_vehicle_ids, assigned_order_vehicle_ids,
+        recent_invoices, prod, attendance_in_period, deliveries, period_orders,
+        vehicles, maintenance_vehicle_ids, assigned_order_vehicle_ids,
         assigned_delivery_vehicle_ids, all_time_payments, all_time_invoice_totals, settings,
-        completed_orders_today, parts_to_buy, stock,
+        completed_orders_in_period, parts_to_buy, stock,
     ) = await asyncio.gather(
-        listall("invoices", {"archived": {"$ne": True}}, sort=("created_at", -1), limit=8),
-        listall(
+        financial_period_records(
+            "invoices", date.fromisoformat(period_start), date.fromisoformat(period_end),
+            conditions={"archived": {"$ne": True}},
+        ),
+        financial_period_records(
             "production",
-            {
+            date.fromisoformat(period_start), date.fromisoformat(period_end),
+            date_field="production_date",
+            conditions={
                 "status": {"$in": ["Ready for Cutting", "Resting"]},
                 "archived": {"$ne": True},
             },
         ),
-        listall("attendance", {"date": today}),
-        listall(
-            "deliveries",
-            {"status": {"$in": ACTIVE_DELIVERY_STATUSES}, "archived": {"$ne": True}},
-            limit=8,
+        financial_period_records(
+            "attendance", date.fromisoformat(period_start), date.fromisoformat(period_end),
         ),
-        listall("orders", order_open_filter, sort=("created_at", -1), limit=8),
-        db.orders.count_documents(order_open_filter),
-        db.orders.count_documents({
-            "status": {"$in": incomplete_order_statuses},
-            "priority": "Urgent",
-            "archived": {"$ne": True},
-        }),
+        financial_period_records(
+            "deliveries",
+            date.fromisoformat(period_start), date.fromisoformat(period_end),
+            date_field="planned_departure",
+            conditions={"status": {"$in": ACTIVE_DELIVERY_STATUSES}, "archived": {"$ne": True}},
+        ),
+        financial_period_records(
+            "orders", date.fromisoformat(period_start), date.fromisoformat(period_end),
+            date_field="created_at", conditions={"archived": {"$ne": True}},
+        ),
         listall("vehicles", {"archived": {"$ne": True}}),
         db.vehicle_records.distinct("vehicle_id", maintenance_filter),
         db.orders.distinct("vehicle_id", active_order_vehicle_filter),
@@ -7114,9 +8122,27 @@ async def dashboard(
         dashboard_all_time_payment_total(),
         dashboard_all_time_invoice_totals(today),
         db.settings.find_one({"id": "singleton"}),
-        dashboard_completed_orders_today(today),
+        dashboard_completed_orders_in_period(period_start, period_end),
         listall("spareparts", {"status": "to_buy"}),
         stock_task,
+    )
+    recent_invoices.sort(
+        key=lambda invoice: str(invoice.get("created_at") or invoice.get("date") or ""),
+        reverse=True,
+    )
+    recent_invoices = recent_invoices[:8]
+    orders_to_send = sorted(
+        (order for order in period_orders if order.get("status") in OPEN_ORDER_STATUSES),
+        key=lambda order: str(order.get("created_at") or ""),
+        reverse=True,
+    )[:8]
+    open_order_count = sum(order.get("status") in OPEN_ORDER_STATUSES for order in period_orders)
+    urgent_orders = sum(
+        order.get("status") in incomplete_order_statuses and order.get("priority") == "Urgent"
+        for order in period_orders
+    )
+    deliveries.sort(
+        key=lambda delivery: str(delivery.get("planned_departure") or ""),
     )
     stock_movement_totals = await dashboard_stock_movement_totals(
         [item["id"] for item in stock if item.get("id")],
@@ -7210,8 +8236,8 @@ async def dashboard(
         "recommendations": recommendations,
         "ready_cutting": ready_cutting,
         "resting": resting,
-        "completed_today": completed_orders_today,
-        "attendance_today": att_today,
+        "completed_today": completed_orders_in_period,
+        "attendance_today": attendance_in_period,
         "upcoming_deliveries": upcoming,
         "recent_invoices": recent_invoices,
         "current_stock": stock,
@@ -9944,16 +10970,13 @@ async def dashboard_invoice_outstanding_by_id(invoices):
         )
     return balances
 
-async def dashboard_completed_orders_today(today):
+async def dashboard_completed_orders_in_period(start, end):
     records = await financial_period_records(
-        "orders", date.fromisoformat(today), date.fromisoformat(today),
+        "orders", date.fromisoformat(start), date.fromisoformat(end),
         date_field="completed_at",
         conditions={"status": "Delivered", "archived": {"$ne": True}},
     )
-    return len({
-        record["id"] for record in records
-        if record.get("id") and financial_record_date(record, "completed_at") == date.fromisoformat(today)
-    })
+    return len({record["id"] for record in records if record.get("id")})
 
 async def dashboard_financial_period(start, end):
     bounds = date.fromisoformat(str(start)[:10]), date.fromisoformat(str(end)[:10])
@@ -10196,14 +11219,29 @@ PART_FLOW = {"to_buy": 0, "bought": 1, "installed": 2}
 
 class SparePartIn(BaseModel):
     name: str
-    quantity: float = 1
-    expected_price: float = 0
-    actual_cost: Optional[float] = None
+    quantity: float = Field(default=1, ge=0)
+    expected_price: float = Field(default=0, ge=0)
+    actual_cost: Optional[float] = Field(default=None, ge=0)
     vehicle_id: Optional[str] = ""
     status: str = "to_buy"  # to_buy, bought, installed
     notes: Optional[str] = ""
     edit_reason: Optional[str] = ""
     supervisor_authorization: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def name_required(cls, value):
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Part name is required")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def valid_part_status(cls, value):
+        if value not in ("to_buy", "bought", "installed"):
+            raise ValueError("Status must be to_buy, bought or installed")
+        return value
 
 class FleetExpenseAuthorizationIn(BaseModel):
     password: str
@@ -10635,6 +11673,21 @@ class OrderIn(BaseModel):
     vehicle_id: Optional[str] = ""
     notes: Optional[str] = ""
 
+    @field_validator("status")
+    @classmethod
+    def valid_order_status(cls, value):
+        allowed = ("To Send", "Preparing", "Assigned", "Dispatched", "Partially Delivered", "Delivered", "Cancelled")
+        if value not in allowed:
+            raise ValueError(f"Status must be one of: {', '.join(allowed)}")
+        return value
+
+    @field_validator("priority")
+    @classmethod
+    def valid_order_priority(cls, value):
+        if value not in ("Low", "Normal", "High", "Urgent"):
+            raise ValueError("Priority must be Low, Normal, High or Urgent")
+        return value
+
 @api.get("/orders")
 async def get_orders(include_archived: bool = False, user=Depends(get_current_user)):
     flt = {} if include_archived else {"archived": {"$ne": True}}
@@ -10719,6 +11772,11 @@ class DailyProdIn(BaseModel):
     blue_blocks: int = 0
     blocks: list[DailyProductionBlock] = Field(default_factory=list)
     notes: Optional[str] = ""
+
+    @field_validator("date")
+    @classmethod
+    def daily_date_valid(cls, value):
+        return validate_iso_date(value)
 
 def daily_production_blocks(record):
     blocks = record.get("blocks") or []
@@ -10977,11 +12035,21 @@ class BulkAttendanceIn(BaseModel):
     status: str = "Present"
     employee_ids: List[str]
 
+    @field_validator("date")
+    @classmethod
+    def bulk_date_valid(cls, value):
+        return validate_iso_date(value)
+
 @api.post("/attendance/bulk")
 async def bulk_attendance(body: BulkAttendanceIn, user=Depends(get_current_user)):
-    for eid in body.employee_ids:
+    employee_ids = list(dict.fromkeys(body.employee_ids))
+    known = {e["id"] async for e in db.employees.find({"id": {"$in": employee_ids}}, {"id": 1, "_id": 0})}
+    missing = [eid for eid in employee_ids if eid not in known]
+    if missing:
+        raise HTTPException(400, "Employee not found")
+    for eid in employee_ids:
         await add_attendance(AttendanceIn(employee_id=eid, date=body.date, status=body.status), user)
-    return {"ok": True, "count": len(body.employee_ids)}
+    return {"ok": True, "count": len(employee_ids)}
 
 # ---------------- Trip planner ----------------
 class TripPlanIn(BaseModel):
@@ -11242,6 +12310,14 @@ async def initialize_multi_company():
     await base_db.invoice_share_links.create_index(
         "token_hash", unique=True, name="invoice_share_token_once",
     )
+    await base_db.warehouse_report_share_links.create_index(
+        [("warehouse_id", 1), ("warehouse_report_id", 1)],
+        unique=True,
+        name="warehouse_report_share_once",
+    )
+    await base_db.warehouse_report_share_links.create_index(
+        "token_hash", unique=True, name="warehouse_report_share_token_once",
+    )
     await ensure_performance_indexes(base_db)
 
     for company_id in ("iqfoam-manufactoring", "iqfoam-whole-sallers"):
@@ -11470,6 +12546,14 @@ async def initialize_empty_company(company_id):
     )
     await company_db.invoice_share_links.create_index(
         "token_hash", unique=True, name="invoice_share_token_once",
+    )
+    await company_db.warehouse_report_share_links.create_index(
+        [("warehouse_id", 1), ("warehouse_report_id", 1)],
+        unique=True,
+        name="warehouse_report_share_once",
+    )
+    await company_db.warehouse_report_share_links.create_index(
+        "token_hash", unique=True, name="warehouse_report_share_token_once",
     )
     await company_db.vehicle_licence_discs.create_index(
         [("vehicle_id", 1), ("expiry_date", 1)],

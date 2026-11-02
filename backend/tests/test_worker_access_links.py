@@ -110,6 +110,134 @@ def test_workers_can_access_only_their_own_notification_routes(section):
     assert unrelated_section.value.status_code == 403
 
 
+def test_manufacturing_worker_supervisor_configuration_is_validated():
+    assert server.worker_supervisor_settings(
+        "iqfoam-manufactoring", True, "B", ["invoice_edit"],
+    ) == ("B", ["invoice_edit"])
+    assert server.worker_supervisor_settings(
+        "superiqfoam", False, None, [],
+    ) == (None, [])
+
+    with pytest.raises(HTTPException) as missing_warehouse:
+        server.worker_supervisor_settings("iqfoam-manufactoring", False, None, [])
+    assert missing_warehouse.value.status_code == 400
+
+    with pytest.raises(HTTPException) as warehouse_in_other_company:
+        server.worker_supervisor_settings("superiqfoam", False, "A", [])
+    assert warehouse_in_other_company.value.status_code == 400
+
+    with pytest.raises(HTTPException) as action_without_supervisor:
+        server.worker_supervisor_settings(
+            "iqfoam-manufactoring", False, "A", ["price_edit"],
+        )
+    assert action_without_supervisor.value.status_code == 400
+
+
+def test_warehouses_section_is_only_available_to_manufacturing_workers():
+    server.validate_worker_company_sections("iqfoam-manufactoring", ["warehouses"])
+
+    with pytest.raises(HTTPException) as other_company:
+        server.validate_worker_company_sections("superiqfoam", ["warehouses"])
+    assert other_company.value.status_code == 400
+
+
+def test_supervisor_actions_are_bound_to_worker_sections():
+    server.validate_worker_supervisor_sections(["invoices"], ["invoice_edit"])
+    with pytest.raises(HTTPException) as missing_settings:
+        server.validate_worker_supervisor_sections(["invoices"], ["price_edit"])
+    assert missing_settings.value.status_code == 400
+
+
+def test_only_designated_manufacturing_supervisors_can_edit_sensitive_records():
+    non_supervisor = {
+        "is_worker": True,
+        "worker_is_supervisor": False,
+        "worker_allowed_sections": ["invoices", "settings"],
+    }
+    with pytest.raises(HTTPException) as invoice_edit:
+        server.enforce_worker_api_access(
+            request("/api/invoices/invoice-1", "unused", "PUT"), non_supervisor,
+        )
+    assert invoice_edit.value.status_code == 403
+
+    supervisor = {
+        **non_supervisor,
+        "worker_is_supervisor": True,
+    }
+    server.enforce_worker_api_access(
+        request("/api/invoices/invoice-1", "unused", "PUT"), supervisor,
+    )
+    server.enforce_worker_api_access(
+        request("/api/prices", "unused", "POST"), supervisor,
+    )
+
+    with pytest.raises(HTTPException) as missing_invoice_section:
+        server.enforce_worker_api_access(
+            request("/api/invoices/invoice-1", "unused", "PUT"),
+            {**supervisor, "worker_allowed_sections": ["settings"]},
+        )
+    assert missing_invoice_section.value.status_code == 403
+
+
+def test_supervisor_password_grant_is_scoped_to_action_and_company(monkeypatch):
+    class GrantCollection:
+        async def delete_one(self, query):
+            self.query = query
+            return type("DeleteResult", (), {"deleted_count": 1})()
+
+    class GrantDatabase:
+        def __init__(self):
+            self.supervisor_action_grants = GrantCollection()
+
+    grant = {
+        "scope": "supervisor_worker_action",
+        "sub": "worker-a",
+        "company_id": "iqfoam-manufactoring",
+        "sid": "session-a",
+        "action": "invoice_edit",
+        "jti": "grant-a",
+    }
+    database = GrantDatabase()
+    monkeypatch.setattr(server, "base_db", database)
+    worker = {
+        "id": "worker-a",
+        "is_worker": True,
+        "worker_is_supervisor": True,
+        "worker_supervisor_password_actions": ["invoice_edit"],
+        "_active_company_id": "iqfoam-manufactoring",
+        "_session_id": "session-a",
+    }
+    req = Request({
+        "type": "http",
+        "method": "PUT",
+        "path": "/api/invoices/invoice-a",
+        "raw_path": b"/api/invoices/invoice-a",
+        "query_string": b"",
+        "headers": [(b"x-supervisor-authorization", b"signed-grant")],
+        "scheme": "https",
+        "server": ("test", 443),
+        "client": ("127.0.0.1", 1),
+    })
+
+    with pytest.raises(HTTPException) as missing_authorization:
+        asyncio.run(server.require_supervisor_for_company_write(req, worker))
+    assert missing_authorization.value.status_code == 428
+
+    monkeypatch.setattr(server.jwt, "decode", lambda *args, **kwargs: grant)
+    mismatched_action = {**grant, "action": "price_edit"}
+    monkeypatch.setattr(server.jwt, "decode", lambda *args, **kwargs: mismatched_action)
+    with pytest.raises(HTTPException) as wrong_action:
+        asyncio.run(server.require_supervisor_for_company_write(req, worker))
+    assert wrong_action.value.status_code == 428
+
+    monkeypatch.setattr(server.jwt, "decode", lambda *args, **kwargs: grant)
+    asyncio.run(server.require_supervisor_for_company_write(req, worker))
+
+    assert database.supervisor_action_grants.query["scope"] == "supervisor_worker_action"
+    assert database.supervisor_action_grants.query["action"] == "invoice_edit"
+    assert database.supervisor_action_grants.query["company_id"] == "iqfoam-manufactoring"
+
+
 @pytest.fixture
 def worker_accounts(monkeypatch):
     workers = [
@@ -301,6 +429,52 @@ def test_company_admin_can_view_add_and_change_worker_roles(worker_accounts):
     asyncio.run(scenario())
 
 
+def test_manufacturing_worker_creation_saves_warehouse_and_supervisor_permissions(worker_accounts):
+    _, database = worker_accounts
+    admin = {
+        "id": "manufacturing-admin",
+        "role": "user",
+        "_active_role": "admin",
+        "_active_company_id": "iqfoam-manufactoring",
+        "company_roles": {"iqfoam-manufactoring": "admin"},
+    }
+
+    async def scenario():
+        with pytest.raises(HTTPException) as missing_warehouse:
+            await server.create_worker(server.CreateWorkerIn(
+                username="manufacturing-worker",
+                name="Manufacturing Worker",
+                worker_role="Invoice Clerk",
+                password="secure-password",
+                company_id="iqfoam-manufactoring",
+                allowed_sections=["invoices", "settings"],
+                is_supervisor=True,
+                supervisor_password_actions=["invoice_edit", "price_edit"],
+            ), admin)
+        assert missing_warehouse.value.status_code == 400
+
+        created = await server.create_worker(server.CreateWorkerIn(
+            username="manufacturing-worker",
+            name="Manufacturing Worker",
+            worker_role="Invoice Clerk",
+            password="secure-password",
+            company_id="iqfoam-manufactoring",
+            allowed_sections=["invoices", "settings"],
+            is_supervisor=True,
+            warehouse_id="B",
+            supervisor_password_actions=["invoice_edit", "price_edit"],
+        ), admin)
+        assert created["warehouse_id"] == "B"
+        assert created["is_supervisor"] is True
+        assert created["supervisor_password_actions"] == ["invoice_edit", "price_edit"]
+
+        stored = await database.users.find_one({"id": created["id"]})
+        assert stored["worker_warehouse_id"] == "B"
+        assert stored["worker_supervisor_password_actions"] == ["invoice_edit", "price_edit"]
+
+    asyncio.run(scenario())
+
+
 def test_company_admin_can_reset_worker_password_only_in_their_company(worker_accounts):
     _, database = worker_accounts
     admin = {
@@ -339,3 +513,18 @@ def test_company_admin_can_reset_worker_password_only_in_their_company(worker_ac
         assert weak_password.value.status_code == 400
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("method,path,action", [
+    ("PUT", "/api/invoices/abc", "invoice_edit"),
+    ("DELETE", "/api/prices/abc", "price_delete"),
+    ("DELETE", "/api/customers/abc", "customer_delete"),
+    ("DELETE", "/api/stock/abc", "stock_delete"),
+    ("DELETE", "/api/payments/abc/other-balance", "balance_payment_delete"),
+    ("POST", "/api/invoices/abc/void", None),
+    ("POST", "/api/payments/abc/reverse", None),
+    ("POST", "/api/invoices/abc/payments", None),
+    ("GET", "/api/invoices/abc", None),
+])
+def test_worker_supervisor_action_routes(method, path, action):
+    assert server.worker_supervisor_action(path, method) == action

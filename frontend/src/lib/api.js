@@ -15,6 +15,22 @@ function requestSupervisorPassword() {
   return prompt;
 }
 
+const SUPERVISOR_ROUTES = [
+  ["PUT", /^invoices\/[^/]+$/, "invoice_edit"],
+  ["POST", /^prices$/, "price_edit"],
+  ["PUT", /^prices\/[^/]+$/, "price_edit"],
+  ["DELETE", /^prices\/[^/]+$/, "price_delete"],
+  ["DELETE", /^customers\/[^/]+$/, "customer_delete"],
+  ["DELETE", /^stock\/[^/]+$/, "stock_delete"],
+  ["DELETE", /^payments\/[^/]+\/other-balance$/, "balance_payment_delete"],
+];
+
+function supervisorActionForRequest(config) {
+  const path = String(config.url || "").split("?")[0].replace(/^\/api\//, "").replace(/\/+$/, "");
+  const method = String(config.method || "GET").toUpperCase();
+  return SUPERVISOR_ROUTES.find(([m, pattern]) => m === method && pattern.test(path))?.[2];
+}
+
 export function invalidateGetCache() {
   cachedGets.clear();
   if (typeof window !== "undefined") {
@@ -47,7 +63,11 @@ client.interceptors.response.use(
       if (!password) {
         throw new Error("Change cancelled: the Supervisor Password is required.");
       }
-      const authorization = await client.post("/settings/supervisor-password/authorize", { password });
+      const action = supervisorActionForRequest(err.config);
+      const authorization = await client.post("/settings/supervisor-password/authorize", {
+        password,
+        ...(action ? { action } : {}),
+      });
       err.config._supervisorRetried = true;
       err.config.headers = {
         ...err.config.headers,

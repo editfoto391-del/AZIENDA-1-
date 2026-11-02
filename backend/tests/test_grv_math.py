@@ -9,6 +9,21 @@ from grv_math import (
 )
 
 
+def test_grv_accepts_received_goods_when_nothing_is_rejected():
+    result = validate_grv_line_quantities({
+        "actual_received_quantity": 10, "accepted_quantity": 0,
+        "rejected_quantity": 0, "damaged_quantity": 0, "unit_cost": 5,
+    })
+    assert result["accepted_quantity"] == 10
+    assert result["total_value"] == 50
+
+    fully_rejected = validate_grv_line_quantities({
+        "actual_received_quantity": 10, "accepted_quantity": 0,
+        "rejected_quantity": 10, "damaged_quantity": 0,
+    })
+    assert fully_rejected["accepted_quantity"] == 0
+
+
 def test_grv_rejects_accepted_and_rejected_quantity_over_actual():
     with pytest.raises(ValueError, match="cannot exceed actual"):
         validate_grv_line_quantities({

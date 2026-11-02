@@ -144,7 +144,8 @@ def _install_fake_grv_dependencies(monkeypatch, fake_db):
             "type": movement_type, "quantity": quantity, "direction": kwargs.get("direction", 1),
             "dedupe_key": kwargs.get("dedupe_key"),
             "reference": kwargs.get("reference", ""),
-            "user": user["email"], **kwargs.get("extra", {}),
+            "user": user["email"], "created_at": "2026-10-29T00:00:00+00:00",
+            **kwargs.get("extra", {}),
         })
 
     monkeypatch.setattr(server, "db", fake_db)
@@ -198,6 +199,10 @@ def test_partial_grvs_update_po_and_stock_once_without_creating_buyings(monkeypa
         assert len({item["dedupe_key"] for item in fake_db.stock_movements.documents}) == 2
         assert all(item["batch_id"].startswith("grv:") for item in fake_db.stock_movements.documents)
         assert all(item["batch_quantity"] == item["quantity"] for item in fake_db.stock_movements.documents)
+        stock = server.apply_stock_movements(
+            deepcopy(fake_db.stock.documents[0]), fake_db.stock_movements.documents,
+        )
+        assert stock["current"] == 75
         assert fake_db.buyings.documents == []
 
         with pytest.raises(HTTPException) as duplicate:

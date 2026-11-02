@@ -91,13 +91,29 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({ inv, totals
             <td className="px-2 py-1.5 text-right">{it.qty}</td><td className="px-2 py-1.5 text-right">{fmtMoney(it.unit_price)}</td><td className="px-2 py-1.5 text-right">{fmtMoney((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
           </tr>))}</tbody>
       </table>}
-      <div className="flex justify-end mt-2"><div className="w-[320px] text-[13px]">
-        {[["Subtotal", totals.subtotal], ["Discount", Number(inv.discount) || 0], ...(Number(inv.delivery_fee) ? [["Delivery Fee", inv.delivery_fee]] : []), ...(Number(inv.extra_charges) ? [["Added", inv.extra_charges]] : []), ...(inv.tax_enabled ? [[`Tax (${inv.tax_rate}%)`, totals.tax]] : [])].map(([k, v]) => (
-          <div key={k} className="flex justify-between py-0.5 px-2"><span className="font-semibold text-slate-700">{k}</span><span>{fmtMoney(v)}</span></div>))}
-        <div className="flex justify-between py-1 px-2 text-[16px] font-extrabold"><span>Total</span><span data-testid="doc-total">{fmtMoney(totals.total)}</span></div>
-        <div className="flex justify-between py-0.5 px-2 mt-1"><span className="font-semibold text-slate-700">Amount Paid</span><span>{fmtMoney(inv.amount_paid)}</span></div>
-        <div className="flex justify-between py-1.5 px-2 bg-red-50 text-red-800 font-bold"><span>BLN (Balance Remaining)</span><span>{fmtMoney(totals.outstanding)}</span></div>
-      </div></div>
+      <div className="mt-2 flex items-start justify-between gap-3">
+        {(inv.payment_terms || "").trim().toLowerCase() === "cash on delivery" && <div
+          className="pt-1 text-[10px] font-bold leading-4 text-red-700"
+          style={{ breakInside: "avoid", pageBreakInside: "avoid" }}
+          data-testid="doc-cod"
+        >
+          <p className="uppercase">Cash on Delivery</p>
+          <p>Cash to collect: {inv.cod_amount_due != null ? fmtMoney(inv.cod_amount_due) : fmtMoney(totals.total)}</p>
+          <p className="flex items-end gap-1">
+            <span>Cash actually collected:</span>
+            {inv.cod_amount_collected != null
+              ? <span>{fmtMoney(inv.cod_amount_collected)}</span>
+              : <span className="inline-block w-12 border-b border-red-700">&nbsp;</span>}
+          </p>
+        </div>}
+        <div className="ml-auto w-[320px] text-[13px]">
+          {[["Subtotal", totals.subtotal], ["Discount", Number(inv.discount) || 0], ...(Number(inv.delivery_fee) ? [["Delivery Fee", inv.delivery_fee]] : []), ...(Number(inv.extra_charges) ? [["Added", inv.extra_charges]] : []), ...(inv.tax_enabled ? [[`Tax (${inv.tax_rate}%)`, totals.tax]] : [])].map(([k, v]) => (
+            <div key={k} className="flex justify-between py-0.5 px-2"><span className="font-semibold text-slate-700">{k}</span><span>{fmtMoney(v)}</span></div>))}
+          <div className="flex justify-between py-1 px-2 text-[16px] font-extrabold"><span>Total</span><span data-testid="doc-total">{fmtMoney(totals.total)}</span></div>
+          <div className="flex justify-between py-0.5 px-2 mt-1"><span className="font-semibold text-slate-700">Amount Paid</span><span>{fmtMoney(inv.amount_paid)}</span></div>
+          <div className="flex justify-between py-1.5 px-2 bg-red-50 text-red-800 font-bold"><span>BLN (Balance Remaining)</span><span>{fmtMoney(totals.outstanding)}</span></div>
+        </div>
+      </div>
       <div className="flex justify-between gap-4 mt-4 border-b border-slate-300 pb-3">
         <div className="leading-4 whitespace-pre-line text-[12px]">
           <p className="font-bold text-[14px]">Banking Details</p>

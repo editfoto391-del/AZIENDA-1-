@@ -263,6 +263,221 @@
   }
 }
 
+html.dark {
+  color-scheme: dark;
+  --background: 228 32% 7%;
+  --foreground: 214 24% 94%;
+  --card: 227 28% 11%;
+  --card-foreground: 214 24% 94%;
+  --popover: 227 28% 11%;
+  --popover-foreground: 214 24% 94%;
+  --primary: 160 52% 44%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 226 22% 17%;
+  --secondary-foreground: 214 24% 94%;
+  --muted: 226 22% 17%;
+  --muted-foreground: 218 14% 66%;
+  --accent: 160 28% 20%;
+  --accent-foreground: 150 40% 92%;
+  --border: 225 18% 22%;
+  --input: 225 18% 24%;
+  --ring: 160 52% 55%;
+}
+
+html.dark body {
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(900px 500px at 8% -10%, rgb(16 185 129 / 0.10), transparent 60%),
+    radial-gradient(800px 500px at 100% 0%, rgb(99 102 241 / 0.10), transparent 60%);
+  background-attachment: fixed;
+}
+
+html.dark ::selection { background: rgb(16 185 129 / 0.35); color: #fff; }
+html.dark * { scrollbar-color: #2b3448 transparent; }
+html.dark ::-webkit-scrollbar { width: 10px; height: 10px; }
+html.dark ::-webkit-scrollbar-thumb { background: #2b3448; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+html.dark ::-webkit-scrollbar-thumb:hover { background: #3a4660; background-clip: content-box; }
+
+html.dark .liquid-glass-surface {
+  background: linear-gradient(180deg, rgb(24 30 46 / 0.92), rgb(17 22 35 / 0.92));
+  border-color: rgb(148 163 184 / 0.14);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 0.35), inset 0 1px 0 rgb(255 255 255 / 0.05);
+  backdrop-filter: blur(14px);
+}
+
+html.dark input:focus-visible,
+html.dark select:focus-visible,
+html.dark textarea:focus-visible,
+html.dark button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(16 185 129 / 0.28);
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder { color: #64708a; }
+
+html.dark [class~="bg-white"],
+html.dark [class~="bg-white/70"],
+html.dark [class~="bg-white/85"],
+html.dark [class~="bg-white/90"] {
+  background-color: #171d2d !important;
+}
+
+html.dark [class~="bg-slate-50"],
+html.dark [class~="bg-slate-50/70"],
+html.dark [class~="bg-gray-50"],
+html.dark [class~="bg-neutral-50"],
+html.dark [class~="bg-stone-50"] {
+  background-color: #12182a !important;
+}
+
+html.dark [class~="bg-slate-100"],
+html.dark [class~="bg-gray-100"],
+html.dark [class~="bg-neutral-100"],
+html.dark [class~="bg-stone-100"] {
+  background-color: #1e2639 !important;
+}
+
+html.dark [class~="bg-slate-200"],
+html.dark [class~="bg-gray-200"],
+html.dark [class~="bg-neutral-200"],
+html.dark [class~="bg-stone-200"] {
+  background-color: #2a3349 !important;
+}
+
+html.dark [class*="bg-blue-50"],
+html.dark [class*="bg-sky-50"],
+html.dark [class*="bg-cyan-50"] { background-color: #14283b !important; }
+html.dark [class*="bg-blue-100"],
+html.dark [class*="bg-sky-100"],
+html.dark [class*="bg-cyan-100"] { background-color: #1c3851 !important; }
+html.dark [class*="bg-emerald-50"],
+html.dark [class*="bg-green-50"],
+html.dark [class*="bg-teal-50"] { background-color: #142d2a !important; }
+html.dark [class*="bg-emerald-100"],
+html.dark [class*="bg-green-100"],
+html.dark [class*="bg-teal-100"] { background-color: #1d4038 !important; }
+html.dark [class*="bg-red-50"],
+html.dark [class*="bg-rose-50"] { background-color: #351e27 !important; }
+html.dark [class*="bg-red-100"],
+html.dark [class*="bg-rose-100"] { background-color: #48232d !important; }
+html.dark [class*="bg-orange-50"],
+html.dark [class*="bg-amber-50"],
+html.dark [class*="bg-yellow-50"] { background-color: #352b1b !important; }
+html.dark [class*="bg-orange-100"],
+html.dark [class*="bg-amber-100"],
+html.dark [class*="bg-yellow-100"] { background-color: #49391e !important; }
+html.dark [class*="bg-violet-50"],
+html.dark [class*="bg-purple-50"],
+html.dark [class*="bg-fuchsia-50"],
+html.dark [class*="bg-indigo-50"] { background-color: #29213b !important; }
+html.dark [class*="bg-violet-100"],
+html.dark [class*="bg-purple-100"],
+html.dark [class*="bg-fuchsia-100"],
+html.dark [class*="bg-indigo-100"] { background-color: #372b50 !important; }
+html.dark [class*="bg-lime-50"],
+html.dark [class*="bg-lime-100"] { background-color: #26331e !important; }
+
+html.dark [class~="text-slate-900"],
+html.dark [class~="text-slate-800"],
+html.dark [class~="text-slate-700"],
+html.dark [class~="text-gray-900"],
+html.dark [class~="text-gray-800"],
+html.dark [class~="text-gray-700"],
+html.dark [class~="text-neutral-900"],
+html.dark [class~="text-neutral-800"],
+html.dark [class~="text-neutral-700"],
+html.dark [class~="text-stone-900"],
+html.dark [class~="text-stone-800"],
+html.dark [class~="text-stone-700"] {
+  color: #e2e8f0 !important;
+}
+
+html.dark [class~="text-slate-600"],
+html.dark [class~="text-slate-500"],
+html.dark [class~="text-gray-600"],
+html.dark [class~="text-gray-500"],
+html.dark [class~="text-neutral-600"],
+html.dark [class~="text-neutral-500"],
+html.dark [class~="text-stone-600"],
+html.dark [class~="text-stone-500"] {
+  color: #cbd5e1 !important;
+}
+
+html.dark [class~="text-slate-400"],
+html.dark [class~="text-gray-400"],
+html.dark [class~="text-neutral-400"],
+html.dark [class~="text-stone-400"] {
+  color: #94a3b8 !important;
+}
+
+html.dark [class*="text-blue-"],
+html.dark [class*="text-sky-"],
+html.dark [class*="text-cyan-"] { color: #93c5fd !important; }
+html.dark [class*="text-emerald-"],
+html.dark [class*="text-green-"],
+html.dark [class*="text-teal-"] { color: #6ee7b7 !important; }
+html.dark [class*="text-red-"],
+html.dark [class*="text-rose-"] { color: #fda4af !important; }
+html.dark [class*="text-orange-"],
+html.dark [class*="text-amber-"],
+html.dark [class*="text-yellow-"] { color: #fcd34d !important; }
+html.dark [class*="text-violet-"],
+html.dark [class*="text-purple-"],
+html.dark [class*="text-fuchsia-"],
+html.dark [class*="text-indigo-"] { color: #c4b5fd !important; }
+html.dark [class*="text-lime-"] { color: #bef264 !important; }
+
+html.dark [class~="border-border"],
+html.dark [class~="border-slate-100"],
+html.dark [class~="border-slate-200"],
+html.dark [class~="border-gray-100"],
+html.dark [class~="border-gray-200"],
+html.dark [class~="border-white/70"] {
+  border-color: #334155 !important;
+}
+
+html.dark [class*="border-blue-"],
+html.dark [class*="border-sky-"],
+html.dark [class*="border-cyan-"],
+html.dark [class*="border-emerald-"],
+html.dark [class*="border-green-"],
+html.dark [class*="border-teal-"],
+html.dark [class*="border-red-"],
+html.dark [class*="border-rose-"],
+html.dark [class*="border-orange-"],
+html.dark [class*="border-amber-"],
+html.dark [class*="border-yellow-"],
+html.dark [class*="border-violet-"],
+html.dark [class*="border-purple-"],
+html.dark [class*="border-indigo-"],
+html.dark [class*="border-lime-"] {
+  border-color: #3b4b60 !important;
+}
+
+html.dark [class*="divide-slate-"] > :not([hidden]) ~ :not([hidden]),
+html.dark [class*="divide-gray-"] > :not([hidden]) ~ :not([hidden]) {
+  border-color: #334155 !important;
+}
+
+html.dark [class~="hover:bg-white"]:hover,
+html.dark [class~="hover:bg-white/40"]:hover,
+html.dark [class~="hover:bg-slate-50"]:hover,
+html.dark [class~="hover:bg-slate-100"]:hover,
+html.dark [class~="hover:bg-gray-50"]:hover {
+  background-color: #232d44 !important;
+}
+
+html.dark input,
+html.dark select,
+html.dark textarea {
+  color-scheme: dark;
+}
+
+html.dark .luxury-card {
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.35), 0 0 0 1px rgb(255 255 255 / 0.03);
+}
+
 @media print {
   .no-print { display: none !important; }
   body, .bg-background { background: #fff !important; }

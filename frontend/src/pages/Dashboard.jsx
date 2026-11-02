@@ -21,7 +21,6 @@ const QUICK = [
   { label: "Update Stock", icon: PackagePlus, to: "/stock" },
   { label: "Production Record", icon: Factory, to: "/production?add=1" },
   { label: "Record Attendance", icon: CalendarCheck, to: "/attendance" },
-  { label: "Create Delivery", icon: Truck, to: "/deliveries?add=1" },
   { label: "Create Order", icon: ClipboardList, to: "/orders" },
   { label: "Record Expense", icon: Banknote, to: "/expenses" },
 ];
@@ -29,11 +28,29 @@ const QUICK = [
 const WORKER_SECTION_OPTIONS = [
   ["customers", "Customers"], ["suppliers", "Suppliers"], ["buyings", "Buyings"],
   ["invoices", "Invoice"], ["orders", "Orders"], ["stock", "Stock"],
-  ["production", "Production"], ["attendance", "Attendance"], ["deliveries", "Deliveries"],
+  ["production", "Production"], ["attendance", "Attendance"],
   ["fleet", "Fleet"], ["expenses", "Expenses"], ["grv", "GRV"],
   ["daily-report", "Daily Report"], ["client-payments", "Clients payment and balances"],
   ["settings", "Settings"],
+  ["warehouses", "Warehouses"],
 ];
+const WORKER_SUPERVISOR_ACTION_OPTIONS = [
+  ["invoice_edit", "Edit invoices"],
+  ["price_edit", "Add or change prices"],
+  ["price_delete", "Delete prices"],
+  ["customer_delete", "Delete customers"],
+  ["stock_delete", "Delete stock items"],
+  ["balance_payment_delete", "Delete Other Balance payments"],
+];
+const SUPERVISOR_ACTION_SECTIONS = {
+  invoice_edit: ["invoices"],
+  price_edit: ["settings"],
+  price_delete: ["settings"],
+  customer_delete: ["customers"],
+  stock_delete: ["stock"],
+  balance_payment_delete: ["customers", "client-payments"],
+};
+const MANUFACTURING_COMPANY_ID = "iqfoam-manufactoring";
 
 const currentMonth = today().slice(0, 7);
 const previousMonth = (month) => {
@@ -150,6 +167,7 @@ export default function Dashboard() {
   const [workerDraft, setWorkerDraft] = useState({
     name: "", username: "", email: "", worker_role: "", password: "",
     company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
+    is_supervisor: false, warehouse_id: "", supervisor_password_actions: [],
   });
   const canManageWorkers = !!(user?.is_owner || user?.is_admin);
 
@@ -251,6 +269,9 @@ export default function Dashboard() {
           worker_role: workerDraft.worker_role,
           allowed_sections: workerDraft.allowed_sections,
           stock_only: workerDraft.stock_only,
+          is_supervisor: workerDraft.is_supervisor,
+          warehouse_id: workerDraft.warehouse_id || null,
+          supervisor_password_actions: workerDraft.supervisor_password_actions,
         });
         setWorkers((current) => current.map((worker) => worker.id === updated.id ? updated : worker));
         toast.success("Worker access updated");
@@ -262,6 +283,7 @@ export default function Dashboard() {
       setWorkerDraft({
         name: "", username: "", email: "", worker_role: "", password: "",
         company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
+        is_supervisor: false, warehouse_id: "", supervisor_password_actions: [],
       });
       setWorkerModalOpen(false);
     } catch (error) {
@@ -270,15 +292,29 @@ export default function Dashboard() {
       setWorkerSaving(false);
     }
   };
-  const toggleWorkerSection = (section) => setWorkerDraft((current) => ({
-    ...current,
-    allowed_sections: current.allowed_sections.includes(section)
+  const toggleWorkerSection = (section) => setWorkerDraft((current) => {
+    const removingSection = current.allowed_sections.includes(section);
+    const nextSections = removingSection
       ? current.allowed_sections.filter((item) => item !== section)
-      : [...current.allowed_sections, section],
-  }));
+      : [...current.allowed_sections, section];
+    return {
+      ...current,
+      allowed_sections: nextSections,
+      supervisor_password_actions: current.supervisor_password_actions.filter((item) =>
+        SUPERVISOR_ACTION_SECTIONS[item].some((required) => nextSections.includes(required))),
+    };
+  });
   const activeCompanyName = companies.find((company) => company.id === workerDraft.company_id)?.name || workerDraft.company_id;
   const changeWorkerCompany = async (companyId) => {
-    setWorkerDraft((current) => ({ ...current, company_id: companyId }));
+    setWorkerDraft((current) => ({
+      ...current,
+      company_id: companyId,
+      warehouse_id: "",
+      supervisor_password_actions: [],
+      allowed_sections: companyId === MANUFACTURING_COMPANY_ID
+        ? current.allowed_sections
+        : current.allowed_sections.filter((section) => section !== "warehouses"),
+    }));
   };
   const editWorker = (worker) => {
     setWorkerDraft({
@@ -291,6 +327,9 @@ export default function Dashboard() {
       company_id: worker.company_id,
       allowed_sections: [...new Set((worker.allowed_sections || []).map((section) => section === "costs" ? "grv" : section))],
       stock_only: worker.stock_only === true,
+      is_supervisor: worker.is_supervisor === true,
+      warehouse_id: worker.warehouse_id || "",
+      supervisor_password_actions: worker.supervisor_password_actions || [],
     });
     setWorkerModalOpen(true);
   };
@@ -409,7 +448,56 @@ export default function Dashboard() {
         <h1 className="text-3xl sm:text-4xl font-normal text-slate-900 font-display mt-1">Business overview</h1>
         <p className="text-sm text-slate-500 mt-1">Performance, cash flow and daily operations</p>
         </div>
-        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
+        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_id: "", supervisor_password_actions: [] }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/70 p-3" data-testid="dashboard-period-controls">
+        <div className="flex flex-wrap gap-1.5" role="group" aria-label="Dashboard date range">
+          {[["today", "Today"], ["week", "This week"], ["month", "This month"]].map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setPeriod(value)}
+              aria-pressed={period === value}
+              data-testid={`dashboard-period-${value}`}
+              className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${period === value ? "bg-primary text-white" : "text-slate-600 hover:bg-slate-100"}`}
+            >
+              {label}
+            </button>
+          ))}
+          <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
+            More
+            <select
+              value={period === "year" || period === "custom" ? period : ""}
+              onChange={(event) => event.target.value && setPeriod(event.target.value)}
+              data-testid="dashboard-period-select"
+              aria-label="More dashboard periods"
+              className="rounded-lg border border-border bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+            >
+              <option value="">More periods</option>
+              <option value="year">This Year</option>
+              <option value="custom">Custom Period</option>
+            </select>
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {period === "custom" && <>
+            <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
+              From <input type="date" value={customStart} onChange={(event) => setCustomStart(event.target.value)}
+                data-testid="dashboard-custom-start" className="rounded-lg border border-border bg-white px-2 py-2 text-sm" />
+            </label>
+            <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
+              To <input type="date" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)}
+                data-testid="dashboard-custom-end" className="rounded-lg border border-border bg-white px-2 py-2 text-sm" />
+            </label>
+          </>}
+          <button onClick={() => setCompareOpen(true)} data-testid="dashboard-compare-open"
+            className="rounded-lg border border-primary/30 bg-white px-3 py-2 text-sm font-semibold text-primary hover:bg-primary/5">
+            Compare periods
+          </button>
+        </div>
+        <p className="mt-2 w-full text-[11px] text-slate-500">
+          The selected period filters financial results, orders, invoices, attendance, and scheduled deliveries. Stock, balances, and fleet availability show current values.
+        </p>
       </div>
 
       {canManageWorkers && <Section title="Workers" icon={UserPlus} action={<div className="flex items-center gap-3">
@@ -429,8 +517,14 @@ export default function Dashboard() {
               <tbody>{workers.map((worker) => (
                 <tr key={worker.id} className="border-b border-border/60" data-testid={`worker-row-${worker.id}`}>
                   <td className="py-3"><p className="font-semibold text-slate-800">{worker.name}</p><p className="text-xs text-slate-400">{worker.username}</p></td>
-                  <td className="py-3 text-slate-600">{worker.worker_role}</td>
-                  <td className="py-3 text-slate-600">{companies.find((company) => company.id === worker.company_id)?.name || worker.company_id}</td>
+                  <td className="py-3 text-slate-600">
+                    <span>{worker.worker_role}</span>
+                    {worker.is_supervisor && <Badge cls="ml-2 border-violet-200 bg-violet-50 text-violet-700">Supervisor</Badge>}
+                  </td>
+                  <td className="py-3 text-slate-600">
+                    {companies.find((company) => company.id === worker.company_id)?.name || worker.company_id}
+                    {worker.warehouse_id && <span className="mt-1 block text-xs text-slate-400">Warehouse {worker.warehouse_id}</span>}
+                  </td>
                   <td className="py-3 text-slate-600">{(worker.allowed_sections || []).map((section) => WORKER_SECTION_OPTIONS.find(([key]) => key === section)?.[1] || section).join(", ")}</td>
                   <td className="py-3 text-right whitespace-nowrap">
                     <button type="button" onClick={() => openWorkerLink(worker)} aria-label={`View personal access link for ${worker.name}`} className="rounded p-1.5 text-slate-400 hover:text-primary" data-testid={`worker-link-${worker.id}`}><Eye size={15} /></button>
@@ -462,20 +556,82 @@ export default function Dashboard() {
                 {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
               </Select>
             </>}
+            {workerDraft.company_id === MANUFACTURING_COMPANY_ID && <Select
+              label="Assigned warehouse *"
+              value={workerDraft.warehouse_id}
+              onChange={(event) => setWorkerDraft((current) => ({ ...current, warehouse_id: event.target.value }))}
+              required
+              data-testid="worker-warehouse"
+            >
+              <option value="">Select a warehouse...</option>
+              <option value="A">Warehouse A</option>
+              <option value="B">Warehouse B</option>
+              <option value="C">Warehouse C</option>
+            </Select>}
           </div>
+          <label className="flex items-start gap-2 rounded-md border border-violet-200 bg-violet-50/50 px-3 py-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={workerDraft.is_supervisor}
+              disabled={workerDraft.stock_only}
+              onChange={(event) => setWorkerDraft((current) => ({
+                ...current,
+                is_supervisor: event.target.checked,
+                supervisor_password_actions: event.target.checked ? current.supervisor_password_actions : [],
+              }))}
+              data-testid="worker-supervisor"
+            />
+            <span>
+              <span className="block font-semibold">Supervisor</span>
+              <span className="block text-xs text-slate-500">Marks this worker as a supervisor. Manufacturing supervisors can be required to enter the Supervisor Password for the sensitive actions selected below.</span>
+            </span>
+          </label>
+          {workerDraft.company_id === MANUFACTURING_COMPANY_ID && workerDraft.is_supervisor && <fieldset className="space-y-2 rounded-md border border-amber-200 bg-amber-50/40 p-3" data-testid="worker-supervisor-password-actions">
+            <legend className="px-1 text-sm font-semibold text-slate-700">Require Supervisor Password for</legend>
+            <p className="text-xs text-slate-500">Selected actions require the company Supervisor Password every time. Unselected actions do not prompt for it.</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {WORKER_SUPERVISOR_ACTION_OPTIONS.map(([action, label]) => {
+                const requiredSections = SUPERVISOR_ACTION_SECTIONS[action];
+                const requiredSection = requiredSections[0];
+                const hasSection = requiredSections.some((section) => workerDraft.allowed_sections.includes(section));
+                return (
+                  <label key={action} className="flex items-center gap-2 rounded-md border border-amber-200/70 bg-white px-3 py-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={workerDraft.supervisor_password_actions.includes(action)}
+                      disabled={!hasSection}
+                      onChange={() => setWorkerDraft((current) => ({
+                        ...current,
+                        supervisor_password_actions: current.supervisor_password_actions.includes(action)
+                          ? current.supervisor_password_actions.filter((item) => item !== action)
+                          : [...current.supervisor_password_actions, action],
+                      }))}
+                      data-testid={`worker-supervisor-action-${action}`}
+                    />
+                    {label}{!hasSection && <span className="text-xs text-slate-400">- grant {requiredSection} access</span>}
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>}
           <label className="flex items-start gap-2 rounded-md border border-border px-3 py-2 text-sm text-slate-700">
             <input type="checkbox" checked={workerDraft.stock_only} onChange={(event) => setWorkerDraft((current) => ({
               ...current,
               stock_only: event.target.checked,
               worker_role: event.target.checked ? "Stock Controller" : current.worker_role,
               allowed_sections: event.target.checked ? ["stock"] : current.allowed_sections,
+              is_supervisor: event.target.checked ? false : current.is_supervisor,
+              supervisor_password_actions: event.target.checked ? [] : current.supervisor_password_actions,
             }))} data-testid="worker-stock-only" />
             <span><span className="block font-semibold">Stock-only sub-user</span><span className="block text-xs text-slate-500">Can access stock only; selling prices are visible, purchase costs are hidden.</span></span>
           </label>
           <fieldset className="space-y-2">
             <legend className="mb-2 text-sm font-semibold text-slate-700">Sections this worker can access</legend>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {WORKER_SECTION_OPTIONS.filter(([section]) => !workerDraft.stock_only || section === "stock").map(([section, label]) => (
+              {WORKER_SECTION_OPTIONS.filter(([section]) =>
+                (section !== "warehouses" || workerDraft.company_id === MANUFACTURING_COMPANY_ID)
+                && (!workerDraft.stock_only || section === "stock")
+              ).map(([section, label]) => (
                 <label key={section} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-slate-700">
                   <input type="checkbox" checked={workerDraft.allowed_sections.includes(section)} onChange={() => toggleWorkerSection(section)} data-testid={`worker-section-${section}`} />
                   {label}
@@ -486,7 +642,7 @@ export default function Dashboard() {
           <p className="flex items-center gap-2 rounded-md bg-slate-50 p-3 text-xs text-slate-500"><LockKeyhole size={14} /> Workers with Stock access can see selling prices, never purchase costs. Other sections stay locked; the worker starts with Invoice access selected.</p>
           <div className="flex justify-end gap-2">
             <Btn type="button" variant="outline" onClick={() => setWorkerModalOpen(false)} disabled={workerSaving}>Cancel</Btn>
-            <Btn type="submit" disabled={workerSaving || workerDraft.allowed_sections.length === 0} data-testid="worker-save">{workerSaving ? "Saving..." : workerDraft.id ? "Save Access" : "Add Worker"}</Btn>
+            <Btn type="submit" disabled={workerSaving || workerDraft.allowed_sections.length === 0 || (workerDraft.company_id === MANUFACTURING_COMPANY_ID && !workerDraft.warehouse_id)} data-testid="worker-save">{workerSaving ? "Saving..." : workerDraft.id ? "Save Access" : "Add Worker"}</Btn>
           </div>
         </form>
       </Modal>}
@@ -575,45 +731,21 @@ export default function Dashboard() {
             <h2 className="text-xs font-bold uppercase tracking-[0.16em] text-primary">Financial Overview · {periodLabel}</h2>
             <p className="mt-1 text-xs text-slate-500">{periodRange} <span className="text-slate-400">· Previous: {previousRange}</span></p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
-              Period
-              <select value={period} onChange={(event) => setPeriod(event.target.value)} data-testid="dashboard-period-select"
-                className="rounded-lg border border-border bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15">
-                {Object.entries(periodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select>
-            </label>
-            {period === "custom" && <>
-              <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
-                From <input type="date" value={customStart} onChange={(event) => setCustomStart(event.target.value)}
-                  data-testid="dashboard-custom-start" className="rounded-lg border border-border bg-white px-2 py-2 text-sm" />
-              </label>
-              <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
-                To <input type="date" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)}
-                  data-testid="dashboard-custom-end" className="rounded-lg border border-border bg-white px-2 py-2 text-sm" />
-              </label>
-            </>}
-            <button onClick={() => setCompareOpen(true)} data-testid="dashboard-compare-open"
-              className="rounded-lg border border-primary/30 bg-white px-3 py-2 text-sm font-semibold text-primary hover:bg-primary/5">
-              Compare periods
-            </button>
-          </div>
         </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
           <KPI title="Total Invoiced" value={fmtMoney(periodProfit.total_invoiced)} comparison={comparison(periodProfit.total_invoiced, previousProfit.total_invoiced)} icon={Receipt} tint="bg-blue-50 text-blue-600" onClick={() => nav("/invoices")} />
-          <KPI title="Revenue" value={fmtMoney(periodProfit.revenue)} comparison={comparison(periodProfit.revenue, previousProfit.revenue)} icon={TrendingUp} tint="bg-emerald-50 text-emerald-600" onClick={() => nav("/invoices")} />
+          <KPI title="Payments Received" value={fmtMoney(periodProfit.revenue)} comparison={comparison(periodProfit.revenue, previousProfit.revenue)} icon={TrendingUp} tint="bg-emerald-50 text-emerald-600" onClick={() => nav("/invoices")} />
           <KPI title="Buyings" value={fmtMoney(periodProfit.buyings)} comparison={comparison(periodProfit.buyings, previousProfit.buyings)} icon={Boxes} tint="bg-violet-50 text-violet-600" onClick={() => nav("/buyings")} />
           <KPI title="Expenses" value={fmtMoney(periodProfit.expenses)} comparison={comparison(periodProfit.expenses, previousProfit.expenses)} icon={Banknote} tint="bg-orange-50 text-orange-600" onClick={() => nav("/expenses")} />
           <KPI title="Final Profit of the Company" value={fmtMoney(periodProfit.profit)} comparison={comparison(periodProfit.profit, previousProfit.profit)} icon={Wallet} tint={periodProfit.profit < 0 ? "bg-red-50 text-red-600" : "bg-emerald-50 text-emerald-700"} onClick={() => nav("/expenses")} />
         </div>
-        <p className="mt-2 text-xs text-slate-400">Revenue is payments received. Final profit = revenue − buyings − recorded expenses. Estimated cash result, not accounting profit.</p>
+        <p className="mt-2 text-xs text-slate-400">Payments received are recorded collections in this period. Final profit = payments received − buyings − recorded expenses. Estimated cash result, not accounting profit.</p>
       </section>
 
       <section data-testid="dashboard-business-balances">
-        <h2 className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Business Balances &amp; Stock</h2>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          <KPI title="Payments Received · All Time" value={fmtMoney(d.payments_received)} icon={Wallet} tint="bg-emerald-50 text-emerald-600" onClick={() => nav("/invoices")} />
-          <KPI title="Outstanding Balances" value={fmtMoney(d.outstanding)} icon={AlertTriangle} tint="bg-red-50 text-red-600" onClick={() => nav("/client-payments")} />
+        <h2 className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Current Balances &amp; Stock</h2>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <KPI title="Outstanding · Current" value={fmtMoney(d.outstanding)} icon={AlertTriangle} tint="bg-red-50 text-red-600" onClick={() => nav("/client-payments")} />
           <KPI title="Total Stock" value={d.finished_stock} icon={Boxes} tint="bg-amber-50 text-amber-600" onClick={() => nav("/stock")} />
         </div>
       </section>
@@ -621,7 +753,7 @@ export default function Dashboard() {
       {(!user?.is_worker || user.allowed_sections?.includes("fleet")) && (
         <section data-testid="dashboard-fleet-alerts" aria-labelledby="dashboard-fleet-alerts-heading">
           <div className="mb-3 flex items-center justify-between gap-3">
-            <h2 id="dashboard-fleet-alerts-heading" className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Fleet Alerts</h2>
+            <h2 id="dashboard-fleet-alerts-heading" className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Current Fleet Alerts</h2>
             <button type="button" onClick={() => nav("/fleet")} className="flex items-center gap-1 text-xs font-semibold text-primary" data-testid="dashboard-fleet-alerts-view">View Fleet <ArrowRight size={12} /></button>
           </div>
           <Card className="p-4">
@@ -641,10 +773,10 @@ export default function Dashboard() {
       )}
 
       <section aria-labelledby="dashboard-operations-heading">
-        <h2 id="dashboard-operations-heading" className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Operations at a Glance</h2>
+        <h2 id="dashboard-operations-heading" className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Period Activity &amp; Current Operations</h2>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-          {[["Done Today", d.completed_today, "/orders"],
-            ["Orders to Send", d.orders_open_count, "/orders"], ["Urgent Orders", d.urgent_orders, "/orders"], ["Vehicles Free", `${d.vehicles_available}/${d.vehicles_total}`, "/fleet"],
+          {[[`Done ${periodLabel}`, d.completed_today, "/orders"],
+            [`Orders to Send · ${periodLabel}`, d.orders_open_count, "/orders"], [`Urgent Orders · ${periodLabel}`, d.urgent_orders, "/orders"], ["Vehicles Free", `${d.vehicles_available}/${d.vehicles_total}`, "/fleet"],
             ["Maintenance Due", d.maintenance_due, "/fleet"]].map(([l, v, to]) => (
             <motion.button key={l} whileHover={{ y: -2, scale: 1.01 }} whileTap={{ scale: 0.99 }} transition={{ type: "spring", stiffness: 420, damping: 24, mass: 0.5 }} onClick={() => nav(to)} className="premium-button rounded-lg border border-border bg-white/85 p-3 text-left hover:border-primary/50 hover:bg-white transition-colors" data-testid={`op-kpi-${l.toLowerCase().replace(/\s/g, "-")}`}>
               <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-slate-500">{l}</p><p className="text-xl font-semibold font-mono tabular-nums text-slate-800 mt-1">{v}</p>
@@ -667,7 +799,7 @@ export default function Dashboard() {
       </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Section title="Orders to Send" icon={ClipboardList} action={<button onClick={() => nav("/orders")} className="text-xs font-semibold text-primary flex items-center gap-1" data-testid="dash-orders-view">View <ArrowRight size={12} /></button>}>
+        <Section title={`Orders to Send · ${periodLabel}`} icon={ClipboardList} action={<button onClick={() => nav("/orders")} className="text-xs font-semibold text-primary flex items-center gap-1" data-testid="dash-orders-view">View <ArrowRight size={12} /></button>}>
           {d.orders_to_send?.length ? (
             <div className="space-y-2">{d.orders_to_send.map((o) => (
               <div key={o.id} className="flex justify-between rounded-lg border border-border px-3 py-2" data-testid={`dash-order-${o.id}`}>
@@ -675,6 +807,20 @@ export default function Dashboard() {
                 <Badge cls={o.priority === "Urgent" || o.priority === "High" ? "bg-red-50 text-red-700 border-red-200" : "bg-slate-100 text-slate-600 border-slate-200"}>{o.priority} · {o.status}</Badge>
               </div>))}</div>
           ) : empty("No orders waiting to be sent.")}
+        </Section>
+
+        <Section title={`Deliveries · ${periodLabel}`} icon={Truck}>
+          {d.upcoming_deliveries?.length ? (
+            <div className="space-y-2">{d.upcoming_deliveries.map((delivery) => (
+              <div key={delivery.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2" data-testid={`dash-delivery-${delivery.id}`}>
+                <span className="text-sm font-semibold text-slate-700">
+                  {delivery.customer_name || delivery.destination || "Delivery"}
+                  {delivery.destination && delivery.customer_name && <span className="font-normal text-slate-400"> · {delivery.destination}</span>}
+                </span>
+                <span className="text-xs text-slate-500">{fmtDate(delivery.planned_departure)} · {delivery.status}</span>
+              </div>
+            ))}</div>
+          ) : empty(`No deliveries scheduled for ${periodLabel.toLowerCase()}.`)}
         </Section>
 
         <Section title="Low Stock Alerts" icon={AlertTriangle}>
@@ -690,7 +836,7 @@ export default function Dashboard() {
           )}
         </Section>
 
-        <Section title="Production Recommendations" icon={TrendingUp}>
+        <Section title="Current Production Recommendations" icon={TrendingUp}>
           {d.recommendations.length === 0 ? empty("No production needed right now.") : (
             <div className="space-y-2">
               {d.recommendations.map((r, i) => (
@@ -703,20 +849,11 @@ export default function Dashboard() {
           )}
         </Section>
 
-        <Section title="Today's Attendance" icon={CalendarCheck} action={<button onClick={() => nav("/attendance")} className="text-xs font-semibold text-primary flex items-center gap-1">View <ArrowRight size={12} /></button>}>
-          {d.attendance_today.length === 0 ? empty("No attendance recorded today.") : (
+        <Section title={`Attendance · ${periodLabel}`} icon={CalendarCheck} action={<button onClick={() => nav("/attendance")} className="text-xs font-semibold text-primary flex items-center gap-1">View <ArrowRight size={12} /></button>}>
+          {d.attendance_today.length === 0 ? empty(`No attendance recorded for ${periodLabel.toLowerCase()}.`) : (
             <div className="space-y-2">{d.attendance_today.map((a) => (
               <div key={a.id} className="flex justify-between rounded-lg border border-border px-3 py-2">
                 <span className="text-sm font-semibold text-slate-700">{a.employee_name}</span><Badge cls="bg-slate-100 text-slate-600 border-slate-200">{a.status}</Badge>
-              </div>))}</div>
-          )}
-        </Section>
-
-        <Section title="Upcoming Deliveries" icon={Truck} action={<button onClick={() => nav("/deliveries")} className="text-xs font-semibold text-primary flex items-center gap-1">View <ArrowRight size={12} /></button>}>
-          {d.upcoming_deliveries.length === 0 ? empty("No upcoming deliveries.") : (
-            <div className="space-y-2">{d.upcoming_deliveries.map((x) => (
-              <div key={x.id} className="flex justify-between rounded-lg border border-border px-3 py-2">
-                <span className="text-sm font-semibold text-slate-700">{x.reference} <span className="text-slate-400 font-normal">· {x.customer_name || x.destination}</span></span><Badge cls="bg-blue-50 text-blue-700 border-blue-200">{x.status}</Badge>
               </div>))}</div>
           )}
         </Section>
@@ -730,7 +867,7 @@ export default function Dashboard() {
         </Section>
       </div>
 
-      <Section title="Recent Invoices" icon={Receipt} action={<button onClick={() => nav("/invoices")} className="text-xs font-semibold text-primary flex items-center gap-1">View all <ArrowRight size={12} /></button>}>
+      <Section title={`Invoices · ${periodLabel}`} icon={Receipt} action={<button onClick={() => nav("/invoices")} className="text-xs font-semibold text-primary flex items-center gap-1">View all <ArrowRight size={12} /></button>}>
         {d.recent_invoices.length === 0 ? empty("No invoices yet. Create your first invoice.") : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">

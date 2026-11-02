@@ -10,6 +10,18 @@ import { Users, Search, Plus, Pencil, Eye, Trash2 } from "lucide-react";
 
 const blank = { name: "", client_number: "", phone: "", email: "", address: "", city: "", notes: "", default_zone: 1, payment_terms: "Due on Delivery", active: true };
 
+const mostUsedZone = (invoices, fallback) => {
+  const counts = (invoices || []).reduce((result, invoice) => {
+    if (!["void", "draft"].includes(invoice.status)) {
+      const zone = Number(invoice.zone || fallback || 1);
+      result[zone] = (result[zone] || 0) + 1;
+    }
+    return result;
+  }, {});
+  const zones = Object.keys(counts).sort((a, b) => counts[b] - counts[a] || Number(a) - Number(b));
+  return zones.length ? `Zone ${zones[0]}` : (fallback ? `Zone ${fallback}` : "—");
+};
+
 export default function Customers() {
   const { user } = useAuth();
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
@@ -55,14 +67,62 @@ export default function Customers() {
     }
   };
 
+  const [otherBalance, setOtherBalance] = useState("");
+  const saveOtherBalance = async () => {
+    try {
+      const value = otherBalance === "" ? 0 : Number(otherBalance);
+      const updated = await api.put(`/customers/${profile.c.id}`, {
+        ...profile.c,
+        other_balance: value,
+        other_balance_express: true,
+      });
+      setProfile({ ...profile, c: updated, other_balance: value });
+      toast.success("Other balance saved");
+      load();
+    } catch (e) { toast.error(apiError(e)); }
+  };
+
+  const applyBalance = (updated) => {
+    setProfile((prev) => ({ ...prev, c: updated, other_balance: updated.other_balance || 0 }));
+    setOtherBalance(updated.other_balance ? String(updated.other_balance) : "");
+    load();
+  };
+  const toggleExpressBalance = async () => {
+    try {
+      const flag = !profile.c.other_balance_express;
+      applyBalance(await api.put(`/customers/${profile.c.id}`, { ...profile.c, other_balance_express: flag }));
+      toast.success(flag ? "Balance added to Express Balances and Payments" : "Balance removed from Express Balances and Payments");
+    } catch (e) { toast.error(apiError(e)); }
+  };
+  const deleteOtherBalancePayment = async (payment) => {
+    if (!window.confirm("Delete this payment from the history? The balance will NOT change.")) return;
+    try {
+      await api.del(`/payments/${payment.id}/other-balance`);
+      toast.success("Payment deleted");
+      try {
+        const summary = await api.get(`/customers/${profile.c.id}/summary`);
+        setProfile((current) => current ? { ...current, ...summary } : current);
+        load();
+      } catch (error) {
+        toast.error(`Payment deleted, but history could not be refreshed: ${apiError(error)}`);
+      }
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
+
   const openProfile = async (c) => {
     const s = await api.get(`/customers/${c.id}/summary`);
+    setOtherBalance(s.other_balance ? String(s.other_balance) : "");
     setProfile({ c, ...s });
   };
 
   const filtered = list.filter((c) =>
     c.name.toLowerCase().includes(q.toLowerCase()) &&
     (filter === "all" || (filter === "active" ? c.active : !c.active)));
+  const otherBalancePayments = profile?.other_balance_payments?.length
+    ? profile.other_balance_payments
+    : profile?.c?.other_balance_payments || [];
 
   return (
     <div>
@@ -147,16 +207,51 @@ export default function Customers() {
       <Modal open={!!profile} onClose={() => setProfile(null)} title={profile?.c.name} wide>
         {profile && (
           <div className="space-y-5">
-            <div className={`grid grid-cols-2 ${unifiedPriceList ? "sm:grid-cols-3" : "sm:grid-cols-4"} gap-3`}>
-              {!unifiedPriceList && <div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-slate-400">Zone</p><p className="font-bold text-slate-800">Zone {profile.c.default_zone}</p></div>}
-              <div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-slate-400">Terms</p><p className="font-bold text-slate-800 text-sm">{profile.c.payment_terms}</p></div>
-              <div className="rounded-lg bg-blue-50 p-3"><p className="text-xs text-slate-400">Total Invoiced</p><p className="font-bold text-slate-800 font-mono">{fmtMoney(profile.total_invoiced)}</p></div>
-              <div className="rounded-lg bg-red-50 p-3"><p className="text-xs text-slate-400">Outstanding</p><p className="font-bold text-red-600 font-mono" data-testid="customer-outstanding">{fmtMoney(profile.outstanding)}</p></div>
-              <div className="rounded-lg bg-emerald-50 p-3"><p className="text-xs text-slate-400">Payments Received</p><p className="font-bold text-emerald-700 font-mono">{fmtMoney(profile.payments_received)}</p></div>
-              <div className="rounded-lg bg-red-50 p-3"><p className="text-xs text-slate-400">Overdue</p><p className="font-bold text-red-700 font-mono">{fmtMoney(profile.overdue)}</p></div>
-              <div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-slate-400">Open Orders</p><p className="font-bold text-slate-800 font-mono">{profile.open_orders?.length || 0}</p></div>
-              <div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-slate-400">Upcoming Deliveries</p><p className="font-bold text-slate-800 font-mono">{profile.upcoming_deliveries?.length || 0}</p></div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-slate-400">Zone</p><p className="font-bold text-slate-800">Zone {unifiedPriceList ? 1 : profile.c.default_zone}</p></div>
+              <div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-slate-400">Most Used Zone</p><p className="font-bold text-slate-800">{mostUsedZone(profile.invoices, profile.c.default_zone)}</p></div>
+              <div className="rounded-lg bg-blue-50 p-3"><p className="text-xs text-slate-400">Total Invoiced</p><p className="font-mono font-bold text-slate-800">{fmtMoney(profile.total_invoiced)}</p></div>
+              <div className="rounded-lg bg-red-50 p-3"><p className="text-xs text-slate-400">Outstanding</p><p className="font-mono font-bold text-red-600" data-testid="customer-outstanding">{fmtMoney(profile.invoices_outstanding)}</p></div>
+              <div className="rounded-lg bg-orange-50 p-3"><p className="break-words text-xs text-slate-400">BLN FROM EXPRESS WEBSITE</p><p className="font-mono font-bold text-orange-700">{fmtMoney(profile.other_balance)}</p></div>
+              <div className="rounded-lg bg-emerald-50 p-3"><p className="text-xs text-slate-400">Payments Received</p><p className="font-mono font-bold text-emerald-700">{fmtMoney(profile.payments_received)}</p></div>
             </div>
+            <Card className="p-4">
+              <h4 className="mb-3 text-sm font-bold text-slate-700">Edit client balances</h4>
+              <div className="grid grid-cols-1 gap-3">
+                <Input label="BLN FROM EXPRESS WEBSITE" type="number" min="0" step="0.01" value={otherBalance} onChange={(e) => setOtherBalance(e.target.value)} data-testid="customer-other-balance" />
+              </div>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                <button type="button" className="text-xs text-slate-500 hover:text-primary hover:underline" onClick={toggleExpressBalance} data-testid="toggle-express-balance-btn">
+                  {profile.c.other_balance_express ? "Remove from Express Balances and Payments" : "Express Balances and Payments"}
+                </button>
+                <Btn variant="success" onClick={saveOtherBalance} data-testid="save-other-balance-btn">Save balances</Btn>
+              </div>
+            </Card>
+            {otherBalancePayments.length > 0 && (
+              <section>
+                <h4 className="mb-1.5 text-xs font-bold text-slate-700">Other Balance Payments</h4>
+                <div className="space-y-1">{otherBalancePayments.map((p, idx) => (
+                  <div key={p.id || p.payment_id || idx} className={`flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-2 py-1.5 text-xs ${p.reversed ? "opacity-60" : ""}`}>
+                    <span className="text-slate-500">
+                      {fmtDate(p.date)} · {p.method || "Other balance"} · Other balance
+                      {p.reversed && <span className="ml-2 font-semibold text-red-600">Reversed</span>}
+                    </span>
+                    <span className={`font-mono font-semibold ${p.reversed ? "line-through text-slate-400" : "text-emerald-600"}`}>
+                      {fmtMoney(p.amount)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => deleteOtherBalancePayment(p)}
+                      className="text-xs text-red-600 hover:underline"
+                      aria-label={`Delete other balance payment of ${fmtMoney(p.amount)}`}
+                      data-testid={`delete-other-balance-${p.id}`}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))}</div>
+              </section>
+            )}
             <div>
               <h4 className="font-bold text-slate-700 mb-2 text-sm">Invoice History</h4>
               {profile.invoices.length === 0 ? <p className="text-sm text-slate-400">No invoices.</p> : (

@@ -8,6 +8,7 @@ import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtMoney, today } from "@/lib/format";
 import { companyProfileName } from "@/lib/company";
+import { updateGrvReceivedQuantity } from "@/lib/grv.mjs";
 import { Badge, Btn, Card, Empty, Input, Modal, PageHeader, Select, Textarea } from "@/components/common";
 import BarcodeScanner from "@/components/BarcodeScanner";
 
@@ -267,7 +268,9 @@ export default function GRV() {
     setDraft((current) => ({
       ...current,
       items: current.items.map((line, lineIndex) => lineIndex === index
-        ? { ...line, [key]: value }
+        ? key === "actual_received_quantity"
+          ? updateGrvReceivedQuantity(line, value)
+          : { ...line, [key]: value }
         : line),
     }));
   };
@@ -430,7 +433,17 @@ export default function GRV() {
     if (confirmMessage && !window.confirm(confirmMessage)) return;
     setWorkingId(grv.id);
     try {
-      if (action === "confirm") await api.post(`/grvs/${grv.id}/confirm`, {});
+      if (action === "confirm") {
+        await api.post(`/grvs/${grv.id}/confirm`, {});
+        toast.success("GRV confirmed and accepted quantities added to Stock");
+        try {
+          setStock(await api.getUncached("/stock"));
+        } catch (error) {
+          toast.error(`GRV confirmed, but current stock could not be refreshed: ${apiError(error)}`);
+        }
+        await refresh();
+        return;
+      }
       if (action === "inspect") await api.post(`/grvs/${grv.id}/inspect`, {});
       if (action === "cancel") {
         const reason = window.prompt("Why are you cancelling this unconfirmed GRV?");
@@ -444,7 +457,7 @@ export default function GRV() {
         if (!reason.trim()) return toast.error("A reversal reason is required");
         await api.post(`/grvs/${grv.id}/reverse`, { reason });
       }
-      toast.success(action === "confirm" ? "GRV confirmed and accepted quantities added to Stock" : `GRV ${action} completed`);
+      toast.success(`GRV ${action} completed`);
       await refresh();
     } catch (error) {
       toast.error(apiError(error));
@@ -614,8 +627,7 @@ export default function GRV() {
                 <th className="p-2">Product / size</th>
                 {scanReceivingMode
                   ? <><th className="p-2 text-right">Quantity received</th><th className="p-2 text-right">Unit cost (optional)</th><th className="p-2 text-right">Total value</th><th className="p-2"> </th></>
-                  : <><th className="p-2 text-right">Ordered</th><th className="p-2 text-right">Remaining</th>
-                    <th className="p-2 text-right">Actually received</th><th className="p-2 text-right">Accepted</th>
+                  : <><th className="p-2 text-right">Actually received</th><th className="p-2 text-right">Accepted</th>
                     <th className="p-2 text-right">Rejected</th><th className="p-2 text-right">Damaged</th>
                     <th className="p-2 text-right">Unit cost</th><th className="p-2 text-right">Total value</th>
                     {!draft.purchase_order_id && <th className="p-2"> </th>}</>}
@@ -658,9 +670,6 @@ export default function GRV() {
                     <td className="p-2 text-right font-mono font-semibold">{fmtMoney(lineValue(line))}</td>
                     <td className="p-2"><button type="button" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((_, row) => row !== index) }))} className="text-xs text-red-700 hover:underline">Remove</button></td>
                   </> : <>
-                    {[["ordered_quantity", line.ordered_quantity], ["remaining_quantity", line.remaining_quantity]].map(([key, value]) => (
-                      <td key={key} className="p-2 text-right font-mono">{value || 0}</td>
-                    ))}
                     {[
                       ["actual_received_quantity", line.actual_received_quantity],
                       ["accepted_quantity", line.accepted_quantity],

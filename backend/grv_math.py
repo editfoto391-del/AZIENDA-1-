@@ -16,6 +16,10 @@ def validate_grv_line_quantities(line, *, remaining=None):
     rejected_decimal = Decimal(str(rejected))
     damaged_decimal = Decimal(str(damaged))
     unit_cost_decimal = Decimal(str(unit_cost))
+    # Goods with no rejection recorded are accepted, otherwise they would never reach stock.
+    if accepted_decimal == 0 and rejected_decimal == 0 and actual_decimal > 0:
+        accepted = float(actual_decimal)
+        accepted_decimal = actual_decimal
     if accepted_decimal + rejected_decimal > actual_decimal:
         raise ValueError("Accepted and rejected quantities cannot exceed actual received quantity")
     if damaged_decimal > rejected_decimal:

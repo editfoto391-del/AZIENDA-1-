@@ -93,12 +93,20 @@ export default function ClientPayments({ express = false }) {
   const filteredCustomers = useMemo(() => customers.filter((customer) =>
     `${customer.name} ${customer.phone || ""} ${customer.email || ""}`.toLowerCase().includes(query.trim().toLowerCase()),
   ), [customers, query]);
-  const balanceCentsByCustomer = useMemo(() => invoices.reduce((balances, invoice) => {
-    if (!["void", "draft"].includes(invoice.status)) {
-      balances[invoice.customer_id] = (balances[invoice.customer_id] || 0) + toCents(invoice.outstanding);
-    }
+  const balanceCentsByCustomer = useMemo(() => {
+    const balances = invoices.reduce((totals, invoice) => {
+      if (!["void", "draft"].includes(invoice.status)) {
+        totals[invoice.customer_id] = (totals[invoice.customer_id] || 0) + toCents(invoice.outstanding);
+      }
+      return totals;
+    }, {});
+    customers.forEach((customer) => {
+      if (express ? customer.other_balance_express : !customer.other_balance_express) {
+        balances[customer.id] = (balances[customer.id] || 0) + toCents(customer.other_balance);
+      }
+    });
     return balances;
-  }, {}), [invoices]);
+  }, [invoices, customers, express]);
   const customerCounts = useMemo(() => customers.reduce((counts, customer) => {
     if ((balanceCentsByCustomer[customer.id] || 0) > 0) counts.withBalance += 1;
     else counts.withoutBalance += 1;
@@ -131,10 +139,37 @@ export default function ClientPayments({ express = false }) {
     setPayment(newPayment(invoice));
   };
 
+  const openOtherBalancePayment = () => {
+    const customer = profile.customer;
+    setPayment({
+      ...newPayment({ customer_name: customer.name, number: "Other balance", outstanding: profile.summary.other_balance }),
+      otherBalanceCustomerId: customer.id,
+    });
+  };
+
   const refreshProfile = async () => {
     if (!profile?.customer) return;
     const summary = await api.get(`/customers/${profile.customer.id}/summary`, express ? { express_only: true } : undefined);
     setProfile((current) => current ? { ...current, summary } : current);
+  };
+
+  const reverseOtherBalancePayment = async (record) => {
+    const reason = window.prompt(`Reverse payment of ${fmtMoney(record.amount)}? Enter a reason:`);
+    if (!reason || !reason.trim()) return;
+    try {
+      await api.post(`/payments/${record.id}/reverse`, { reason: reason.trim() });
+      toast.success("Payment reversed");
+      await Promise.all([refreshProfile(), loadCustomers()]);
+    } catch (error) { toast.error(apiError(error)); }
+  };
+
+  const deleteOtherBalancePayment = async (record) => {
+    if (!window.confirm(`Delete this payment from the history? The balance will NOT change.`)) return;
+    try {
+      await api.del(`/payments/${record.id}/other-balance`);
+      toast.success("Payment deleted");
+      await Promise.all([refreshProfile(), loadCustomers()]);
+    } catch (error) { toast.error(apiError(error)); }
   };
 
   const recordPayment = async () => {
@@ -150,8 +185,12 @@ export default function ClientPayments({ express = false }) {
     }
     setSaving(true);
     try {
-      const { invoice, ...paymentDetails } = payment;
-      await api.post(`/invoices/${invoice.id}/payments`, { ...paymentDetails, amount });
+      const { invoice, otherBalanceCustomerId, idempotency_key, ...paymentDetails } = payment;
+      if (otherBalanceCustomerId) {
+        await api.post(`/customers/${otherBalanceCustomerId}/other-balance/pay`, { ...paymentDetails, note: paymentDetails.notes, amount, express });
+      } else {
+        await api.post(`/invoices/${invoice.id}/payments`, { ...paymentDetails, idempotency_key, amount });
+      }
       setPayment(null);
       toast.success("Payment recorded");
       try {
@@ -339,6 +378,23 @@ export default function ClientPayments({ express = false }) {
               </div>
             </div>
 
+            {(express ? profile.customer.other_balance_express : !profile.customer.other_balance_express) && (
+              <section className="rounded-lg border border-orange-200 bg-orange-50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h4 className="text-sm font-bold text-orange-800">Other Balances (Old Invoices)</h4>
+                    <p className="font-mono text-lg font-bold text-orange-700" data-testid="client-other-balance">{fmtMoney(profile.summary.other_balance)}</p>
+                  </div>
+                  <Btn
+                    variant="success"
+                    disabled={!(Number(profile.summary.other_balance) > 0)}
+                    onClick={openOtherBalancePayment}
+                    data-testid="pay-client-other-balance"
+                  >Pay balance</Btn>
+                </div>
+              </section>
+            )}
+
             <section>
               <h4 className="mb-2 text-sm font-bold text-slate-700">Invoice History</h4>
               {!profile.summary.invoices.length ? <p className="text-sm text-slate-400">No invoices.</p> : (
@@ -381,6 +437,27 @@ export default function ClientPayments({ express = false }) {
                 </div>
               )}
             </section>
+
+            {(profile.summary.other_balance_payments || []).length > 0 && (
+              <section>
+                <h4 className="mb-2 text-sm font-bold text-slate-700">Other Balances Payments History</h4>
+                <div className="space-y-1.5">
+                  {profile.summary.other_balance_payments.map((record) => (
+                    <div key={record.id} className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm ${record.reversed ? "opacity-60" : ""}`} data-testid={`other-balance-payment-${record.id}`}>
+                      <span className="text-slate-500">
+                        {fmtDate(record.date)} · {record.method}{record.receiving_on ? ` · ${record.receiving_on}` : ""}
+                        {record.reversed && <span className="ml-2 font-semibold text-red-600">Reversed</span>}
+                      </span>
+                      <div className="flex items-center gap-3">
+                        <span className={`font-mono font-semibold ${record.reversed ? "line-through text-slate-400" : "text-emerald-600"}`}>{fmtMoney(record.amount)}</span>
+                        {!record.reversed && <button type="button" onClick={() => reverseOtherBalancePayment(record)} className="text-xs text-red-500 hover:underline" data-testid={`reverse-other-balance-${record.id}`}>Reverse</button>}
+                        <button type="button" onClick={() => deleteOtherBalancePayment(record)} className="text-xs text-red-600 hover:underline" data-testid={`delete-other-balance-${record.id}`}>Delete</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
 
             <section>
               <h4 className="mb-2 text-sm font-bold text-slate-700">Payments</h4>

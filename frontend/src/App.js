@@ -2,6 +2,7 @@ import "@/App.css";
 import { Component, lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
+import { ThemeProvider } from "next-themes";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import Layout from "@/components/Layout";
 import { pageLoaders } from "@/lib/pageLoaders";
@@ -11,6 +12,7 @@ import { ArrowRight, Layers } from "lucide-react";
 const AuthCallback = lazy(() => import("@/pages/AuthCallback"));
 const Login = lazy(() => import("@/pages/Login"));
 const SharedInvoice = lazy(() => import("@/pages/SharedInvoice"));
+const SharedWarehouseReport = lazy(() => import("@/pages/SharedWarehouseReport"));
 const Dashboard = lazy(pageLoaders["/"]);
 const Customers = lazy(pageLoaders["/customers"]);
 const Suppliers = lazy(pageLoaders["/suppliers"]);
@@ -25,8 +27,9 @@ const ExpressInvoiceEditor = lazy(pageLoaders["/express-invoices/new"]);
 const Orders = lazy(pageLoaders["/orders"]);
 const Stock = lazy(pageLoaders["/stock"]);
 const Production = lazy(pageLoaders["/production"]);
+const Warehouses = lazy(pageLoaders["/warehouses"]);
+const ChemicalStock = lazy(pageLoaders["/warehouses/chemical"]);
 const Attendance = lazy(pageLoaders["/attendance"]);
-const Deliveries = lazy(pageLoaders["/deliveries"]);
 const Fleet = lazy(pageLoaders["/fleet"]);
 const Expenses = lazy(pageLoaders["/expenses"]);
 const Costs = lazy(pageLoaders["/costs"]);
@@ -34,6 +37,34 @@ const GRV = lazy(pageLoaders["/grv"]);
 const DailyReport = lazy(pageLoaders["/daily-report"]);
 const Settings = lazy(pageLoaders["/settings"]);
 const WorkflowBuilder = lazy(pageLoaders["/workflow-builder"]);
+
+class AppErrorBoundary extends Component {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error) {
+    console.error("Application error", error);
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children;
+    return (
+      <main className="min-h-screen bg-slate-100 p-6">
+        <section className="mx-auto mt-12 max-w-lg rounded-xl bg-white p-6 text-center shadow-sm">
+          <h1 className="text-xl font-semibold text-slate-900">Something went wrong</h1>
+          <p className="mt-2 text-sm text-slate-600">The page could not be displayed. Reload, or go back to the dashboard.</p>
+          <div className="mt-4 flex justify-center gap-2">
+            <button type="button" onClick={() => window.location.reload()} className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white">Reload page</button>
+            <button type="button" onClick={() => window.location.replace("/")} className="rounded-md border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700">Dashboard</button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+}
 
 class SharedInvoiceErrorBoundary extends Component {
   state = { hasError: false };
@@ -75,8 +106,8 @@ function Protected({ children }) {
             : location.pathname.startsWith("/orders") ? "orders"
               : location.pathname.startsWith("/stock") ? "stock"
                 : location.pathname.startsWith("/production") ? "production"
+                  : location.pathname.startsWith("/warehouses") ? "warehouses"
                   : location.pathname.startsWith("/attendance") ? "attendance"
-                    : location.pathname.startsWith("/deliveries") ? "deliveries"
                       : location.pathname.startsWith("/fleet") ? "fleet"
                         : location.pathname.startsWith("/expenses") ? "expenses"
                           : location.pathname.startsWith("/grv") ? "grv"
@@ -95,8 +126,8 @@ function Protected({ children }) {
         ["orders", "/orders"],
         ["stock", "/stock"],
         ["production", "/production"],
+        ["warehouses", "/warehouses"],
         ["attendance", "/attendance"],
-        ["deliveries", "/deliveries"],
         ["fleet", "/fleet"],
         ["expenses", "/expenses"],
         ["grv", "/grv"],
@@ -301,6 +332,7 @@ function AppRouter() {
           <Route path="/login" element={<Suspense fallback={<RouteLoading />}><Login /></Suspense>} />
           <Route path="/worker-access/:token" element={<Suspense fallback={<RouteLoading />}><Login /></Suspense>} />
           <Route path="/shared-invoice/:token" element={<SharedInvoiceErrorBoundary><Suspense fallback={<RouteLoading />}><SharedInvoice /></Suspense></SharedInvoiceErrorBoundary>} />
+          <Route path="/shared-warehouse-report/:token" element={<Suspense fallback={<RouteLoading />}><SharedWarehouseReport /></Suspense>} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/customers" element={<Customers />} />
@@ -318,8 +350,10 @@ function AppRouter() {
             <Route path="/orders" element={<Orders />} />
             <Route path="/stock" element={<Stock />} />
             <Route path="/production" element={<Production />} />
+            <Route path="/warehouses" element={<Warehouses />} />
+            <Route path="/warehouses/chemical" element={<ChemicalStock />} />
+            <Route path="/warehouses/:warehouseId" element={<Warehouses />} />
             <Route path="/attendance" element={<Attendance />} />
-            <Route path="/deliveries" element={<Deliveries />} />
             <Route path="/fleet" element={<Fleet />} />
             <Route path="/expenses" element={<Expenses />} />
             <Route path="/costs" element={<Costs />} />
@@ -339,12 +373,16 @@ function RouteLoading() {
 
 function App() {
   return (
-    <AuthProvider>
-      <Toaster position="top-right" richColors />
-      <BrowserRouter>
-        <AppRouter />
-      </BrowserRouter>
-    </AuthProvider>
+    <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false} storageKey="erp-theme" disableTransitionOnChange>
+      <AuthProvider>
+        <Toaster position="top-right" richColors />
+        <BrowserRouter>
+          <AppErrorBoundary>
+            <AppRouter />
+          </AppErrorBoundary>
+        </BrowserRouter>
+      </AuthProvider>
+    </ThemeProvider>
   );
 }
 

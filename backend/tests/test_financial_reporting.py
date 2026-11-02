@@ -91,6 +91,17 @@ def test_dashboard_standard_period_ranges_use_equivalent_local_date_windows(
     monkeypatch.setattr(server, "local_today", lambda: date(2026, 3, 4))
     assert server.dashboard_period_ranges(period) == expected
 
+def test_dashboard_completed_orders_counts_only_unique_orders_in_selected_period(monkeypatch):
+    async def period_records(collection, start, end, date_field, conditions):
+        assert collection == "orders"
+        assert (start, end) == (date(2026, 3, 1), date(2026, 3, 4))
+        assert date_field == "completed_at"
+        assert conditions["status"] == "Delivered"
+        return [{"id": "order-1"}, {"id": "order-1"}, {"id": "order-2"}, {}]
+
+    monkeypatch.setattr(server, "financial_period_records", period_records)
+    assert asyncio.run(server.dashboard_completed_orders_in_period("2026-03-01", "2026-03-04")) == 2
+
 def test_dashboard_compare_returns_all_five_financial_metrics(monkeypatch):
     async def financial_period(start, end):
         return {
