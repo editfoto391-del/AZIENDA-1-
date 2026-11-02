@@ -111,24 +111,26 @@ def test_workers_can_access_only_their_own_notification_routes(section):
 
 
 def test_manufacturing_worker_supervisor_configuration_is_validated():
+    W = ("warehouses",)
     assert server.worker_supervisor_settings(
-        "iqfoam-manufactoring", True, "B", ["invoice_edit"],
-    ) == ("B", ["invoice_edit"])
+        "iqfoam-manufactoring", True, ["C", "B"], ["invoice_edit"], W,
+    ) == (["B", "C"], ["invoice_edit"])
     assert server.worker_supervisor_settings(
-        "superiqfoam", False, None, [],
-    ) == (None, [])
-
-    with pytest.raises(HTTPException) as missing_warehouse:
-        server.worker_supervisor_settings("iqfoam-manufactoring", False, None, [])
-    assert missing_warehouse.value.status_code == 400
+        "superiqfoam", False, [], [],
+    ) == ([], [])
+    assert server.worker_supervisor_settings("iqfoam-manufactoring", False, [], []) == ([], [])
 
     with pytest.raises(HTTPException) as warehouse_in_other_company:
-        server.worker_supervisor_settings("superiqfoam", False, "A", [])
+        server.worker_supervisor_settings("superiqfoam", False, ["A"], [], W)
     assert warehouse_in_other_company.value.status_code == 400
+
+    with pytest.raises(HTTPException) as invalid_warehouse:
+        server.worker_supervisor_settings("iqfoam-manufactoring", False, ["Z"], [], W)
+    assert invalid_warehouse.value.status_code == 400
 
     with pytest.raises(HTTPException) as action_without_supervisor:
         server.worker_supervisor_settings(
-            "iqfoam-manufactoring", False, "A", ["price_edit"],
+            "iqfoam-manufactoring", False, ["A"], ["price_edit"], W,
         )
     assert action_without_supervisor.value.status_code == 400
 
@@ -440,18 +442,27 @@ def test_manufacturing_worker_creation_saves_warehouse_and_supervisor_permission
     }
 
     async def scenario():
-        with pytest.raises(HTTPException) as missing_warehouse:
+        no_warehouse = await server.create_worker(server.CreateWorkerIn(
+            username="no-warehouse-worker",
+            name="No Warehouse Worker",
+            worker_role="Invoice Clerk",
+            password="secure-pass-123",
+            company_id="iqfoam-manufactoring",
+            allowed_sections=["invoices", "expenses"],
+        ), admin)
+        assert no_warehouse["warehouse_ids"] == []
+
+        with pytest.raises(HTTPException) as without_section:
             await server.create_worker(server.CreateWorkerIn(
-                username="manufacturing-worker",
-                name="Manufacturing Worker",
-                worker_role="Invoice Clerk",
-                password="secure-password",
+                username="bad-warehouse-worker",
+                name="Bad Warehouse Worker",
+                worker_role="Clerk",
+                password="secure-pass-123",
                 company_id="iqfoam-manufactoring",
-                allowed_sections=["invoices", "settings"],
-                is_supervisor=True,
-                supervisor_password_actions=["invoice_edit", "price_edit"],
+                allowed_sections=["invoices"],
+                warehouse_ids=["A"],
             ), admin)
-        assert missing_warehouse.value.status_code == 400
+        assert without_section.value.status_code == 400
 
         created = await server.create_worker(server.CreateWorkerIn(
             username="manufacturing-worker",
@@ -459,17 +470,21 @@ def test_manufacturing_worker_creation_saves_warehouse_and_supervisor_permission
             worker_role="Invoice Clerk",
             password="secure-password",
             company_id="iqfoam-manufactoring",
-            allowed_sections=["invoices", "settings"],
+            allowed_sections=["invoices", "settings", "warehouses"],
             is_supervisor=True,
-            warehouse_id="B",
+            warehouse_ids=["B", "A"],
             supervisor_password_actions=["invoice_edit", "price_edit"],
         ), admin)
-        assert created["warehouse_id"] == "B"
+        assert created["warehouse_ids"] == ["A", "B"]
         assert created["is_supervisor"] is True
         assert created["supervisor_password_actions"] == ["invoice_edit", "price_edit"]
 
         stored = await database.users.find_one({"id": created["id"]})
-        assert stored["worker_warehouse_id"] == "B"
+        assert stored["worker_warehouse_ids"] == ["A", "B"]
+        assert server.worker_warehouse_ids({"worker_warehouse_id": "C"}) == ["C"]
+        server.require_warehouse_report_access({**stored, "_active_company_id": "iqfoam-manufactoring"}, "B")
+        with pytest.raises(HTTPException):
+            server.require_warehouse_report_access({**stored, "_active_company_id": "iqfoam-manufactoring"}, "C")
         assert stored["worker_supervisor_password_actions"] == ["invoice_edit", "price_edit"]
 
     asyncio.run(scenario())

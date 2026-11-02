@@ -78,7 +78,7 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
     ...group,
     items: group.items.filter((item) =>
       (!item.companyId || item.companyId === companyId)
-      && (!user?.is_worker || !item.warehouseId || item.warehouseId === user.warehouse_id)
+      && (!user?.is_worker || !item.warehouseId || (user.warehouse_ids || []).includes(item.warehouseId))
       && (!item.globalOwnerOnly || (user?.is_primary_owner && user?.is_owner && !user?.is_worker))
       && (!user?.is_worker
         || user.allowed_sections?.includes(item.section)

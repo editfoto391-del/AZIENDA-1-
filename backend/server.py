@@ -734,6 +734,7 @@ class CreateWorkerIn(BaseModel):
     email: Optional[str] = ""
     is_supervisor: bool = False
     warehouse_id: Optional[str] = None
+    warehouse_ids: List[str] = Field(default_factory=list)
     supervisor_password_actions: List[str] = Field(default_factory=list)
 
 class WorkerAccessUpdateIn(BaseModel):
@@ -742,6 +743,7 @@ class WorkerAccessUpdateIn(BaseModel):
     stock_only: bool = False
     is_supervisor: bool = False
     warehouse_id: Optional[str] = None
+    warehouse_ids: List[str] = Field(default_factory=list)
     supervisor_password_actions: List[str] = Field(default_factory=list)
 
 class UserStatusIn(BaseModel):
@@ -827,7 +829,7 @@ def public_user(u):
             "is_stock_only_worker": u.get("is_worker", False) and u.get("worker_stock_only", False),
             "worker_role": u.get("worker_role", ""),
             "is_supervisor": u.get("is_worker", False) and u.get("worker_is_supervisor", False),
-            "warehouse_id": u.get("worker_warehouse_id"),
+            "warehouse_ids": worker_warehouse_ids(u),
             "allowed_sections": u.get("worker_allowed_sections", []),
             "admin_company_ids": admin_company_ids,
             "company_id": company_id, "company_ids": allowed_company_ids(u), "picture": u.get("picture", "")}
@@ -848,12 +850,20 @@ def validate_worker_company_sections(company_id, sections):
     if "warehouses" in sections and company_id != MANUFACTURING_COMPANY_ID:
         raise HTTPException(400, "Warehouse access is only available in IQFOAM Manufacturing")
 
-def worker_supervisor_settings(company_id, is_supervisor, warehouse_id, protected_actions):
-    if company_id == MANUFACTURING_COMPANY_ID:
-        if warehouse_id not in WAREHOUSE_IDS:
-            raise HTTPException(400, "Select a warehouse for Manufacturing workers")
-    elif warehouse_id:
+def worker_warehouse_ids(doc):
+    ids = doc.get("worker_warehouse_ids")
+    if ids is None:
+        ids = [doc["worker_warehouse_id"]] if doc.get("worker_warehouse_id") else []
+    return [item for item in ids if item in WAREHOUSE_IDS]
+
+def worker_supervisor_settings(company_id, is_supervisor, warehouse_ids, protected_actions, sections=()):
+    warehouse_ids = [item for item in dict.fromkeys(warehouse_ids or []) if item]
+    if any(item not in WAREHOUSE_IDS for item in warehouse_ids):
+        raise HTTPException(400, "Choose valid warehouses")
+    if warehouse_ids and company_id != MANUFACTURING_COMPANY_ID:
         raise HTTPException(400, "Warehouse assignment is only available for Manufacturing workers")
+    if warehouse_ids and "warehouses" not in sections:
+        raise HTTPException(400, "Enable the Warehouses section to assign warehouses")
 
     actions = list(dict.fromkeys(protected_actions))
     if any(action not in WORKER_SUPERVISOR_ACTIONS for action in actions):
@@ -863,7 +873,7 @@ def worker_supervisor_settings(company_id, is_supervisor, warehouse_id, protecte
             400,
             "Only Manufacturing worker supervisors can have supervisor-password actions",
         )
-    return warehouse_id if company_id == MANUFACTURING_COMPANY_ID else None, actions
+    return sorted(warehouse_ids), actions
 
 def validate_worker_supervisor_sections(sections, protected_actions):
     missing = {
@@ -1643,7 +1653,7 @@ async def get_workers(company_id: str = "", user=Depends(get_current_user)):
         "allowed_sections": worker.get("worker_allowed_sections", []),
         "stock_only": worker.get("worker_stock_only", False),
         "is_supervisor": worker.get("worker_is_supervisor", False),
-        "warehouse_id": worker.get("worker_warehouse_id"),
+        "warehouse_ids": worker_warehouse_ids(worker),
         "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
         "company_id": company_id,
         "active": worker.get("active", True),
@@ -1675,7 +1685,7 @@ async def worker_access_details(worker_id, company_id, user):
         "allowed_sections": worker.get("worker_allowed_sections", []),
         "stock_only": worker.get("worker_stock_only", False),
         "is_supervisor": worker.get("worker_is_supervisor", False),
-        "warehouse_id": worker.get("worker_warehouse_id"),
+        "warehouse_ids": worker_warehouse_ids(worker),
         "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
         "active": worker.get("active", True),
         "can_regenerate": worker.get("active", True) is not False
@@ -1807,8 +1817,9 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         raise HTTPException(400, "Password must contain at least 8 characters")
     sections = worker_sections(body.allowed_sections, body.stock_only)
     validate_worker_company_sections(company_id, sections)
-    warehouse_id, protected_actions = worker_supervisor_settings(
-        company_id, body.is_supervisor, body.warehouse_id, body.supervisor_password_actions,
+    requested_warehouses = body.warehouse_ids or ([body.warehouse_id] if body.warehouse_id else [])
+    warehouse_ids, protected_actions = worker_supervisor_settings(
+        company_id, body.is_supervisor, requested_warehouses, body.supervisor_password_actions, sections,
     )
     if body.stock_only and body.is_supervisor:
         raise HTTPException(400, "Stock-only workers cannot be supervisors")
@@ -1835,7 +1846,8 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "worker_allowed_sections": sections,
         "worker_stock_only": body.stock_only,
         "worker_is_supervisor": body.is_supervisor,
-        "worker_warehouse_id": warehouse_id,
+        "worker_warehouse_ids": warehouse_ids,
+        "worker_warehouse_id": warehouse_ids[0] if warehouse_ids else None,
         "worker_supervisor_password_actions": protected_actions,
         "active": True,
         "auth_provider": "password",
@@ -1851,7 +1863,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
             "allowed_sections": sections,
             "stock_only": body.stock_only,
             "is_supervisor": body.is_supervisor,
-            "warehouse_id": warehouse_id,
+            "warehouse_ids": warehouse_ids,
             "supervisor_password_actions": protected_actions,
         })
     finally:
@@ -1865,7 +1877,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "allowed_sections": sections,
         "stock_only": body.stock_only,
         "is_supervisor": body.is_supervisor,
-        "warehouse_id": warehouse_id,
+        "warehouse_ids": warehouse_ids,
         "supervisor_password_actions": protected_actions,
         "active": True,
     }
@@ -1885,8 +1897,9 @@ async def update_worker_access(
     worker_role = body.worker_role.strip()
     sections = worker_sections(body.allowed_sections, body.stock_only)
     validate_worker_company_sections(company_id, sections)
-    warehouse_id, protected_actions = worker_supervisor_settings(
-        company_id, body.is_supervisor, body.warehouse_id, body.supervisor_password_actions,
+    requested_warehouses = body.warehouse_ids or ([body.warehouse_id] if body.warehouse_id else [])
+    warehouse_ids, protected_actions = worker_supervisor_settings(
+        company_id, body.is_supervisor, requested_warehouses, body.supervisor_password_actions, sections,
     )
     if body.stock_only and body.is_supervisor:
         raise HTTPException(400, "Stock-only workers cannot be supervisors")
@@ -1897,20 +1910,21 @@ async def update_worker_access(
               "allowed_sections": worker.get("worker_allowed_sections", []),
               "stock_only": worker.get("worker_stock_only", False),
               "is_supervisor": worker.get("worker_is_supervisor", False),
-              "warehouse_id": worker.get("worker_warehouse_id"),
+              "warehouse_ids": worker_warehouse_ids(worker),
               "supervisor_password_actions": worker.get("worker_supervisor_password_actions", [])}
     await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": {
         "worker_role": worker_role, "worker_allowed_sections": sections,
         "worker_stock_only": body.stock_only,
         "worker_is_supervisor": body.is_supervisor,
-        "worker_warehouse_id": warehouse_id,
+        "worker_warehouse_ids": warehouse_ids,
+        "worker_warehouse_id": warehouse_ids[0] if warehouse_ids else None,
         "worker_supervisor_password_actions": protected_actions,
     }})
     await log_audit("user", worker_id, "worker_access_updated", user, before=before,
                     after={"worker_role": worker_role, "allowed_sections": sections,
                            "stock_only": body.stock_only,
                            "is_supervisor": body.is_supervisor,
-                           "warehouse_id": warehouse_id,
+                           "warehouse_ids": warehouse_ids,
                            "supervisor_password_actions": protected_actions})
     return {
         "id": worker_id,
@@ -1921,7 +1935,7 @@ async def update_worker_access(
         "allowed_sections": sections,
         "stock_only": body.stock_only,
         "is_supervisor": body.is_supervisor,
-        "warehouse_id": warehouse_id,
+        "warehouse_ids": warehouse_ids,
         "supervisor_password_actions": protected_actions,
         "active": worker.get("active", True),
     }
@@ -2503,7 +2517,7 @@ def require_warehouse_report_access(user, warehouse_id):
         raise HTTPException(403, "Warehouse reports are only available in IQFOAM Manufacturing")
     if user.get("is_worker") and (
         "warehouses" not in user.get("worker_allowed_sections", [])
-        or user.get("worker_warehouse_id") != warehouse_id
+        or warehouse_id not in worker_warehouse_ids(user)
     ):
         raise HTTPException(403, f"This worker account cannot access Warehouse {warehouse_id} reports")
 

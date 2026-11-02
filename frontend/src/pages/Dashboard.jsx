@@ -167,7 +167,7 @@ export default function Dashboard() {
   const [workerDraft, setWorkerDraft] = useState({
     name: "", username: "", email: "", worker_role: "", password: "",
     company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
-    is_supervisor: false, warehouse_id: "", supervisor_password_actions: [],
+    is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [],
   });
   const canManageWorkers = !!(user?.is_owner || user?.is_admin);
 
@@ -270,7 +270,7 @@ export default function Dashboard() {
           allowed_sections: workerDraft.allowed_sections,
           stock_only: workerDraft.stock_only,
           is_supervisor: workerDraft.is_supervisor,
-          warehouse_id: workerDraft.warehouse_id || null,
+          warehouse_ids: workerDraft.warehouse_ids,
           supervisor_password_actions: workerDraft.supervisor_password_actions,
         });
         setWorkers((current) => current.map((worker) => worker.id === updated.id ? updated : worker));
@@ -283,7 +283,7 @@ export default function Dashboard() {
       setWorkerDraft({
         name: "", username: "", email: "", worker_role: "", password: "",
         company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
-        is_supervisor: false, warehouse_id: "", supervisor_password_actions: [],
+        is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [],
       });
       setWorkerModalOpen(false);
     } catch (error) {
@@ -300,6 +300,7 @@ export default function Dashboard() {
     return {
       ...current,
       allowed_sections: nextSections,
+      warehouse_ids: nextSections.includes("warehouses") ? current.warehouse_ids : [],
       supervisor_password_actions: current.supervisor_password_actions.filter((item) =>
         SUPERVISOR_ACTION_SECTIONS[item].some((required) => nextSections.includes(required))),
     };
@@ -309,7 +310,7 @@ export default function Dashboard() {
     setWorkerDraft((current) => ({
       ...current,
       company_id: companyId,
-      warehouse_id: "",
+      warehouse_ids: [],
       supervisor_password_actions: [],
       allowed_sections: companyId === MANUFACTURING_COMPANY_ID
         ? current.allowed_sections
@@ -328,7 +329,7 @@ export default function Dashboard() {
       allowed_sections: [...new Set((worker.allowed_sections || []).map((section) => section === "costs" ? "grv" : section))],
       stock_only: worker.stock_only === true,
       is_supervisor: worker.is_supervisor === true,
-      warehouse_id: worker.warehouse_id || "",
+      warehouse_ids: worker.warehouse_ids || [],
       supervisor_password_actions: worker.supervisor_password_actions || [],
     });
     setWorkerModalOpen(true);
@@ -448,7 +449,7 @@ export default function Dashboard() {
         <h1 className="text-3xl sm:text-4xl font-normal text-slate-900 font-display mt-1">Business overview</h1>
         <p className="text-sm text-slate-500 mt-1">Performance, cash flow and daily operations</p>
         </div>
-        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_id: "", supervisor_password_actions: [] }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
+        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [] }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/70 p-3" data-testid="dashboard-period-controls">
         <div className="flex flex-wrap gap-1.5" role="group" aria-label="Dashboard date range">
@@ -523,7 +524,7 @@ export default function Dashboard() {
                   </td>
                   <td className="py-3 text-slate-600">
                     {companies.find((company) => company.id === worker.company_id)?.name || worker.company_id}
-                    {worker.warehouse_id && <span className="mt-1 block text-xs text-slate-400">Warehouse {worker.warehouse_id}</span>}
+                    {(worker.warehouse_ids || []).length > 0 && <span className="mt-1 block text-xs text-slate-400">Warehouse {worker.warehouse_ids.join(", ")}</span>}
                   </td>
                   <td className="py-3 text-slate-600">{(worker.allowed_sections || []).map((section) => WORKER_SECTION_OPTIONS.find(([key]) => key === section)?.[1] || section).join(", ")}</td>
                   <td className="py-3 text-right whitespace-nowrap">
@@ -556,19 +557,30 @@ export default function Dashboard() {
                 {companies.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
               </Select>
             </>}
-            {workerDraft.company_id === MANUFACTURING_COMPANY_ID && <Select
-              label="Assigned warehouse *"
-              value={workerDraft.warehouse_id}
-              onChange={(event) => setWorkerDraft((current) => ({ ...current, warehouse_id: event.target.value }))}
-              required
-              data-testid="worker-warehouse"
-            >
-              <option value="">Select a warehouse...</option>
-              <option value="A">Warehouse A</option>
-              <option value="B">Warehouse B</option>
-              <option value="C">Warehouse C</option>
-            </Select>}
+
           </div>
+          {workerDraft.company_id === MANUFACTURING_COMPANY_ID && workerDraft.allowed_sections.includes("warehouses") && <fieldset className="space-y-2 rounded-md border border-border p-3" data-testid="worker-warehouses">
+            <legend className="px-1 text-sm font-semibold text-slate-700">Warehouses this worker can see</legend>
+            <p className="text-xs text-slate-500">Choose one, two or all three warehouses. The Chemical section is available with the Warehouses permission.</p>
+            <div className="flex flex-wrap gap-2">
+              {["A", "B", "C"].map((warehouse) => (
+                <label key={warehouse} className="flex items-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={workerDraft.warehouse_ids.includes(warehouse)}
+                    onChange={() => setWorkerDraft((current) => ({
+                      ...current,
+                      warehouse_ids: current.warehouse_ids.includes(warehouse)
+                        ? current.warehouse_ids.filter((item) => item !== warehouse)
+                        : [...current.warehouse_ids, warehouse],
+                    }))}
+                    data-testid={`worker-warehouse-${warehouse}`}
+                  />
+                  Warehouse {warehouse}
+                </label>
+              ))}
+            </div>
+          </fieldset>}
           <label className="flex items-start gap-2 rounded-md border border-violet-200 bg-violet-50/50 px-3 py-2 text-sm text-slate-700">
             <input
               type="checkbox"
@@ -582,7 +594,7 @@ export default function Dashboard() {
               data-testid="worker-supervisor"
             />
             <span>
-              <span className="block font-semibold">Supervisor</span>
+              <span className="block font-semibold">Make Supervisor</span>
               <span className="block text-xs text-slate-500">Marks this worker as a supervisor. Manufacturing supervisors can be required to enter the Supervisor Password for the sensitive actions selected below.</span>
             </span>
           </label>
@@ -599,16 +611,20 @@ export default function Dashboard() {
                     <input
                       type="checkbox"
                       checked={workerDraft.supervisor_password_actions.includes(action)}
-                      disabled={!hasSection}
-                      onChange={() => setWorkerDraft((current) => ({
-                        ...current,
-                        supervisor_password_actions: current.supervisor_password_actions.includes(action)
-                          ? current.supervisor_password_actions.filter((item) => item !== action)
-                          : [...current.supervisor_password_actions, action],
-                      }))}
+                      onChange={() => setWorkerDraft((current) => {
+                        const selected = current.supervisor_password_actions.includes(action);
+                        const needsSection = !requiredSections.some((section) => current.allowed_sections.includes(section));
+                        return {
+                          ...current,
+                          allowed_sections: !selected && needsSection ? [...current.allowed_sections, requiredSection] : current.allowed_sections,
+                          supervisor_password_actions: selected
+                            ? current.supervisor_password_actions.filter((item) => item !== action)
+                            : [...current.supervisor_password_actions, action],
+                        };
+                      })}
                       data-testid={`worker-supervisor-action-${action}`}
                     />
-                    {label}{!hasSection && <span className="text-xs text-slate-400">- grant {requiredSection} access</span>}
+                    {label}{!hasSection && <span className="text-xs text-slate-400">- enables {WORKER_SECTION_OPTIONS.find(([key]) => key === requiredSection)?.[1] || requiredSection} access</span>}
                   </label>
                 );
               })}
@@ -620,6 +636,7 @@ export default function Dashboard() {
               stock_only: event.target.checked,
               worker_role: event.target.checked ? "Stock Controller" : current.worker_role,
               allowed_sections: event.target.checked ? ["stock"] : current.allowed_sections,
+              warehouse_ids: event.target.checked ? [] : current.warehouse_ids,
               is_supervisor: event.target.checked ? false : current.is_supervisor,
               supervisor_password_actions: event.target.checked ? [] : current.supervisor_password_actions,
             }))} data-testid="worker-stock-only" />
@@ -642,7 +659,7 @@ export default function Dashboard() {
           <p className="flex items-center gap-2 rounded-md bg-slate-50 p-3 text-xs text-slate-500"><LockKeyhole size={14} /> Workers with Stock access can see selling prices, never purchase costs. Other sections stay locked; the worker starts with Invoice access selected.</p>
           <div className="flex justify-end gap-2">
             <Btn type="button" variant="outline" onClick={() => setWorkerModalOpen(false)} disabled={workerSaving}>Cancel</Btn>
-            <Btn type="submit" disabled={workerSaving || workerDraft.allowed_sections.length === 0 || (workerDraft.company_id === MANUFACTURING_COMPANY_ID && !workerDraft.warehouse_id)} data-testid="worker-save">{workerSaving ? "Saving..." : workerDraft.id ? "Save Access" : "Add Worker"}</Btn>
+            <Btn type="submit" disabled={workerSaving || workerDraft.allowed_sections.length === 0} data-testid="worker-save">{workerSaving ? "Saving..." : workerDraft.id ? "Save Access" : "Add Worker"}</Btn>
           </div>
         </form>
       </Modal>}

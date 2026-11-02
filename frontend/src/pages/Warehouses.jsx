@@ -239,7 +239,7 @@ export default function Warehouses() {
     : warehouseId === "C" ? WAREHOUSE_C_REPORT_SECTIONS : REPORT_SECTIONS;
   const canAccessWarehouseA = manufacturingProfile && (
     !user?.is_worker
-    || (user.allowed_sections?.includes("warehouses") && user.warehouse_id === warehouseId)
+    || (user.allowed_sections?.includes("warehouses") && (user.warehouse_ids || []).includes(warehouseId))
   );
   const canAccessReports = ["A", "B", "C"].includes(warehouseId) && canAccessWarehouseA;
   const canDeleteReports = !user?.is_worker && (user?.is_owner || user?.is_company_owner);
@@ -276,16 +276,17 @@ export default function Warehouses() {
 
   if (!manufacturingProfile || (
     user?.is_worker
-    && (!user.allowed_sections?.includes("warehouses") || !user.warehouse_id)
+    && (!user.allowed_sections?.includes("warehouses"))
   )) {
     return <Navigate to="/" replace />;
   }
 
-  if (warehouseId && (!selectedWarehouse || (user?.is_worker && warehouseId !== user.warehouse_id))) {
-    return <Navigate to={user?.is_worker ? `/warehouses/${user.warehouse_id}` : "/warehouses"} replace />;
+  const workerWarehouseHome = `/warehouses/${user?.warehouse_ids?.[0] || "chemical"}`;
+  if (warehouseId && (!selectedWarehouse || (user?.is_worker && !(user.warehouse_ids || []).includes(warehouseId)))) {
+    return <Navigate to={user?.is_worker ? workerWarehouseHome : "/warehouses"} replace />;
   }
   if (!warehouseId && user?.is_worker) {
-    return <Navigate to={`/warehouses/${user.warehouse_id}`} replace />;
+    return <Navigate to={workerWarehouseHome} replace />;
   }
 
   const changeLine = (section, index, field, value) => {
