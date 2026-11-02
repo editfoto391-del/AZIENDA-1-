@@ -43,7 +43,7 @@ export default function InvoiceEditor({ express = false }) {
   const [inv, setInv] = useState({
     customer_id: "", customer_name: "", date: today(), due_date: today(), zone: 1,
     payment_terms: "Due on Delivery", reference: "", notes: "", items: [emptyItem()],
-    discount: 0, extra_charges: 0, delivery_fee: 0, made_by: user?.name || "",
+    discount: 0, extra_charges: 0, delivery_fee: 0, made_by: "",
     client_number: "", assigned_driver_id: "", assigned_driver_name: "",
     idempotency_key: newKey(), tax_enabled: false, tax_rate: 15, status: "draft",
     amount_paid: 0, number: null,
@@ -379,7 +379,7 @@ export default function InvoiceEditor({ express = false }) {
     })),
     opening_balance: !!inv.opening_balance,
     discount: Number(inv.discount) || 0, extra_charges: Number(inv.extra_charges) || 0,
-    delivery_fee: Number(inv.delivery_fee) || 0, made_by: inv.made_by || user?.name || "",
+    delivery_fee: Number(inv.delivery_fee) || 0, made_by: inv.made_by || "",
     client_number: inv.client_number || "", assigned_driver_id: inv.assigned_driver_id || "",
     assigned_driver_name: inv.assigned_driver_name || "",
     idempotency_key: inv.idempotency_key || "",
@@ -388,7 +388,7 @@ export default function InvoiceEditor({ express = false }) {
 
   const validate = (status) => {
     if (!inv.customer_name.trim()) { toast.error("Enter or select a customer"); return false; }
-    if (!id && !(inv.made_by || user?.name || "").trim()) { toast.error("Made By is required"); return false; }
+    if (!id && !inv.made_by.trim()) { toast.error("Made By is required"); return false; }
     if (Number(inv.delivery_fee || 0) < 0 || !Number.isFinite(Number(inv.delivery_fee || 0))) { toast.error("Delivery Fee must be a valid non-negative amount"); return false; }
     if (inv.assigned_driver_id && !drivers.some((driver) => driver.id === inv.assigned_driver_id)) { toast.error("Select an eligible driver"); return false; }
     if (!inv.items.some((it) => it.size || it.description)) { toast.error("Add at least one item"); return false; }
@@ -815,7 +815,7 @@ export default function InvoiceEditor({ express = false }) {
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-3"><Input label="Invoice Date" type="date" value={inv.date} onChange={(e) => setInv({ ...inv, date: e.target.value })} /><Input label="Due Date" type="date" value={inv.due_date} onChange={(e) => setInv({ ...inv, due_date: e.target.value })} /></div>
                   {!id ? <>
-                    <Input label="Made By *" value={inv.made_by || user?.name || ""} readOnly required data-testid="invoice-made-by" />
+                    <Input label="Made By *" value={inv.made_by || ""} onChange={(event) => setInv({ ...inv, made_by: event.target.value })} required data-testid="invoice-made-by" />
                     <Input label="Client Number" value={inv.client_number || ""} onChange={(event) => setInv({ ...inv, client_number: event.target.value })} disabled={!canEditClientNumber} data-testid="invoice-client-number" />
                     <Select label="Assigned Driver" value={inv.assigned_driver_id || ""} onChange={(event) => {
                       const driver = drivers.find((item) => item.id === event.target.value);

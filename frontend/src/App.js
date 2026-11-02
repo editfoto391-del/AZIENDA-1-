@@ -1,5 +1,5 @@
 import "@/App.css";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { Component, lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
@@ -10,6 +10,7 @@ import { ArrowRight, Layers } from "lucide-react";
 
 const AuthCallback = lazy(() => import("@/pages/AuthCallback"));
 const Login = lazy(() => import("@/pages/Login"));
+const SharedInvoice = lazy(() => import("@/pages/SharedInvoice"));
 const Dashboard = lazy(pageLoaders["/"]);
 const Customers = lazy(pageLoaders["/customers"]);
 const Suppliers = lazy(pageLoaders["/suppliers"]);
@@ -33,6 +34,31 @@ const GRV = lazy(pageLoaders["/grv"]);
 const DailyReport = lazy(pageLoaders["/daily-report"]);
 const Settings = lazy(pageLoaders["/settings"]);
 const WorkflowBuilder = lazy(pageLoaders["/workflow-builder"]);
+
+class SharedInvoiceErrorBoundary extends Component {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <main className="min-h-screen bg-slate-100 p-6">
+          <section className="mx-auto mt-12 max-w-lg rounded-xl bg-white p-6 text-center shadow-sm">
+            <h1 className="text-xl font-semibold text-slate-900">Invoice could not be displayed</h1>
+            <p className="mt-2 text-sm text-slate-600">Reload the page or request a new invoice link.</p>
+            <button type="button" onClick={() => window.location.reload()} className="mt-4 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white">
+              Reload page
+            </button>
+          </section>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function Protected({ children }) {
   const { user, booting } = useAuth();
@@ -274,6 +300,7 @@ function AppRouter() {
         <Routes>
           <Route path="/login" element={<Suspense fallback={<RouteLoading />}><Login /></Suspense>} />
           <Route path="/worker-access/:token" element={<Suspense fallback={<RouteLoading />}><Login /></Suspense>} />
+          <Route path="/shared-invoice/:token" element={<SharedInvoiceErrorBoundary><Suspense fallback={<RouteLoading />}><SharedInvoice /></Suspense></SharedInvoiceErrorBoundary>} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/customers" element={<Customers />} />

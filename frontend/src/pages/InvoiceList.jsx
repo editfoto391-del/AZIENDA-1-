@@ -2,11 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { fmtMoney, fmtDate, fmtDateTime, STATUS_META } from "@/lib/format";
 import { Card, Btn, Input, Badge, PageHeader, Empty, Modal } from "@/components/common";
-import { Eye, FileText, Search, Plus, Pencil, Trash2, Download, RotateCcw, Archive } from "lucide-react";
+import { Eye, FileText, Search, Plus, Pencil, Trash2, Download, RotateCcw, Archive, MessageCircle, Link2Off } from "lucide-react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { usesUnifiedPriceList } from "@/lib/company";
+
+const normalizeWhatsAppPhone = (phone) => {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (digits.startsWith("00")) return digits.slice(2);
+  if (digits.startsWith("0")) return `27${digits.slice(1)}`;
+  return digits;
+};
 
 export default function InvoiceList({ express = false }) {
   const { user } = useAuth();
@@ -26,6 +33,7 @@ export default function InvoiceList({ express = false }) {
   const [viewLoading, setViewLoading] = useState(false);
   const [viewInvoice, setViewInvoice] = useState(null);
   const [viewCustomer, setViewCustomer] = useState(null);
+  const [whatsappDraft, setWhatsappDraft] = useState(null);
   const customersRequest = useRef(null);
   const loadCustomers = () => {
     if (!customersRequest.current) {
@@ -114,6 +122,36 @@ export default function InvoiceList({ express = false }) {
       toast.error(apiError(error));
     }
   };
+  const sendInvoiceViaWhatsApp = async (event, invoice) => {
+    event.stopPropagation();
+    try {
+      const customers = await loadCustomers();
+      const customer = customers.find((item) => item.id === invoice.customer_id);
+      const phone = normalizeWhatsAppPhone(customer?.phone);
+      if (!phone) throw new Error("This customer does not have a valid phone number.");
+
+      const { token } = await api.post(`/invoices/${invoice.id}/share-link`, {});
+      const link = `${window.location.origin}/shared-invoice/${encodeURIComponent(token)}`;
+      const message = `Hello ${invoice.customer_name || ""}, view or download your invoice PDF ${invoice.number || ""} here: ${link}`;
+      setWhatsappDraft({
+        url: `https://wa.me/${phone}?text=${encodeURIComponent(message)}`,
+        invoiceNumber: invoice.number || "DRAFT",
+      });
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
+  const revokeInvoiceShareLink = async (event, invoice) => {
+    event.stopPropagation();
+    if (!window.confirm(`Revoke the shared link for invoice ${invoice.number || "DRAFT"}? Anyone using the old link will lose access.`)) return;
+    try {
+      await api.del(`/invoices/${invoice.id}/share-link`);
+      setList((current) => current.map((item) => item.id === invoice.id ? { ...item, has_share_link: false } : item));
+      toast.success("Invoice share link revoked.");
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
 
   const filtered = list.filter((i) => {
     if (showArchived && !i.archived) return false;
@@ -190,6 +228,24 @@ export default function InvoiceList({ express = false }) {
                       <button onClick={(e) => { e.stopPropagation(); nav(`${listPath}/${i.id}?pdf=1`); }} data-testid={`pdf-invoice-row-${i.id}`} title="Download PDF" className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-1.5 text-slate-600 hover:border-primary hover:text-primary transition-colors">
                         <Download size={12} />
                       </button>
+                      {i.status !== "draft" && i.status !== "void" && <button
+                        onClick={(e) => sendInvoiceViaWhatsApp(e, i)}
+                        data-testid={`whatsapp-invoice-row-${i.id}`}
+                        title="Send invoice via WhatsApp"
+                        aria-label={`Send invoice ${i.number || "draft"} via WhatsApp`}
+                        className="ml-2 inline-flex items-center justify-center rounded-lg border border-emerald-200 bg-white p-1.5 text-emerald-700 hover:bg-emerald-50 transition-colors"
+                      >
+                        <MessageCircle size={12} />
+                      </button>}
+                      {i.has_share_link && <button
+                        onClick={(e) => revokeInvoiceShareLink(e, i)}
+                        data-testid={`revoke-whatsapp-invoice-row-${i.id}`}
+                        title="Revoke shared invoice link"
+                        aria-label={`Revoke shared invoice link for ${i.number || "invoice"}`}
+                        className="ml-2 inline-flex items-center justify-center rounded-lg border border-red-200 bg-white p-1.5 text-red-600 hover:bg-red-50 transition-colors"
+                      >
+                        <Link2Off size={12} />
+                      </button>}
                       <button onClick={(e) => { e.stopPropagation(); nav(`${listPath}/${i.id}?edit=1`); }} data-testid={`edit-invoice-row-${i.id}`}
                         className="ml-2 inline-flex items-center gap-1 rounded-lg border border-primary/40 px-2.5 py-1 text-xs font-semibold text-primary hover:bg-blue-50 transition-colors">
                         <Pencil size={12} /> Edit
@@ -273,6 +329,31 @@ export default function InvoiceList({ express = false }) {
           {viewInvoice.notes && <div><h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Notes</h4><p className="mt-1 whitespace-pre-wrap text-slate-800">{viewInvoice.notes}</p></div>}
           {viewInvoice.audit?.length > 0 && <p className="text-xs text-slate-500">Last updated: {fmtDateTime(viewInvoice.audit[viewInvoice.audit.length - 1].at)}</p>}
         </div>}
+      </Modal>
+
+      <Modal
+        open={!!whatsappDraft}
+        onClose={() => setWhatsappDraft(null)}
+        title={`Invoice ${whatsappDraft?.invoiceNumber || ""} ready`}
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-slate-600">
+            The invoice link is ready. Open WhatsApp to review the message, then press Send.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Btn variant="outline" onClick={() => setWhatsappDraft(null)}>Cancel</Btn>
+            <a
+              href={whatsappDraft?.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => setWhatsappDraft(null)}
+              data-testid="open-invoice-whatsapp"
+              className="inline-flex items-center justify-center gap-2 rounded-md bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700"
+            >
+              <MessageCircle size={15} /> Open WhatsApp
+            </a>
+          </div>
+        </div>
       </Modal>
     </div>
   );

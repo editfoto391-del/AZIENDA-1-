@@ -52,6 +52,11 @@ export function AuthProvider({ children }) {
       setBooting(false);
       return;
     }
+    if (window.location.pathname.startsWith("/shared-invoice/")) {
+      setUser(false);
+      setBooting(false);
+      return;
+    }
     const dedicatedDomain = dedicatedCompanyDomain();
     api.get("/auth/me").then((authenticatedUser) => {
       if (dedicatedDomain && !authenticatedUser.is_worker && !authenticatedUser.can_switch_company
@@ -104,10 +109,12 @@ export function AuthProvider({ children }) {
   };
 
   const logout = async () => {
-    try { await api.post("/auth/logout"); } catch { /* ignore */ }
-    localStorage.removeItem("token");
-    setUser(false);
-    window.location.href = "/login";
+    try { await api.logout(); } catch { /* Local logout must still complete if the server is unavailable. */ }
+    finally {
+      localStorage.removeItem("token");
+      setUser(false);
+      window.location.replace("/login");
+    }
   };
 
   const closeSupervisorPrompt = (password = null) => {

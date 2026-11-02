@@ -44,12 +44,13 @@ def test_delivery_fee_is_included_in_taxable_amount_using_existing_tax_rules():
     assert invoice["total"] == 1092.5
 
 
-def test_new_invoice_records_authenticated_preparer_and_delivery_fee():
+def test_new_invoice_records_submitted_preparer_and_authenticated_user_and_delivery_fee():
     body = server.InvoiceIn(
         customer_name="Synthetic Customer",
         items=[{"qty": 1, "unit_price": 1000}],
         discount=100,
         delivery_fee=50,
+        made_by="Manual Invoice Preparer",
     )
 
     invoice = asyncio.run(server._prepare_invoice(
@@ -57,9 +58,27 @@ def test_new_invoice_records_authenticated_preparer_and_delivery_fee():
         user={"id": "test-user", "name": "Synthetic User"},
     ))
 
-    assert invoice["made_by"] == "Synthetic User"
+    assert invoice["made_by"] == "Manual Invoice Preparer"
     assert invoice["made_by_user_id"] == "test-user"
     assert invoice["total"] == 950
+
+
+def test_new_invoice_requires_a_manually_submitted_preparer():
+    body = server.InvoiceIn(
+        customer_name="Synthetic Customer",
+        items=[{"qty": 1, "unit_price": 1000}],
+    )
+
+    try:
+        asyncio.run(server._prepare_invoice(
+            body,
+            user={"id": "test-user", "name": "Synthetic User"},
+        ))
+    except server.HTTPException as error:
+        assert error.status_code == 400
+        assert error.detail == "Made By is required"
+    else:
+        raise AssertionError("Invoice creation should require a manually submitted preparer")
 
 
 def test_invoice_submission_hash_changes_with_financial_data():

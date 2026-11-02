@@ -79,11 +79,11 @@ class FakeDatabase:
         return self.collections[name]
 
 
-def request(path, token):
+def request(path, token, method="GET"):
     return Request({
         "type": "http",
         "http_version": "1.1",
-        "method": "GET",
+        "method": method,
         "scheme": "https",
         "path": path,
         "raw_path": path.encode(),
@@ -92,6 +92,22 @@ def request(path, token):
         "client": ("127.0.0.1", 1234),
         "server": ("test", 443),
     })
+
+
+@pytest.mark.parametrize("section", ["invoices", "stock"])
+def test_workers_can_access_only_their_own_notification_routes(section):
+    worker = {"is_worker": True, "worker_allowed_sections": [section]}
+
+    for path, method in (
+        ("/api/notifications", "GET"),
+        ("/api/notifications/notification-1/read", "POST"),
+        ("/api/notifications/notification-1/dismiss", "POST"),
+    ):
+        server.enforce_worker_api_access(request(path, "unused", method), worker)
+
+    with pytest.raises(HTTPException) as unrelated_section:
+        server.enforce_worker_api_access(request("/api/fleet", "unused"), worker)
+    assert unrelated_section.value.status_code == 403
 
 
 @pytest.fixture
@@ -172,6 +188,9 @@ def test_worker_link_auth_scope_dynamic_permissions_and_revocation(worker_accoun
         with pytest.raises(HTTPException) as denied_expenses:
             await server.get_current_user(request("/api/expenses", access_token))
         assert denied_expenses.value.status_code == 403
+        assert (await server.get_current_user(
+            request("/api/customers/customer-a/summary", access_token)
+        ))["id"] == "worker-a"
 
         await database.users.update_one({"id": "worker-a"}, {"$set": {
             "worker_allowed_sections": ["expenses"],

@@ -146,6 +146,7 @@ export default function Layout() {
   const reduceMotion = useReducedMotion();
   const [open, setOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const [profiles, setProfiles] = useState([]);
   const [switching, setSwitching] = useState(false);
   const [notifications, setNotifications] = useState([]);
@@ -339,9 +340,12 @@ export default function Layout() {
               <div className="text-sm font-semibold text-slate-800">{user?.name || "Admin"}</div>
               <div className="text-[11px] text-slate-500">{user?.is_worker ? user.worker_role || "Worker" : user?.is_owner || user?.is_company_owner ? "Owner" : user?.is_admin || user?.role === "admin" ? "Administrator" : "Team member"}</div>
             </div>
-            <motion.button whileHover={reduceMotion ? undefined : { x: -1, scale: 1.04 }} whileTap={reduceMotion ? undefined : { scale: 0.97 }} transition={{ type: "spring", stiffness: 500, damping: 22 }} onClick={logout} data-testid="logout-btn" className="rounded-full p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 ml-1">
-              <LogOut size={18} />
-            </motion.button>
+            {!user?.is_worker && !dedicatedDomain && (
+              <motion.button type="button" whileHover={reduceMotion ? undefined : { x: -1, scale: 1.04 }} whileTap={reduceMotion ? undefined : { scale: 0.97 }} transition={{ type: "spring", stiffness: 500, damping: 22 }} onClick={() => { setLoggingOut(true); logout(); }} disabled={loggingOut} aria-label="Log out" title="Log out" data-testid="logout-btn" className="inline-flex items-center gap-1.5 rounded-full px-2 py-2 text-slate-500 hover:text-red-600 hover:bg-red-50 ml-1 disabled:opacity-60">
+                <LogOut size={18} />
+                <span className="hidden text-xs font-semibold sm:inline">{loggingOut ? "Logging out…" : "Log out"}</span>
+              </motion.button>
+            )}
           </div>
         </header>
 

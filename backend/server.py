@@ -19,7 +19,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 import uuid, logging, jwt, bcrypt, math, asyncio
 import base64, hashlib, secrets
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from pymongo import IndexModel, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
@@ -342,6 +342,14 @@ def enforce_worker_api_access(request, user):
 
     if path in {"auth/me", "auth/logout", "auth/device", "companies/profiles"}:
         return
+    if (
+        (path == "notifications" and method == "GET")
+        or (
+            re.fullmatch(r"notifications/[^/]+/(dismiss|read)", path)
+            and method == "POST"
+        )
+    ):
+        return
 
     stock_access = "stock" in allowed or user.get("worker_stock_only")
     if path == "products" and method == "GET" and stock_access:
@@ -380,6 +388,8 @@ def enforce_worker_api_access(request, user):
 
     if "invoices" in allowed:
         if path in {"customers", "prices", "settings"} and method == "GET":
+            return
+        if re.fullmatch(r"customers/[^/]+/summary", path) and method == "GET":
             return
         if path in {"customers", "prices"} and method == "POST":
             return
@@ -2571,8 +2581,14 @@ async def previous_invoice_balances(customer_id, invoice_type, invoice_date, exc
 @api.get("/invoices")
 async def get_invoices(include_archived: bool = False, express: bool = False, user=Depends(get_current_user)):
     invs = await listall("invoices", invoice_list_query(express, include_archived), ("created_at", -1))
+    invoice_ids = [invoice["id"] for invoice in invs]
+    shared_links = await db.invoice_share_links.find(
+        {"invoice_id": {"$in": invoice_ids}}, {"_id": 0, "invoice_id": 1},
+    ).to_list(len(invoice_ids)) if invoice_ids else []
+    shared_invoice_ids = {link["invoice_id"] for link in shared_links}
     for i in invs:
         i["status"] = derive_status(i)
+        i["has_share_link"] = i["id"] in shared_invoice_ids
     return invs
 
 @api.get("/invoices/{iid}")
@@ -2582,7 +2598,100 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
         raise HTTPException(404, "Invoice not found")
     inv["status"] = derive_status(inv)
     inv["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
+    inv["has_share_link"] = bool(await db.invoice_share_links.find_one({"invoice_id": iid}, {"_id": 1}))
     return inv
+
+async def issue_invoice_share_link(iid, user):
+    invoice = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not invoice:
+        raise HTTPException(404, "Invoice not found")
+    if invoice.get("archived") or derive_status(invoice) in ("draft", "void"):
+        raise HTTPException(400, "Only active, issued invoices can be shared")
+
+    link = await db.invoice_share_links.find_one({"invoice_id": iid}, {"_id": 0})
+    if not link:
+        token = secrets.token_urlsafe(32)
+        try:
+            link = await insert("invoice_share_links", {
+                "invoice_id": iid,
+                "token_hash": worker_access_token_hash(token),
+                "token_encrypted": encrypt_worker_access_token(token),
+            })
+            await log_audit("invoice", iid, "share_link_created", user)
+            return token
+        except DuplicateKeyError:
+            link = await db.invoice_share_links.find_one({"invoice_id": iid}, {"_id": 0})
+            if not link:
+                raise
+
+    try:
+        token = decrypt_worker_access_token(link.get("token_encrypted", ""))
+    except InvalidToken as error:
+        raise HTTPException(500, "The invoice share link could not be recovered") from error
+    if not secrets.compare_digest(link.get("token_hash", ""), worker_access_token_hash(token)):
+        raise HTTPException(500, "The invoice share link is invalid; revoke it before sharing again")
+    return token
+
+@api.post("/invoices/{iid}/share-link")
+async def create_invoice_share_link(iid: str, response: Response, user=Depends(get_current_user)):
+    response.headers["Cache-Control"] = "no-store"
+    return {"token": await issue_invoice_share_link(iid, user)}
+
+@api.delete("/invoices/{iid}/share-link")
+async def revoke_invoice_share_link(iid: str, user=Depends(get_current_user)):
+    if not await db.invoices.find_one({"id": iid}, {"_id": 1}):
+        raise HTTPException(404, "Invoice not found")
+    result = await db.invoice_share_links.delete_one({"invoice_id": iid})
+    if result.deleted_count:
+        await log_audit("invoice", iid, "share_link_revoked", user)
+    return {"revoked": bool(result.deleted_count)}
+
+@api.get("/public/invoices/{token}")
+async def get_public_invoice_share(token: str, response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token or ""):
+        raise HTTPException(404, "Invoice link not found")
+
+    token_hash = worker_access_token_hash(token)
+    for profile in COMPANY_PROFILES:
+        company_db = tenant_database(client, base_db, profile["id"])
+        link = await company_db.invoice_share_links.find_one({"token_hash": token_hash}, {"_id": 0})
+        if not link:
+            continue
+        invoice = await company_db.invoices.find_one({"id": link["invoice_id"]}, {"_id": 0})
+        if not invoice or invoice.get("archived") or derive_status(invoice) in ("draft", "void"):
+            raise HTTPException(404, "Invoice link not found")
+        compute_invoice(invoice)
+        customer = await company_db.customers.find_one(
+            {"id": invoice.get("customer_id")}, {"_id": 0},
+        ) if invoice.get("customer_id") else {}
+        settings = await company_db.settings.find_one({"id": "singleton"}, {"_id": 0}) or {}
+        invoice_fields = (
+            "number", "customer_name", "client_number", "assigned_driver_name", "date", "due_date",
+            "zone", "payment_terms", "reference", "destination", "items", "discount", "extra_charges",
+            "delivery_fee", "tax_enabled", "tax_rate", "amount_paid", "subtotal", "tax_amount", "total",
+            "outstanding", "notes", "opening_balance",
+        )
+        customer_fields = ("address", "city", "phone", "email")
+        settings_fields = (
+            "company_name", "address", "telephone", "email", "tax_number", "banking_details",
+        )
+        shared_invoice = {key: invoice.get(key) for key in invoice_fields}
+        shared_invoice["items"] = [
+            {key: item.get(key) for key in ("category", "size", "qty", "unit_price", "description")}
+            for item in invoice.get("items", [])
+        ]
+        return {
+            "invoice": shared_invoice,
+            "customer": {key: customer.get(key) for key in customer_fields},
+            "settings": {
+                **{key: settings.get(key) for key in settings_fields},
+                "unified_price_list": uses_unified_price_list(profile["id"]),
+            },
+        }
+    raise HTTPException(404, "Invoice link not found")
 
 class DailyReportInclusionIn(BaseModel):
     included: bool
@@ -2774,6 +2883,7 @@ async def permanently_delete_invoice(iid: str, user=Depends(get_current_user)):
                     before={"number": inv.get("number"), "customer_name": inv.get("customer_name"),
                             "total": inv.get("total"), "status": derive_status(inv)})
     await db.payments.delete_many({"invoice_id": iid})
+    await db.invoice_share_links.delete_one({"invoice_id": iid})
     await db.invoices.delete_one({"id": iid, "archived": True})
     return {"ok": True, "deleted": True}
 
@@ -2871,10 +2981,10 @@ async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
             if existing.get("made_by_user_id"):
                 inv["made_by_user_id"] = existing["made_by_user_id"]
     else:
-        authenticated_name = (user or {}).get("name") or (user or {}).get("username") or ""
-        if not authenticated_name:
+        made_by = (body.made_by or "").strip()
+        if not made_by:
             raise HTTPException(400, "Made By is required")
-        inv["made_by"] = authenticated_name
+        inv["made_by"] = made_by
         if user and user.get("id"):
             inv["made_by_user_id"] = user["id"]
     if not inv.get("due_date"):
@@ -11126,6 +11236,12 @@ async def initialize_multi_company():
         partialFilterExpression={"idempotency_key": {"$type": "string"}},
         name="invoice_submission_once",
     )
+    await base_db.invoice_share_links.create_index(
+        "invoice_id", unique=True, name="invoice_share_once",
+    )
+    await base_db.invoice_share_links.create_index(
+        "token_hash", unique=True, name="invoice_share_token_once",
+    )
     await ensure_performance_indexes(base_db)
 
     for company_id in ("iqfoam-manufactoring", "iqfoam-whole-sallers"):
@@ -11348,6 +11464,12 @@ async def initialize_empty_company(company_id):
         unique=True,
         partialFilterExpression={"idempotency_key": {"$type": "string"}},
         name="invoice_submission_once",
+    )
+    await company_db.invoice_share_links.create_index(
+        "invoice_id", unique=True, name="invoice_share_once",
+    )
+    await company_db.invoice_share_links.create_index(
+        "token_hash", unique=True, name="invoice_share_token_once",
     )
     await company_db.vehicle_licence_discs.create_index(
         [("vehicle_id", 1), ("expiry_date", 1)],
