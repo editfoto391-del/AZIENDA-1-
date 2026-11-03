@@ -46,7 +46,9 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     // Returning from Google OAuth: AuthCallback exchanges session_id first
     if (window.location.hash?.includes("session_id=")) { setBooting(false); return; }
-    if (window.location.pathname.startsWith("/worker-access/")) {
+    const sharedEntry = new URLSearchParams(window.location.search).get("utm_source") === "share";
+    if (sharedEntry) window.history.replaceState(null, "", "/login");
+    if (window.location.pathname.startsWith("/worker-access/") || sharedEntry) {
       localStorage.removeItem("token");
       setUser(false);
       setBooting(false);
