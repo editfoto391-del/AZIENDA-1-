@@ -5,14 +5,13 @@ import {
   LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
   Truck, Menu, X, LogOut, Search, Bell, Layers,
   ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart, ChevronDown, Building2, Handshake, Settings as Cog, ClipboardCheck, LockKeyhole,
-  Warehouse, FlaskConical, Moon, Sun,
+  Warehouse, FlaskConical,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
 import { preloadPage } from "@/lib/pageLoaders";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { companyBrandName, companyProfileName, dedicatedCompanyDomain } from "@/lib/company";
-import { useTheme } from "next-themes";
 
 const NAV_GROUPS = [
   { label: "Overview", items: [
@@ -168,7 +167,6 @@ function AnimatedOutlet() {
 
 export default function Layout() {
   const { user, logout, switchCompany } = useAuth();
-  const { theme, setTheme } = useTheme();
   const reduceMotion = useReducedMotion();
   const [open, setOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
@@ -271,16 +269,6 @@ export default function Layout() {
             </div>
           </div>
           <div className="flex-1 sm:hidden" />
-          <button
-            type="button"
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-            data-testid="theme-toggle"
-            className="rounded-full p-2 text-slate-500 hover:bg-white/40 hover:text-slate-800"
-          >
-            {theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}
-          </button>
           {user?.can_switch_company && availableProfiles.length > 1 && (
             <div className="relative" onMouseEnter={() => setProfileMenuOpen(true)} onMouseLeave={() => setProfileMenuOpen(false)}>
               <button

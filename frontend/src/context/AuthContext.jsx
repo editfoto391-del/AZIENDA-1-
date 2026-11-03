@@ -47,9 +47,14 @@ export function AuthProvider({ children }) {
     // Returning from Google OAuth: AuthCallback exchanges session_id first
     if (window.location.hash?.includes("session_id=")) { setBooting(false); return; }
     const sharedEntry = new URLSearchParams(window.location.search).get("utm_source") === "share";
-    if (sharedEntry) window.history.replaceState(null, "", "/login");
-    if (window.location.pathname.startsWith("/worker-access/") || sharedEntry) {
+    const workerAccessEntry = window.location.pathname.startsWith("/worker-access/");
+    if (sharedEntry) {
+      window.history.replaceState(null, "", "/login");
+      window.sessionStorage.removeItem("erp-worker-access-session");
+    }
+    if (workerAccessEntry || sharedEntry) {
       localStorage.removeItem("token");
+      if (workerAccessEntry) window.sessionStorage.removeItem("erp-worker-access-session");
       setUser(false);
       setBooting(false);
       return;
@@ -62,8 +67,19 @@ export function AuthProvider({ children }) {
       setBooting(false);
       return;
     }
+    const navigationType = window.performance.getEntriesByType("navigation")[0]?.type;
+    const generalSiteEntry = window.location.pathname === "/" && navigationType === "navigate";
     const dedicatedDomain = dedicatedCompanyDomain();
     api.get("/auth/me").then((authenticatedUser) => {
+      if (authenticatedUser.is_worker && (
+        generalSiteEntry
+        || window.sessionStorage.getItem("erp-worker-access-session") !== "true"
+      )) {
+        localStorage.removeItem("token");
+        window.sessionStorage.removeItem("erp-worker-access-session");
+        setUser(false);
+        return;
+      }
       if (dedicatedDomain && !authenticatedUser.is_worker && !authenticatedUser.can_switch_company
         && authenticatedUser.company_id !== dedicatedDomain.companyId) {
         localStorage.removeItem("token");
@@ -74,8 +90,13 @@ export function AuthProvider({ children }) {
     }).catch(() => setUser(false)).finally(() => setBooting(false));
   }, []);
 
-  const finishLogin = async (data, shareLocation) => {
+  const finishLogin = async (data, shareLocation, workerAccessLogin = false) => {
     localStorage.setItem("token", data.token);
+    if (workerAccessLogin && data.user.is_worker) {
+      window.sessionStorage.setItem("erp-worker-access-session", "true");
+    } else {
+      window.sessionStorage.removeItem("erp-worker-access-session");
+    }
     setUser(data.user);
     deviceInfo(shareLocation).then((info) => api.post("/auth/device", info)).catch(() => {});
     return data.user;
@@ -89,7 +110,7 @@ export function AuthProvider({ children }) {
       company_id: personalAccessToken ? companyId : dedicatedDomain?.companyId || companyId,
       ...(personalAccessToken ? { personal_access_token: personalAccessToken } : {}),
     });
-    return finishLogin(data, shareLocation);
+    return finishLogin(data, shareLocation, Boolean(personalAccessToken));
   };
 
   const register = async (name, email, password, shareLocation = false) => {
@@ -117,6 +138,7 @@ export function AuthProvider({ children }) {
     try { await api.logout(); } catch { /* Local logout must still complete if the server is unavailable. */ }
     finally {
       localStorage.removeItem("token");
+      window.sessionStorage.removeItem("erp-worker-access-session");
       setUser(false);
       window.location.replace("/login");
     }
