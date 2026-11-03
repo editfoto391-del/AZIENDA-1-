@@ -171,11 +171,17 @@ export default function Dashboard() {
   });
   const canManageWorkers = !!(user?.is_owner || user?.is_admin);
 
-  const [companyInventory, setCompanyInventory] = useState([]);
+  const [companyInventory, setCompanyInventory] = useState(null);
+  const [companyInventoryError, setCompanyInventoryError] = useState("");
+  const [companyInventoryReload, setCompanyInventoryReload] = useState(0);
   useEffect(() => {
-    if (user?.is_worker) return;
-    api.get("/company-inventory").then((items) => setCompanyInventory(items || [])).catch(() => setCompanyInventory([]));
-  }, [user]);
+    if (user?.is_worker && !user.allowed_sections?.includes("stock")) return;
+    setCompanyInventory(null);
+    setCompanyInventoryError("");
+    api.getUncached("/company-inventory")
+      .then((items) => setCompanyInventory(items || []))
+      .catch((error) => setCompanyInventoryError(apiError(error)));
+  }, [user, companyInventoryReload]);
 
   useEffect(() => {
     if (!canManageWorkers) return;
@@ -506,6 +512,27 @@ export default function Dashboard() {
           The selected period filters financial results, orders, invoices, attendance, and scheduled deliveries. Stock, balances, and fleet availability show current values.
         </p>
       </div>
+
+      <Section title="Company Inventory" icon={Boxes} action={<button onClick={() => nav("/company-inventory")} className="text-xs font-semibold text-primary flex items-center gap-1" data-testid="dashboard-company-inventory-link">View <ArrowRight size={12} /></button>}>
+        {user?.is_worker && !user.allowed_sections?.includes("stock") ? (
+          <p className="text-sm text-slate-500">Company Inventory requires Stock access. Ask your administrator to update your permissions.</p>
+        ) : companyInventoryError ? (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm text-red-700" role="alert">{companyInventoryError}</p>
+            <button type="button" onClick={() => setCompanyInventoryReload((value) => value + 1)} className="text-xs font-semibold text-primary" data-testid="dashboard-company-inventory-retry">Try again</button>
+          </div>
+        ) : companyInventory === null ? (
+          <p className="text-sm text-slate-400" role="status">Loading company inventory...</p>
+        ) : companyInventory.length === 0 ? empty("No company inventory items yet.") : (
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" data-testid="dashboard-company-inventory">
+            {companyInventory.map((item) => (
+              <div key={item.id} className="flex justify-between rounded-lg border border-border px-3 py-2">
+                <span className="text-sm font-semibold text-slate-700">{item.name} <span className="text-slate-400 font-normal">· {item.category}{item.size ? ` ${item.size}` : ""}</span></span>
+                <span className="text-sm font-mono font-bold text-slate-700">{Number(item.total || 0).toLocaleString()} {item.unit}</span>
+              </div>))}
+          </div>
+        )}
+      </Section>
 
       {canManageWorkers && <Section title="Workers" icon={UserPlus} action={<div className="flex items-center gap-3">
         <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">Company
@@ -889,18 +916,6 @@ export default function Dashboard() {
             </div>))}</div>
         </Section>
       </div>
-
-      {!user?.is_worker && <Section title="Company Inventory" icon={Boxes} action={<button onClick={() => nav("/company-inventory")} className="text-xs font-semibold text-primary flex items-center gap-1" data-testid="dashboard-company-inventory-link">View <ArrowRight size={12} /></button>}>
-        {companyInventory.length === 0 ? empty("No company inventory items yet.") : (
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" data-testid="dashboard-company-inventory">
-            {companyInventory.map((item) => (
-              <div key={item.id} className="flex justify-between rounded-lg border border-border px-3 py-2">
-                <span className="text-sm font-semibold text-slate-700">{item.name} <span className="text-slate-400 font-normal">· {item.category}{item.size ? ` ${item.size}` : ""}</span></span>
-                <span className="text-sm font-mono font-bold text-slate-700">{Number(item.total || 0).toLocaleString()} {item.unit}</span>
-              </div>))}
-          </div>
-        )}
-      </Section>}
 
       <Section title={`Invoices · ${periodLabel}`} icon={Receipt} action={<button onClick={() => nav("/invoices")} className="text-xs font-semibold text-primary flex items-center gap-1">View all <ArrowRight size={12} /></button>}>
         {d.recent_invoices.length === 0 ? empty("No invoices yet. Create your first invoice.") : (

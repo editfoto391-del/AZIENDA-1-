@@ -400,6 +400,8 @@ def enforce_worker_api_access(request, user):
         return
 
     stock_access = "stock" in allowed or user.get("worker_stock_only")
+    if path == "company-inventory" and method == "GET" and stock_access:
+        return
     if path == "products" and method == "GET" and stock_access:
         return
     if path == "products/scan" and method == "POST" and (
@@ -2697,14 +2699,16 @@ def company_inventory_total(item):
     return round(item.get("packages", 0) * item.get("units_per_package", 0) + item.get("loose_units", 0), 4)
 
 
-def require_company_inventory_access(user):
-    if user.get("is_worker"):
+def require_company_inventory_access(user, read_only=False):
+    if user.get("is_worker") and (
+        not read_only or "stock" not in (user.get("worker_allowed_sections") or [])
+    ):
         raise HTTPException(403, "This worker account cannot access Company Inventory")
 
 
 @api.get("/company-inventory")
 async def get_company_inventory(user=Depends(get_current_user)):
-    require_company_inventory_access(user)
+    require_company_inventory_access(user, read_only=True)
     items = await listall("company_inventory", sort=("category", 1), limit=2000)
     for item in items:
         item["total"] = company_inventory_total(item)

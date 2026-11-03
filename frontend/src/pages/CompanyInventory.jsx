@@ -14,7 +14,7 @@ const fmt = (value) => Number(value || 0).toLocaleString(undefined, { maximumFra
 const blank = {
   name: "", category: CATEGORIES[0], categoryCustom: "", size: "",
   packaged: false, packaging: PACKAGINGS[0], packagingCustom: "",
-  packages: "", units_per_package: "", loose_units: "",
+  packages: "", loose_units: "",
   unit: UNITS[0], unitCustom: "", notes: "",
 };
 
@@ -37,7 +37,8 @@ const pick = (list, value) => (list.includes(value) ? { v: value, c: "" } : { v:
 
 export default function CompanyInventory() {
   const { user } = useAuth();
-  const canDelete = !user?.is_worker && (user?.is_owner || user?.is_company_owner);
+  const canEdit = !user?.is_worker;
+  const canDelete = canEdit && (user?.is_owner || user?.is_company_owner);
   const [items, setItems] = useState(null);
   const [form, setForm] = useState(null);
   const [editId, setEditId] = useState(null);
@@ -62,7 +63,7 @@ export default function CompanyInventory() {
     setForm({
       name: item.name, category: cat.v, categoryCustom: cat.c, size: item.size,
       packaged: item.packages > 0 || !!item.packaging, packaging: item.packaging ? pack.v : PACKAGINGS[0], packagingCustom: item.packaging ? pack.c : "",
-      packages: String(item.packages || ""), units_per_package: String(item.units_per_package || ""), loose_units: String(item.loose_units || ""),
+      packages: String(item.packages || ""), loose_units: String(item.loose_units || ""),
       unit: unit.v, unitCustom: unit.c, notes: item.notes || "",
     });
   };
@@ -73,16 +74,15 @@ export default function CompanyInventory() {
     const packaging = form.packaged ? (form.packaging === OTHER ? form.packagingCustom : form.packaging).trim() : "";
     const num = (value) => (value === "" ? 0 : Number(value));
     const packages = form.packaged ? num(form.packages) : 0;
-    const units_per_package = 0;
     const loose_units = num(form.loose_units);
     if (!form.name.trim()) return toast.error("Enter the product name");
     if (!category) return toast.error("Enter the category");
     if (!unit) return toast.error("Enter the unit of measure");
     if (form.packaged && !packaging) return toast.error("Enter the package type");
-    if ([packages, units_per_package, loose_units].some((value) => !Number.isFinite(value) || value < 0)) return toast.error("Enter valid quantities");
+    if ([packages, loose_units].some((value) => !Number.isFinite(value) || value < 0)) return toast.error("Enter valid quantities");
     setSaving(true);
     try {
-      const payload = { name: form.name.trim(), category, size: form.size.trim(), packaging, packages, units_per_package, loose_units, unit, notes: form.notes.trim() };
+      const payload = { name: form.name.trim(), category, size: form.size.trim(), packaging, packages, loose_units, unit, notes: form.notes.trim() };
       if (editId) await api.put(`/company-inventory/${editId}`, payload);
       else await api.post("/company-inventory", payload);
       toast.success(editId ? "Product updated" : "Product added");
@@ -111,7 +111,7 @@ export default function CompanyInventory() {
   return (
     <div data-testid="company-inventory-page">
       <PageHeader title="Company Inventory" subtitle="Resources used by the company: glue, tape, fabric rolls, ribbon, cotton and more.">
-        <Btn onClick={openAdd} data-testid="add-inventory-product-btn"><Plus size={16} /> Add Product</Btn>
+        {canEdit && <Btn onClick={openAdd} data-testid="add-inventory-product-btn"><Plus size={16} /> Add Product</Btn>}
       </PageHeader>
 
       <Card className="p-4 mb-6">
@@ -152,10 +152,10 @@ export default function CompanyInventory() {
                   <td>{item.packages > 0 ? `${fmt(item.packages)} ${item.packaging}` : "-"}</td>
                   <td className="text-right font-mono">{item.loose_units > 0 ? `${fmt(item.loose_units)} ${item.unit}` : "-"}</td>
                   <td className="text-right font-mono font-bold">{fmt(item.total)} {item.unit}</td>
-                  <td className="text-right whitespace-nowrap">
+                  {canEdit && <td className="text-right whitespace-nowrap">
                     <Btn variant="outline" onClick={() => openEdit(item)} aria-label="Edit product"><Pencil size={14} /></Btn>
                     {canDelete && <Btn variant="outline" className="ml-1" onClick={() => remove(item)} aria-label="Delete product"><Trash2 size={14} /></Btn>}
-                  </td>
+                  </td>}
                 </tr>
               ))}</tbody>
             </table>
