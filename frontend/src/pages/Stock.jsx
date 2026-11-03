@@ -40,6 +40,7 @@ export default function Stock() {
   const [showHist, setShowHist] = useState(false);
   const [showProductIds, setShowProductIds] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [valueZone, setValueZone] = useState(1);
 
   const loadMovements = () => loadListRequest({
     request: () => api.get("/stock/movements"),
@@ -62,6 +63,38 @@ export default function Stock() {
   const run = async (fn, ok) => {
     if (busy) return; setBusy(true);
     try { await fn(); toast.success(ok); load(); return true; } catch (e) { toast.error(apiError(e)); return false; } finally { setBusy(false); }
+  };
+
+  // One row per product+size (latest record), so duplicate legacy rows are not counted twice.
+  const getCanonicalStock = () => {
+    const latest = new Map();
+    (list || []).forEach((stock) => {
+      const key = `${String(stock.product).toLowerCase()}|${String(stock.size).toLowerCase()}`;
+      const existing = latest.get(key);
+      if (!existing || String(stock.created_at || "") > String(existing.created_at || "")) latest.set(key, stock);
+    });
+    return [...latest.values()];
+  };
+
+  const getTotalsByCategory = () => {
+    const totals = {};
+    getCanonicalStock().forEach((s) => {
+      totals[s.product] = (totals[s.product] || 0) + Number(s.current || 0);
+    });
+    return totals;
+  };
+
+  const getTotalStock = () => getCanonicalStock().reduce((sum, s) => sum + Number(s.current || 0), 0);
+
+  const getStockValueTotal = (zone) => {
+    let total = 0;
+    let unpriced = 0;
+    getCanonicalStock().forEach((stock) => {
+      const price = findSellingPrice(stock, zone);
+      if (price?.price != null && price.confirmed) total += Number(stock.current || 0) * Number(price.price);
+      else if (Number(stock.current || 0) !== 0) unpriced += 1;
+    });
+    return { total: fmtMoney(total), unpriced };
   };
 
   const saveStock = async () => {
@@ -185,6 +218,54 @@ export default function Stock() {
           {CATEGORIES.map((item) => <option key={item} value={item}>{item}</option>)}
         </Select>
       </div>
+
+      <Card className="p-4 mb-6 bg-slate-50 border-slate-200">
+        <h2 className="text-xs font-bold uppercase tracking-wide text-slate-600 mb-3">Stock Total</h2>
+        {list === null ? (
+          <p className="text-sm text-slate-400">Loading...</p>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+            {CATEGORIES.map((cat) => {
+              const total = getTotalsByCategory()[cat] || 0;
+              return total > 0 ? (
+                <div key={cat} className="bg-white rounded-md p-3 border border-slate-200">
+                  <p className="text-xs text-slate-500 font-semibold">{cat}</p>
+                  <p className="text-lg font-mono font-bold text-slate-800">{total}</p>
+                </div>
+              ) : null;
+            })}
+            <div className="bg-white rounded-md p-3 border border-slate-300 border-2">
+              <p className="text-xs text-slate-600 font-semibold">Overall Total</p>
+              <p className="text-lg font-mono font-bold text-slate-900">{getTotalStock()}</p>
+            </div>
+            <div className="bg-white rounded-md p-3 border border-slate-200">
+              <p className="text-xs text-slate-500 font-semibold">Ribbon Total</p>
+              <p className="text-lg font-mono font-bold text-slate-800">{(getTotalsByCategory()["Ribbon Pink"] || 0) + (getTotalsByCategory()["Ribbon Black"] || 0)}</p>
+            </div>
+            <div className="bg-white rounded-md p-3 border border-slate-200">
+              <p className="text-xs text-slate-500 font-semibold">Strong Boy Total</p>
+              <p className="text-lg font-mono font-bold text-slate-800">{getTotalsByCategory()["Strong Boy"] || 0}</p>
+            </div>
+            {!user?.is_worker && (() => {
+              const value = getStockValueTotal(valueZone);
+              return (
+                <div className="bg-white rounded-md p-3 border border-slate-300 border-2">
+                  <label htmlFor="stock-value-zone" className="block text-xs text-slate-600 font-semibold">Total Stock Value</label>
+                  {!unifiedPriceList && (
+                    <select id="stock-value-zone" value={valueZone} onChange={(event) => setValueZone(Number(event.target.value))}
+                      className="mt-1 mb-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs" data-testid="stock-value-zone">
+                      <option value={1}>Zone 1</option>
+                      <option value={2}>Zone 2</option>
+                    </select>
+                  )}
+                  <p className="text-lg font-mono font-bold text-slate-900">{value.total}</p>
+                  {value.unpriced > 0 && <p className="text-[11px] text-amber-600">{value.unpriced} item(s) without confirmed price not included</p>}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </Card>
 
       <Card className="overflow-hidden">
         {list === null ? <p className="p-6 text-sm text-slate-400">Loading stock...</p> : filteredList.length === 0 ? <Empty icon={Boxes} title={stockSearch.trim() ? "No stock matches your search" : category ? "No stock items in this category" : "No stock records"} /> : (

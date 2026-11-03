@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { Link, useNavigate } from "react-router-dom";
 import { Handshake, Eye, Pencil, Plus, Search, ShoppingCart, Trash2 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { fmtDate, fmtMoney } from "@/lib/format";
 import { Badge, Btn, Card, Empty, Input, Modal, PageHeader, Textarea } from "@/components/common";
 
@@ -64,6 +65,20 @@ export default function Suppliers() {
       toast.error(apiError(error));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const { user } = useAuth();
+  const canPurge = !!(user?.is_owner || user?.is_company_owner || user?.role === "owner");
+
+  const purgeSupplier = async (supplier) => {
+    if (!window.confirm(`PERMANENTLY delete supplier "${supplier.name}"? This cannot be undone.`)) return;
+    try {
+      await api.del(`/suppliers/${supplier.id}?permanent=true`);
+      toast.success("Supplier permanently deleted");
+      setSuppliers((current) => current.filter((item) => item.id !== supplier.id));
+    } catch (error) {
+      toast.error(apiError(error));
     }
   };
 
@@ -163,6 +178,12 @@ export default function Suppliers() {
                         data-testid={`deactivate-supplier-${supplier.id}`}
                         className="rounded p-1.5 text-slate-400 hover:text-red-600"
                       ><Trash2 size={15} /></button>}
+                      {canPurge && <button
+                        type="button"
+                        onClick={() => purgeSupplier(supplier)}
+                        data-testid={`purge-supplier-${supplier.id}`}
+                        className="ml-1 rounded px-1.5 py-1 text-xs font-semibold text-red-600 hover:underline"
+                      >Delete permanently</button>}
                     </td>
                   </tr>
                 ))}

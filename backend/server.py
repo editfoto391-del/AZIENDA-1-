@@ -2619,6 +2619,136 @@ async def delete_chemical_log(log_id: str, user=Depends(get_current_user)):
     return {"ok": True, "deleted": True}
 
 
+class ChemicalInventoryIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    chemical: str = Field(min_length=1, max_length=120)
+    container_type: str = Field(min_length=1, max_length=60)
+    capacity: float = Field(gt=0, allow_inf_nan=False)
+    unit: str = Field(min_length=1, max_length=20)
+    count: float = Field(default=1, ge=0, allow_inf_nan=False)
+
+    @field_validator("chemical", "container_type", "unit")
+    @classmethod
+    def strip_inventory_text(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("This field is required")
+        return value
+
+
+@api.get("/warehouses/chemical/inventory")
+async def get_chemical_inventory(user=Depends(get_current_user)):
+    require_chemical_access(user)
+    return await listall("chemical_inventory", sort=("chemical", 1), limit=1000)
+
+
+@api.post("/warehouses/chemical/inventory")
+async def save_chemical_inventory(body: ChemicalInventoryIn, user=Depends(get_current_user)):
+    require_chemical_access(user)
+    item = await insert("chemical_inventory", {
+        **body.model_dump(),
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("username") or "",
+    })
+    await log_audit("chemical_inventory", item["id"], "created", user, after=item)
+    return item
+
+
+@api.delete("/warehouses/chemical/inventory/{item_id}")
+async def delete_chemical_inventory(item_id: str, user=Depends(get_current_user)):
+    require_chemical_access(user)
+    require_profile_owner(user)
+    item = await db.chemical_inventory.find_one({"id": item_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(404, "Inventory entry not found")
+    await db.chemical_inventory.delete_one({"id": item_id})
+    await log_audit("chemical_inventory", item_id, "permanently_deleted", user,
+                    before=item, after={"deleted": True})
+    return {"ok": True, "deleted": True}
+
+
+class CompanyInventoryIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    name: str = Field(min_length=1, max_length=120)
+    category: str = Field(min_length=1, max_length=60)
+    size: str = Field(default="", max_length=40)
+    packaging: str = Field(default="", max_length=40)
+    packages: float = Field(default=0, ge=0, allow_inf_nan=False)
+    units_per_package: float = Field(default=0, ge=0, allow_inf_nan=False)
+    loose_units: float = Field(default=0, ge=0, allow_inf_nan=False)
+    unit: str = Field(min_length=1, max_length=20)
+    notes: str = Field(default="", max_length=500)
+
+    @field_validator("name", "category", "size", "packaging", "unit", "notes")
+    @classmethod
+    def strip_company_inventory_text(cls, value):
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_company_inventory(self):
+        if not self.name or not self.category or not self.unit:
+            raise ValueError("Name, category and unit are required")
+        return self
+
+
+def company_inventory_total(item):
+    return round(item.get("packages", 0) * item.get("units_per_package", 0) + item.get("loose_units", 0), 4)
+
+
+def require_company_inventory_access(user):
+    if user.get("is_worker"):
+        raise HTTPException(403, "This worker account cannot access Company Inventory")
+
+
+@api.get("/company-inventory")
+async def get_company_inventory(user=Depends(get_current_user)):
+    require_company_inventory_access(user)
+    items = await listall("company_inventory", sort=("category", 1), limit=2000)
+    for item in items:
+        item["total"] = company_inventory_total(item)
+    return items
+
+
+@api.post("/company-inventory")
+async def add_company_inventory(body: CompanyInventoryIn, user=Depends(get_current_user)):
+    require_company_inventory_access(user)
+    item = await insert("company_inventory", {
+        **body.model_dump(),
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("username") or "",
+    })
+    await log_audit("company_inventory", item["id"], "created", user, after=item)
+    item["total"] = company_inventory_total(item)
+    return item
+
+
+@api.put("/company-inventory/{item_id}")
+async def update_company_inventory(item_id: str, body: CompanyInventoryIn, user=Depends(get_current_user)):
+    require_company_inventory_access(user)
+    before = await db.company_inventory.find_one({"id": item_id}, {"_id": 0})
+    if not before:
+        raise HTTPException(404, "Inventory item not found")
+    item = await update_doc("company_inventory", item_id, body.model_dump())
+    await log_audit("company_inventory", item_id, "edited", user, before=before, after=item)
+    item["total"] = company_inventory_total(item)
+    return item
+
+
+@api.delete("/company-inventory/{item_id}")
+async def delete_company_inventory(item_id: str, user=Depends(get_current_user)):
+    require_company_inventory_access(user)
+    require_profile_owner(user)
+    item = await db.company_inventory.find_one({"id": item_id}, {"_id": 0})
+    if not item:
+        raise HTTPException(404, "Inventory item not found")
+    await db.company_inventory.delete_one({"id": item_id})
+    await log_audit("company_inventory", item_id, "permanently_deleted", user,
+                    before=item, after={"deleted": True})
+    return {"ok": True, "deleted": True}
+
+
 @api.get("/warehouses/A/reports")
 async def get_warehouse_a_reports(user=Depends(get_current_user)):
     require_warehouse_report_access(user, "A")
@@ -4212,13 +4342,14 @@ async def set_payment_daily_report_inclusion(
         raise HTTPException(404, "Payment not found")
     if payment.get("reversed") or payment.get("archived"):
         raise HTTPException(409, "Reversed or archived payments cannot be included in the daily report")
-    invoice = await db.invoices.find_one({"id": payment.get("invoice_id")}, {"_id": 0})
-    if not invoice:
-        raise HTTPException(404, "Invoice not found")
-    if invoice.get("invoice_type") != "express":
-        raise HTTPException(400, "Only Express Website payments can be selected separately for the daily report")
-    if invoice.get("archived"):
-        raise HTTPException(409, "Restore this invoice before changing its daily report selection")
+    if not payment.get("other_balance_payment"):
+        invoice = await db.invoices.find_one({"id": payment.get("invoice_id")}, {"_id": 0})
+        if not invoice:
+            raise HTTPException(404, "Invoice not found")
+        if invoice.get("invoice_type") != "express":
+            raise HTTPException(400, "Only Express Website payments can be selected separately for the daily report")
+        if invoice.get("archived"):
+            raise HTTPException(409, "Restore this invoice before changing its daily report selection")
 
     updated = await update_doc("payments", pid, {
         "include_on_daily_report": body.included,
@@ -8472,10 +8603,16 @@ async def edit_supplier(supplier_id: str, body: SupplierIn, user=Depends(get_cur
     return rec
 
 @api.delete("/suppliers/{supplier_id}")
-async def deactivate_supplier(supplier_id: str, user=Depends(get_current_user)):
+async def deactivate_supplier(supplier_id: str, permanent: bool = False, user=Depends(get_current_user)):
     before = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
     if not before:
         raise HTTPException(404, "Supplier not found")
+    if permanent:
+        require_profile_owner(user)
+        await db.suppliers.delete_one({"id": supplier_id})
+        await log_audit("supplier", supplier_id, "permanently_deleted", user, before=before, after={"deleted": True})
+        await emit_workflow_event("supplier.deleted", before)
+        return {"ok": True, "deleted": True}
     rec = await update_doc("suppliers", supplier_id, {"active": False, "archived_at": now_iso()})
     await log_audit("supplier", supplier_id, "deactivated", user, before=before, after=rec)
     await emit_workflow_event("supplier.deactivated", rec)
@@ -8510,8 +8647,13 @@ class GRVLineIn(BaseModel):
     damaged_quantity: float = 0
     unit_cost: float = 0
     total_value: float = 0
+    category: Optional[str] = ""
+    unit: Optional[str] = ""
+    container_type: Optional[str] = ""
 
 class GRVIn(BaseModel):
+    purpose: str = "selling"
+    is_chemical: bool = False
     supplier_id: Optional[str] = ""
     supplier_name: Optional[str] = ""
     purchase_order_id: Optional[str] = ""
@@ -8899,6 +9041,143 @@ async def get_grv_purchase_orders(user=Depends(get_current_user)):
         ],
     } for order in orders if order.get("status") in ("ordered", "partially_received")]
 
+def _raw_goes_to_chemicals(is_chemical):
+    company = active_company_id.get() or DEFAULT_COMPANY_ID
+    return bool(is_chemical) and company in (MANUFACTURING_COMPANY_ID, DEFAULT_COMPANY_ID)
+
+def _grv_purpose(body):
+    purpose = (body.purpose or "selling").strip().lower()
+    if purpose not in ("selling", "raw_material"):
+        raise HTTPException(400, "GRV type must be selling or raw_material")
+    return purpose
+
+def _raw_grv_items(requested_items, is_chemical):
+    if not requested_items:
+        raise HTTPException(400, "Add at least one product to the GRV")
+    to_chemicals = _raw_goes_to_chemicals(is_chemical)
+    result = []
+    for line in requested_items:
+        data = line.model_dump() if isinstance(line, GRVLineIn) else dict(line)
+        name = (data.get("product") or "").strip()
+        unit = (data.get("unit") or "").strip()
+        if not name:
+            raise HTTPException(400, "Enter the name of every raw material")
+        if not unit:
+            raise HTTPException(400, f"Enter the unit for {name}")
+        size = (data.get("size") or "").strip()
+        if to_chemicals:
+            try:
+                capacity = float(size)
+            except ValueError:
+                capacity = 0
+            if capacity <= 0:
+                raise HTTPException(400, f"Enter a numeric container capacity in Size for {name}")
+        try:
+            calculated = validate_grv_line_quantities({
+                "actual_received_quantity": data.get("actual_received_quantity", 0),
+                "accepted_quantity": data.get("accepted_quantity", 0),
+                "rejected_quantity": data.get("rejected_quantity", 0),
+                "damaged_quantity": data.get("damaged_quantity", 0),
+                "unit_cost": data.get("unit_cost", 0),
+            })
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, str(error))
+        result.append({
+            "stock_id": "", "product_code": "", "product": name, "size": size,
+            "category": "Chemical" if is_chemical else ((data.get("category") or "").strip() or "Other"),
+            "unit": unit, "container_type": (data.get("container_type") or "").strip() or "Barrel",
+            "purchase_order_item_index": None, "ordered_quantity": 0,
+            "previously_received_quantity": 0, "remaining_quantity": 0,
+            **calculated,
+        })
+    return result
+
+def _raw_key(line):
+    return "|".join(
+        (line.get(k) or "").strip().lower()
+        for k in ("product", "size", "unit", "category", "container_type")
+    )
+
+async def _raw_inventory_target(line, is_chemical, create=False):
+    name = re.escape(line["product"].strip())
+    unit = re.escape(line["unit"].strip())
+    if _raw_goes_to_chemicals(is_chemical):
+        container = re.escape(line.get("container_type") or "Barrel")
+        query = {
+            "chemical": {"$regex": f"^{name}$", "$options": "i"},
+            "capacity": float(line["size"]),
+            "unit": {"$regex": f"^{unit}$", "$options": "i"},
+            "container_type": {"$regex": f"^{container}$", "$options": "i"},
+        }
+        found = await db.chemical_inventory.find_one(query, {"_id": 0})
+        if found or not create:
+            return "chemical_inventory", found
+        created = await insert("chemical_inventory", {
+            "chemical": line["product"].strip(), "container_type": line.get("container_type") or "Barrel",
+            "capacity": float(line["size"]), "unit": line["unit"].strip(), "count": 0,
+        })
+        return "chemical_inventory", created
+    category = re.escape((line.get("category") or "Other").strip())
+    query = {
+        "name": {"$regex": f"^{name}$", "$options": "i"},
+        "category": {"$regex": f"^{category}$", "$options": "i"},
+        "size": {"$regex": f"^{re.escape((line.get('size') or '').strip())}$", "$options": "i"},
+        "unit": {"$regex": f"^{unit}$", "$options": "i"},
+    }
+    found = await db.company_inventory.find_one(query, {"_id": 0})
+    if found or not create:
+        return "company_inventory", found
+    created = await insert("company_inventory", {
+        "name": line["product"].strip(), "category": (line.get("category") or "Other").strip(),
+        "size": (line.get("size") or "").strip(), "packaging": "", "packages": 0,
+        "units_per_package": 0, "loose_units": 0, "unit": line["unit"].strip(), "notes": "Created by GRV",
+    })
+    return "company_inventory", created
+
+async def _apply_raw_grv(grv, user, direction):
+    """Post (direction=1) or reverse (direction=-1) accepted raw-material quantities; idempotent per GRV line group."""
+    is_chemical = bool(grv.get("is_chemical"))
+    grouped = {}
+    for line in grv.get("items", []):
+        quantity = float(line.get("accepted_quantity", 0))
+        if quantity <= 0:
+            continue
+        key = _raw_key(line)
+        if key in grouped:
+            grouped[key]["quantity"] = round(grouped[key]["quantity"] + quantity, 4)
+        else:
+            grouped[key] = {"line": line, "quantity": quantity}
+    posted = []
+    for key, entry in grouped.items():
+        dedupe = f"grv-raw:{'in' if direction == 1 else 'out'}:{grv['id']}:{key}"
+        if await db.raw_material_movements.find_one({"dedupe_key": dedupe}, {"_id": 0}):
+            continue
+        if direction == 1:
+            collection, target = await _raw_inventory_target(entry["line"], is_chemical, create=True)
+            target_id = target["id"]
+        else:
+            original = await db.raw_material_movements.find_one(
+                {"dedupe_key": f"grv-raw:in:{grv['id']}:{key}"}, {"_id": 0})
+            if not original:
+                continue
+            collection, target_id = original["collection"], original["target_id"]
+            target = await getattr(db, collection).find_one({"id": target_id}, {"_id": 0})
+            if not target:
+                raise HTTPException(409, f"Inventory item no longer exists: {entry['line']['product']}")
+        field = "count" if collection == "chemical_inventory" else "loose_units"
+        current = float(target.get(field, 0))
+        new_value = round(current + direction * entry["quantity"], 4)
+        if new_value < -1e-9:
+            raise HTTPException(409, f"Cannot reverse {entry['line']['product']}: only {current:g} remain in inventory")
+        await update_doc(collection, target_id, {field: max(new_value, 0)})
+        await insert("raw_material_movements", {
+            "dedupe_key": dedupe, "grv_id": grv["id"], "grv_number": grv.get("grv_number", ""),
+            "collection": collection, "target_id": target_id, "quantity": entry["quantity"],
+            "direction": direction, "product": entry["line"]["product"], "created_by": user["email"],
+        })
+        posted.append({"collection": collection, "target_id": target_id, "quantity": entry["quantity"]})
+    return posted
+
 async def _grv_items_from_request(requested_items, purchase_order=None):
     if purchase_order and not requested_items:
         requested_items = [
@@ -9087,7 +9366,13 @@ async def create_grv(body: GRVIn, user=Depends(get_current_user)):
         supplier_name = supplier["name"]
     if not supplier_name:
         raise HTTPException(400, "Select a supplier")
-    items = await _grv_items_from_request(body.items, purchase_order)
+    purpose = _grv_purpose(body)
+    if purpose == "raw_material":
+        if purchase_order:
+            raise HTTPException(400, "Raw-material GRVs cannot be linked to a purchase order")
+        items = _raw_grv_items(body.items, body.is_chemical)
+    else:
+        items = await _grv_items_from_request(body.items, purchase_order)
     reference = await next_ref("grv", "GRV")
     record = {
         "grv_number": reference,
@@ -9101,6 +9386,8 @@ async def create_grv(body: GRVIn, user=Depends(get_current_user)):
         "warehouse": (body.warehouse or "").strip(),
         "notes": (body.notes or "").strip(),
         "items": items,
+        "purpose": purpose,
+        "is_chemical": bool(body.is_chemical) if purpose == "raw_material" else False,
         "status": "draft",
         "created_by": user["email"],
         "edited_by": user["email"],
@@ -9134,7 +9421,13 @@ async def edit_grv(grv_id: str, body: GRVIn, user=Depends(get_current_user)):
         supplier_name = supplier["name"]
     if not supplier_name:
         raise HTTPException(400, "Select a supplier")
-    items = await _grv_items_from_request(body.items, purchase_order)
+    purpose = _grv_purpose(body)
+    if purpose == "raw_material":
+        if purchase_order:
+            raise HTTPException(400, "Raw-material GRVs cannot be linked to a purchase order")
+        items = _raw_grv_items(body.items, body.is_chemical)
+    else:
+        items = await _grv_items_from_request(body.items, purchase_order)
     audit = before.get("audit", []) + [{"action": "edited", "by": user["email"], "at": now_iso()}]
     updates = {
         "supplier_id": supplier_id,
@@ -9147,6 +9440,8 @@ async def edit_grv(grv_id: str, body: GRVIn, user=Depends(get_current_user)):
         "warehouse": (body.warehouse or "").strip(),
         "notes": (body.notes or "").strip(),
         "items": items,
+        "purpose": purpose,
+        "is_chemical": bool(body.is_chemical) if purpose == "raw_material" else False,
         "edited_by": user["email"],
         "audit": audit,
     }
@@ -9224,6 +9519,19 @@ async def confirm_grv(grv_id: str, user=Depends(get_current_user)):
             raise HTTPException(400, "GRV has no product lines")
         if not any(line["actual_received_quantity"] > 0 for line in normalized_items):
             raise HTTPException(400, "Enter an actual received quantity before confirming the GRV")
+        if grv.get("purpose") == "raw_material":
+            await _apply_raw_grv({**grv, "items": normalized_items}, user, 1)
+            audit = grv.get("audit", []) + [{"action": "confirmed", "by": user["email"], "at": now_iso()}]
+            updated = await update_doc("grvs", grv_id, {
+                "items": normalized_items,
+                "status": grv_confirmation_status(normalized_items, True),
+                "movement_ids": [],
+                "confirmed_by": user["email"], "confirmed_at": now_iso(),
+                "edited_by": user["email"], "audit": audit,
+            })
+            await log_audit("grv", grv_id, "confirmed", user, before=grv, after=updated)
+            await emit_workflow_event("grv.confirmed", {**updated, "item_count": len(updated.get("items", []))})
+            return updated
         accepted = aggregate_accepted_stock_lines(normalized_items)
         stock_ids = [item["stock_id"] for item in accepted]
         async with StockLock(stock_ids):
@@ -9437,6 +9745,17 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
         )
         if not grv:
             raise HTTPException(409, "GRV reversal is already in progress")
+
+    if grv.get("purpose") == "raw_material":
+        await _apply_raw_grv(grv, user, -1)
+        updated = await update_doc("grvs", grv_id, {
+            "status": "cancelled", "reversed_by": user["email"], "reversed_at": now_iso(),
+            "reversal_reason": reason, "reversal_movement_ids": [], "edited_by": user["email"],
+            "audit": grv.get("audit", []) + [{"action": "reversed", "by": user["email"], "at": now_iso(), "reason": reason}],
+        })
+        await log_audit("grv", grv_id, "reversed", user, before=grv, after=updated, reason=reason)
+        await emit_workflow_event("grv.cancelled", {**updated, "item_count": len(updated.get("items", []))})
+        return updated
 
     accepted = aggregate_accepted_stock_lines(grv.get("items", []))
     po = None
@@ -9951,7 +10270,7 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
     payment_rows = []
     for payment in payments:
         invoice = invoice_by_id.get(payment.get("invoice_id"), {})
-        if invoice.get("invoice_type") == "express":
+        if invoice.get("invoice_type") == "express" or (payment.get("other_balance_payment") and payment.get("express")):
             if payment.get("daily_report_inclusion_set"):
                 if not payment.get("include_on_daily_report"):
                     continue
@@ -11763,10 +12082,16 @@ async def edit_order(oid: str, body: OrderIn, user=Depends(get_current_user)):
     return record
 
 @api.delete("/orders/{oid}")
-async def del_order(oid: str, user=Depends(get_current_user)):
+async def del_order(oid: str, permanent: bool = False, user=Depends(get_current_user)):
     order = await db.orders.find_one({"id": oid}, {"_id": 0})
     if not order:
         raise HTTPException(404, "Order not found")
+    if permanent:
+        require_profile_owner(user)
+        await db.orders.delete_one({"id": oid})
+        await log_audit("order", oid, "permanently_deleted", user, before=order, after={"deleted": True})
+        await emit_workflow_event("order.deleted", order)
+        return {"ok": True, "deleted": True}
     updated = await update_doc("orders", oid, {
         "status": "Cancelled",
     })

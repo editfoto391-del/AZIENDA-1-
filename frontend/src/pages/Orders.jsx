@@ -208,6 +208,11 @@ export default function Orders() {
     try { await api.del(`/orders/${o.id}`); toast.success("Order cancelled"); load(); } catch (e) { toast.error(apiError(e)); }
   };
 
+  const purge = async (o) => {
+    if (!window.confirm(`PERMANENTLY delete order ${o.reference}? This cannot be undone.`)) return;
+    try { await api.del(`/orders/${o.id}?permanent=true`); toast.success("Order permanently deleted"); load(); } catch (e) { toast.error(apiError(e)); }
+  };
+
   const tabs = ["open", ...STATUSES, "all"];
   return (
     <div className="space-y-6">
@@ -251,6 +256,7 @@ export default function Orders() {
                     <button onClick={() => setNote(o)} className="text-slate-400 hover:text-primary mr-3" title="Delivery note" data-testid={`note-order-${o.id}`}><FileText size={15} /></button>
                     <button onClick={() => setModal({ ...o, items: o.items?.length ? o.items : [{ qty: "", category: "", size: "" }], expected_ship_date: o.expected_ship_date || "" })} className="text-slate-400 hover:text-primary mr-3" data-testid={`edit-order-${o.id}`}><Pencil size={15} /></button>
                     <button onClick={() => remove(o)} className="text-slate-400 hover:text-red-600" data-testid={`delete-order-${o.id}`}><Trash2 size={15} /></button>
+                    <button onClick={() => purge(o)} className="text-xs font-semibold text-red-600 hover:underline" title="Delete permanently" data-testid={`purge-order-${o.id}`}>Delete permanently</button>
                   </td>
                 </tr>))}</tbody>
             </table>

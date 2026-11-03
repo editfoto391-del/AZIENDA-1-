@@ -5,7 +5,7 @@ import {
   LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
   Truck, Menu, X, LogOut, Search, Bell, Layers,
   ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart, ChevronDown, Building2, Handshake, Settings as Cog, ClipboardCheck, LockKeyhole,
-  Warehouse, FlaskConical,
+  Warehouse, FlaskConical, Boxes,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -35,15 +35,19 @@ const NAV_GROUPS = [
   ] },
   { label: "Operations", items: [
     { to: "/stock", label: "Stock", icon: Package, section: "stock" },
-    { to: "/production", label: "Production", icon: Factory, section: "production" },
     { to: "/fleet", label: "Fleet", icon: CarFront, section: "fleet" },
-    { to: "/warehouses/chemical", label: "Chemical", icon: FlaskConical, section: "warehouses", companyId: "superiqfoam" },
+  ] },
+  { label: "PRODUCTION", collapsible: true, companyIds: ["superiqfoam", "iqfoam-manufactoring"], items: [
+    { to: "/production", label: "Production", icon: Factory, section: "production" },
+    { to: "/warehouses/chemical-inventory", label: "Chemicals Quantity", icon: FlaskConical, section: "warehouses", companyId: "superiqfoam" },
+    { to: "/warehouses/chemical", label: "Chemical Usage Log", icon: FlaskConical, section: "warehouses", companyId: "superiqfoam" },
   ] },
   { label: "WAREHOUSES", collapsible: true, companyId: "iqfoam-manufactoring", items: [
     { to: "/warehouses/A", label: "Warehouse A", icon: Warehouse, section: "warehouses", warehouseId: "A" },
     { to: "/warehouses/B", label: "Warehouse B", icon: Warehouse, section: "warehouses", warehouseId: "B" },
     { to: "/warehouses/C", label: "Warehouse C", icon: Warehouse, section: "warehouses", warehouseId: "C" },
     { to: "/warehouses/chemical", label: "Chemical", icon: FlaskConical, section: "warehouses" },
+    { to: "/warehouses/chemical-inventory", label: "Chemical Inventory", icon: Boxes, section: "warehouses" },
   ] },
   { label: "Finance & team", items: [
     { to: "/expenses", label: "Expenses", icon: Receipt, section: "expenses" },
@@ -52,6 +56,9 @@ const NAV_GROUPS = [
   ] },
   { label: "Administration", items: [
     { to: "/settings", label: "Settings", icon: Cog, section: "settings" },
+  ] },
+  { label: "COMPANY INVENTORY", collapsible: true, items: [
+    { to: "/company-inventory", label: "Company Inventory", icon: Boxes, section: "stock" },
   ] },
 ];
 
@@ -71,8 +78,12 @@ function WhatsAppFloatingButton() {
 
 function SidebarContent({ onNav, companyName, companyId, user }) {
   const reduceMotion = useReducedMotion();
-  const [oldExpressOpen, setOldExpressOpen] = useState(false);
-  const [warehousesOpen, setWarehousesOpen] = useState(false);
+  const [openGroups, setOpenGroups] = useState({});
+  const navigationId = (label) => ({
+    WAREHOUSES: "warehouses-navigation",
+    PRODUCTION: "production-navigation",
+    "COMPANY INVENTORY": "company-inventory-navigation",
+  }[label] || "old-express-navigation");
   const navGroups = NAV_GROUPS.map((group) => ({
     ...group,
     items: group.items.filter((item) =>
@@ -83,7 +94,7 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
         || user.allowed_sections?.includes(item.section)
         || (item.section === "grv" && user.allowed_sections?.includes("costs")))
     ),
-  })).filter((group) => (!group.companyId || group.companyId === companyId) && group.items.length);
+  })).filter((group) => (!group.companyId || group.companyId === companyId) && (!group.companyIds || group.companyIds.includes(companyId)) && group.items.length);
   return (
     <>
       <div className="flex items-center gap-3 px-5 h-16 border-b border-white/10">
@@ -97,7 +108,8 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
       </div>
       <nav className="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
         {navGroups.map((group) => {
-          const expanded = group.label === "WAREHOUSES" ? warehousesOpen : oldExpressOpen;
+          const expanded = !!openGroups[group.label];
+          const groupNavId = navigationId(group.label);
           const items = group.items.map((n) => (
             user?.is_worker
               && !user.allowed_sections?.includes(n.section)
@@ -122,14 +134,11 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
             {group.collapsible ? (
               <button
                 type="button"
-                onClick={() => {
-                  if (group.label === "WAREHOUSES") setWarehousesOpen((current) => !current);
-                  else setOldExpressOpen((current) => !current);
-                }}
+                onClick={() => setOpenGroups((current) => ({ ...current, [group.label]: !current[group.label] }))}
                 aria-expanded={expanded}
-                aria-controls={group.label === "WAREHOUSES" ? "warehouses-navigation" : "old-express-navigation"}
-                data-testid={group.label === "WAREHOUSES" ? "warehouses-navigation-toggle" : "old-express-navigation-toggle"}
-                className={`flex w-full items-center justify-between px-3 pt-3 pb-1 text-left text-[9px] font-bold uppercase tracking-[0.14em] ${group.label === "WAREHOUSES" || group.label === "Express Websites - Old Invoices and Payments" ? "text-yellow-300 hover:text-yellow-200" : "text-emerald-100/55 hover:text-emerald-50"}`}
+                aria-controls={groupNavId}
+                data-testid={`${groupNavId}-toggle`}
+                className="flex w-full items-center justify-between px-3 pt-3 pb-1 text-left text-[9px] font-bold uppercase tracking-[0.14em] text-yellow-300 hover:text-yellow-200"
               >
                 <span>{group.label}</span>
                 <ChevronDown size={13} className={`shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
@@ -141,7 +150,7 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
               <AnimatePresence initial={false}>
                 {expanded && (
                   <motion.div
-                    id={group.label === "WAREHOUSES" ? "warehouses-navigation" : "old-express-navigation"}
+                    id={groupNavId}
                     initial={reduceMotion ? false : { height: 0, opacity: 0 }}
                     animate={{ height: "auto", opacity: 1 }}
                     exit={{ height: 0, opacity: 0 }}

@@ -9,3 +9,11 @@ GRVs do not create Buyings, expenses, supplier invoices, or payments. The legacy
 Confirmed GRVs are immutable. Company administrators can reverse one with a required reason; the reversal posts separate stock movements and reopens the related purchase-order quantities when stock is available. Only draft, pending-inspection, or cancelled (including reversed) GRVs can be deleted. Deleting a confirmed GRV requires reversing it first. Owners may delete without supervisor approval; admins and workers need it outside SUPERIQFOAM. GRV records and the new indexes are scoped to the active company database/profile.
 
 PDF vouchers are generated in the browser. The current ERP has no document-upload storage, so GRVs retain delivery-note numbers and notes rather than uploaded attachments.
+
+## Raw-material GRVs
+
+A GRV has `purpose`: `selling` (default, posts to Stock) or `raw_material` (no stock item or purchase order needed).
+On confirmation raw-material quantities are added, idempotently via `raw_material_movements`, to:
+- `chemical_inventory` (Chemicals Quantity) when `is_chemical` is set and the company is SUPERIQFOAM or IQFOAM MANUFACTORING (Size must be a numeric capacity);
+- `company_inventory` otherwise (including chemicals for IQFOAM WHOLESALERS).
+Reversing the GRV subtracts the same quantities and fails if not enough remain.

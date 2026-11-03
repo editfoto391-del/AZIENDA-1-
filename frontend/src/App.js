@@ -29,6 +29,8 @@ const Stock = lazy(pageLoaders["/stock"]);
 const Production = lazy(pageLoaders["/production"]);
 const Warehouses = lazy(pageLoaders["/warehouses"]);
 const ChemicalStock = lazy(pageLoaders["/warehouses/chemical"]);
+const ChemicalInventory = lazy(pageLoaders["/warehouses/chemical-inventory"]);
+const CompanyInventory = lazy(pageLoaders["/company-inventory"]);
 const Attendance = lazy(pageLoaders["/attendance"]);
 const Fleet = lazy(pageLoaders["/fleet"]);
 const Expenses = lazy(pageLoaders["/expenses"]);
@@ -352,6 +354,8 @@ function AppRouter() {
             <Route path="/production" element={<Production />} />
             <Route path="/warehouses" element={<Warehouses />} />
             <Route path="/warehouses/chemical" element={<ChemicalStock />} />
+            <Route path="/warehouses/chemical-inventory" element={<ChemicalInventory />} />
+            <Route path="/company-inventory" element={<CompanyInventory />} />
             <Route path="/warehouses/:warehouseId" element={<Warehouses />} />
             <Route path="/attendance" element={<Attendance />} />
             <Route path="/fleet" element={<Fleet />} />

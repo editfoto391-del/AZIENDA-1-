@@ -48,6 +48,7 @@ const blankGRV = () => ({
   supplier_id: "", supplier_name: "", purchase_order_id: "",
   delivery_note_number: "", received_date: today(), received_by: "",
   warehouse: "", notes: "", items: [blankLine()],
+  purpose: "selling", is_chemical: false,
 });
 const lineValue = (line) => (Number(line.accepted_quantity) || 0) * (Number(line.unit_cost) || 0);
 
@@ -245,17 +246,12 @@ export default function GRV() {
   }, [refresh]);
 
   useEffect(() => {
-    Promise.all([
-      api.get("/suppliers"),
-      api.get("/grvs/purchase-orders"),
-      api.get("/stock"),
-      api.get("/settings"),
-    ]).then(([supplierList, orderList, stockList, businessSettings]) => {
-      setSuppliers(supplierList);
-      setOrders(orderList);
-      setStock(stockList);
-      setSettings(businessSettings || {});
-    }).catch((error) => toast.error(apiError(error)));
+    // Load each list independently so one failing request does not leave the suppliers empty.
+    const load = (path, apply) => api.get(path).then(apply).catch((error) => toast.error(apiError(error)));
+    load("/suppliers", (list) => setSuppliers(list || []));
+    load("/grvs/purchase-orders", (list) => setOrders(list || []));
+    load("/stock", (list) => setStock(list || []));
+    load("/settings", (value) => setSettings(value || {}));
   }, [companyId]);
 
   const totalValue = useMemo(
@@ -399,7 +395,11 @@ export default function GRV() {
     event.preventDefault();
     if (saving || !draft) return;
     if (!draft.supplier_id && !draft.supplier_name.trim()) return toast.error("Choose a supplier");
-    if (!draft.items.length || draft.items.some((line) => !line.stock_id)) return toast.error("Select a stock product for every line");
+    const raw = draft.purpose === "raw_material";
+    if (draft.items.some((line) => !Number(line.unit_cost)) && !window.confirm("Unit cost is missing on some lines. It is optional but recommended for accurate stock value. Save without it?")) return;
+    if (!draft.items.length) return toast.error("Add at least one product line");
+    if (!raw && draft.items.some((line) => !line.stock_id)) return toast.error("Select a stock product for every line");
+    if (raw && draft.items.some((line) => !(line.product || "").trim() || !(line.unit || "").trim())) return toast.error("Enter name and unit for every raw material");
     setSaving(true);
     try {
       const payload = {
@@ -610,8 +610,16 @@ export default function GRV() {
                 setDraft({ ...draft, supplier_id: event.target.value, supplier_name: supplier?.name || "" });
               }} data-testid="grv-supplier-select">
                 <option value="">Select supplier</option>
-                {suppliers.filter((supplier) => supplier.active !== false).map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
+                {suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}{supplier.active === false ? " (inactive)" : ""}</option>)}
               </Select>}
+            {!scanReceivingMode && !draft.purchase_order_id && !draft.id && <Select label="GRV type *" value={draft.purpose} onChange={(event) => setDraft({ ...draft, purpose: event.target.value, is_chemical: false, items: [blankLine()] })} data-testid="grv-purpose">
+              <option value="selling">Selling product (goes to Stock)</option>
+              <option value="raw_material">Raw material (goes to Company Inventory)</option>
+            </Select>}
+            {draft.purpose === "raw_material" && <label className="flex items-center gap-2 self-end pb-2 text-sm font-medium text-slate-700">
+              <input type="checkbox" checked={!!draft.is_chemical} disabled={!!draft.id} onChange={(event) => setDraft({ ...draft, is_chemical: event.target.checked })} data-testid="grv-is-chemical" />
+              Chemical {["superiqfoam", "iqfoam-manufactoring"].includes(companyId) ? "(goes to Chemicals Quantity)" : "(goes to Company Inventory)"}
+            </label>}
             <Input label="Received date *" type="date" value={draft.received_date} onChange={(event) => setDraft({ ...draft, received_date: event.target.value })} required data-testid="grv-received-date" />
             <Input label="Delivery note number" value={draft.delivery_note_number} onChange={(event) => setDraft({ ...draft, delivery_note_number: event.target.value })} data-testid="grv-delivery-note" />
             <Input label={scanReceivingMode ? "Scanned by *" : "Received by"} value={draft.received_by} onChange={(event) => setDraft({ ...draft, received_by: event.target.value })} required={scanReceivingMode} data-testid="grv-received-by" />
@@ -626,10 +634,10 @@ export default function GRV() {
               <thead><tr className="bg-slate-50 text-left text-slate-500">
                 <th className="p-2">Product / size</th>
                 {scanReceivingMode
-                  ? <><th className="p-2 text-right">Quantity received</th><th className="p-2 text-right">Unit cost (optional)</th><th className="p-2 text-right">Total value</th><th className="p-2"> </th></>
+                  ? <><th className="p-2 text-right">Quantity received</th><th className="p-2 text-right">Unit cost (optional, recommended)</th><th className="p-2 text-right">Total value</th><th className="p-2"> </th></>
                   : <><th className="p-2 text-right">Actually received</th><th className="p-2 text-right">Accepted</th>
                     <th className="p-2 text-right">Rejected</th><th className="p-2 text-right">Damaged</th>
-                    <th className="p-2 text-right">Unit cost</th><th className="p-2 text-right">Total value</th>
+                    <th className="p-2 text-right">Unit cost (optional, recommended)</th><th className="p-2 text-right">Total value</th>
                     {!draft.purchase_order_id && <th className="p-2"> </th>}</>}
               </tr></thead>
               <tbody>{draft.items.map((line, index) => (
@@ -637,6 +645,15 @@ export default function GRV() {
                   <td className="p-2">
                     {scanReceivingMode
                       ? <><span className="block font-semibold text-slate-800">{line.product || "Scan a product"}</span><span className="text-slate-500">{line.size}{line.product_code ? ` · ${line.product_code}` : ""}</span></>
+                      : draft.purpose === "raw_material"
+                      ? <div className="grid min-w-[360px] grid-cols-2 gap-1">
+                        <input placeholder="Name *" value={line.product} onChange={(event) => updateLine(index, "product", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-name-${index}`} />
+                        {draft.is_chemical
+                          ? <input placeholder="Container (Barrel...)" value={line.container_type || ""} onChange={(event) => updateLine(index, "container_type", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-container-${index}`} />
+                          : <input placeholder="Category (Glue, Tape...)" value={line.category || ""} onChange={(event) => updateLine(index, "category", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-category-${index}`} />}
+                        <input placeholder={draft.is_chemical ? "Capacity (number)" : "Size"} value={line.size} onChange={(event) => updateLine(index, "size", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-size-${index}`} />
+                        <input placeholder="Unit * (kg, L, pcs)" value={line.unit || ""} onChange={(event) => updateLine(index, "unit", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-unit-${index}`} />
+                      </div>
                       : !draft.purchase_order_id
                       ? <Select aria-label="Stock product" value={line.stock_id} onChange={(event) => chooseStock(index, event.target.value)} data-testid={`grv-stock-${index}`}>
                         <option value="">Select stock item</option>

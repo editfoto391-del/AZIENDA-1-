@@ -171,6 +171,12 @@ export default function Dashboard() {
   });
   const canManageWorkers = !!(user?.is_owner || user?.is_admin);
 
+  const [companyInventory, setCompanyInventory] = useState([]);
+  useEffect(() => {
+    if (user?.is_worker) return;
+    api.get("/company-inventory").then((items) => setCompanyInventory(items || [])).catch(() => setCompanyInventory([]));
+  }, [user]);
+
   useEffect(() => {
     if (!canManageWorkers) return;
     api.get("/companies/profiles")
@@ -883,6 +889,18 @@ export default function Dashboard() {
             </div>))}</div>
         </Section>
       </div>
+
+      {!user?.is_worker && <Section title="Company Inventory" icon={Boxes} action={<button onClick={() => nav("/company-inventory")} className="text-xs font-semibold text-primary flex items-center gap-1" data-testid="dashboard-company-inventory-link">View <ArrowRight size={12} /></button>}>
+        {companyInventory.length === 0 ? empty("No company inventory items yet.") : (
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" data-testid="dashboard-company-inventory">
+            {companyInventory.map((item) => (
+              <div key={item.id} className="flex justify-between rounded-lg border border-border px-3 py-2">
+                <span className="text-sm font-semibold text-slate-700">{item.name} <span className="text-slate-400 font-normal">· {item.category}{item.size ? ` ${item.size}` : ""}</span></span>
+                <span className="text-sm font-mono font-bold text-slate-700">{Number(item.total || 0).toLocaleString()} {item.unit}</span>
+              </div>))}
+          </div>
+        )}
+      </Section>}
 
       <Section title={`Invoices · ${periodLabel}`} icon={Receipt} action={<button onClick={() => nav("/invoices")} className="text-xs font-semibold text-primary flex items-center gap-1">View all <ArrowRight size={12} /></button>}>
         {d.recent_invoices.length === 0 ? empty("No invoices yet. Create your first invoice.") : (
