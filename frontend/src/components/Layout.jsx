@@ -102,7 +102,7 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
         </div>
         <div>
           <div className="text-white font-bold text-base font-display leading-tight">{companyName || "SUPER IQ-FOAM"}</div>
-          <div className="text-slate-300/55 text-[10px] font-semibold uppercase tracking-[0.16em]">Business Management</div>
+          <div className="text-emerald-100/55 text-[10px] font-semibold uppercase tracking-[0.16em]">Business Management</div>
         </div>
       </div>
       <nav className="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
@@ -113,15 +113,15 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
             user?.is_worker
               && !user.allowed_sections?.includes(n.section)
               ? <div key={n.to} aria-disabled="true" title="Your administrator has not granted access to this section" data-testid={`nav-locked-${n.label.toLowerCase()}`}
-                className="flex min-h-9 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium leading-tight text-slate-300/35">
+                className="flex min-h-9 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium leading-tight text-emerald-50/35">
                 <n.icon size={18} />
                 <span className="flex-1">{n.label}</span>
                 <LockKeyhole size={13} />
               </div>
               : <NavLink key={n.to} to={n.to} end={n.end} onClick={onNav} onMouseEnter={() => preloadPage(n.to)} onFocus={() => preloadPage(n.to)} onPointerDown={() => preloadPage(n.to)} data-testid={`nav-${n.label.toLowerCase()}`}
-                className={({ isActive }) => `relative isolate flex min-h-10 items-center gap-3 px-3 py-2 rounded-lg text-[13px] leading-tight font-medium transition-[color,background-color] duration-150 ${isActive ? "text-white" : "text-slate-200/70 hover:bg-white/5 hover:text-white"}`}>
+                className={({ isActive }) => `relative isolate flex min-h-10 items-center gap-3 px-3 py-2 rounded-lg text-[13px] leading-tight font-medium transition-[color,background-color] duration-150 ${isActive ? "text-white" : "text-emerald-50/65 hover:bg-white/5 hover:text-white"}`}>
                 {({ isActive }) => <>
-                  {isActive && <motion.span layoutId={`active-nav-${onNav ? "mobile" : "desktop"}`} className="pointer-events-none absolute inset-0 z-0 rounded-md bg-white/10 shadow-[inset_2px_0_0_hsl(var(--sidebar-accent))]" transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 480, damping: 38, mass: 0.5 }} />}
+                  {isActive && <motion.span layoutId={`active-nav-${onNav ? "mobile" : "desktop"}`} className="pointer-events-none absolute inset-0 z-0 rounded-md bg-white/10 shadow-[inset_2px_0_0_hsl(72_42%_65%)]" transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 480, damping: 38, mass: 0.5 }} />}
                   <n.icon className="relative z-10" size={18} />
                   <span className="relative z-10">{n.label}</span>
                 </>}
@@ -136,13 +136,13 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
                 aria-expanded={expanded}
                 aria-controls={groupNavId}
                 data-testid={`${groupNavId}-toggle`}
-                className="flex w-full items-center justify-between px-3 pt-3 pb-1 text-left text-[9px] font-bold uppercase tracking-[0.14em] text-teal-200 hover:text-teal-100"
+                className="flex w-full items-center justify-between px-3 pt-3 pb-1 text-left text-[9px] font-bold uppercase tracking-[0.14em] text-yellow-300 hover:text-yellow-200"
               >
                 <span>{group.label}</span>
                 <ChevronDown size={13} className={`shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
               </button>
             ) : (
-              <p className="px-3 pt-3 pb-1 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-300/45">{group.label}</p>
+              <p className="px-3 pt-3 pb-1 text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-100/45">{group.label}</p>
             )}
             {group.collapsible ? (
               <AnimatePresence initial={false}>
@@ -240,7 +240,7 @@ export default function Layout() {
   return (
     <div className="min-h-screen bg-background">
       {/* Desktop sidebar */}
-      <aside className="no-print hidden lg:flex fixed inset-y-0 left-0 w-64 flex-col border-r border-white/10 bg-[hsl(var(--sidebar))] shadow-[4px_0_18px_rgba(15,23,42,0.08)] z-30">
+      <aside className="no-print hidden lg:flex fixed inset-y-0 left-0 w-64 flex-col border-r border-white/10 bg-[hsl(222_47%_11%)] shadow-[4px_0_18px_rgba(15,23,42,0.08)] z-30">
         <SidebarContent companyName={activeBrandName} companyId={user?.company_id} user={user} />
       </aside>
 
@@ -249,7 +249,7 @@ export default function Layout() {
         {open && (
         <motion.div key="mobile-navigation" className="lg:hidden fixed inset-0 z-50 flex" initial={reduceMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={reduceMotion ? { duration: 0 } : { duration: 0.16 }}>
           <motion.div className="fixed inset-0 bg-slate-900/60" onClick={() => setOpen(false)} />
-          <motion.aside className="mobile-nav-panel liquid-glass-dark relative flex w-[min(18rem,calc(100vw-2.5rem))] flex-col bg-[hsl(var(--sidebar))]" style={{ paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }} initial={reduceMotion ? false : { x: -36, opacity: 0.85 }} animate={{ x: 0, opacity: 1 }} exit={{ x: -24, opacity: 0 }} transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 360, damping: 34, mass: 0.7 }}>
+          <motion.aside className="mobile-nav-panel liquid-glass-dark relative flex w-[min(18rem,calc(100vw-2.5rem))] flex-col bg-[hsl(222_47%_11%)]" style={{ paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }} initial={reduceMotion ? false : { x: -36, opacity: 0.85 }} animate={{ x: 0, opacity: 1 }} exit={{ x: -24, opacity: 0 }} transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 360, damping: 34, mass: 0.7 }}>
             <button className="absolute right-3 top-3 rounded-full p-2 text-slate-300 hover:bg-white/10" onClick={() => setOpen(false)} aria-label="Close navigation">
               <X size={22} />
             </button>
@@ -330,7 +330,7 @@ export default function Layout() {
             aria-label={resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
             title={resolvedTheme === "dark" ? "Light mode" : "Dark mode"}
             data-testid="theme-toggle"
-            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border/70 bg-white/70 text-slate-600 shadow-sm hover:bg-white hover:text-primary dark:bg-slate-800 dark:text-teal-200 dark:hover:bg-slate-700"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border/70 bg-white/70 text-slate-600 shadow-sm hover:bg-white hover:text-primary dark:bg-slate-800 dark:text-amber-200 dark:hover:bg-slate-700"
           >
             {resolvedTheme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
           </motion.button>
