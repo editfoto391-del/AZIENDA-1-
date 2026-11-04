@@ -34,7 +34,6 @@ export const UNIFIED_INVOICE_CATEGORIES = ["Simple/Mix color", "Ribbon Black", "
 
 const RIBBON_CATEGORIES = new Set(["Ribbon Black", "Ribbon Pink", "Candy"]);
 
-const priceCatalogZone = (zone, unifiedPriceList) => (unifiedPriceList ? 1 : zone);
 
 export const canonicalInvoiceCategory = (category) => {
   const value = String(category || "").trim();
@@ -68,9 +67,8 @@ const displayInvoiceCategory = (category) => {
 
 export const invoiceCategoriesFor = (zone, unifiedPriceList, prices, stockItems) => {
   const defaults = unifiedPriceList ? UNIFIED_INVOICE_CATEGORIES : INVOICE_CATEGORIES[zone] || [];
-  const catalogZone = priceCatalogZone(zone, unifiedPriceList);
   const configured = prices
-    .filter((price) => price.zone === catalogZone && price.active && price.category)
+    .filter((price) => price.zone === zone && price.active && price.category)
     .map((price) => displayInvoiceCategory(price.category));
   const stocked = stockItems
     .map((item) => displayInvoiceCategory(item.product))
@@ -80,9 +78,8 @@ export const invoiceCategoriesFor = (zone, unifiedPriceList, prices, stockItems)
 
 export const invoiceSizesFor = (zone, category, unifiedPriceList, prices, stockItems) => {
   const priceCategory = invoicePriceCategory(category, unifiedPriceList);
-  const catalogZone = priceCatalogZone(zone, unifiedPriceList);
   const pricedSizes = prices
-    .filter((price) => price.zone === catalogZone
+    .filter((price) => price.zone === zone
       && invoicePriceCategory(price.category, unifiedPriceList) === priceCategory
       && price.active)
     .map((price) => price.size);
@@ -97,8 +94,7 @@ export const lookupInvoicePrice = (zone, category, size, unifiedPriceList, price
     return { price: null, needsConfig: true };
   }
   const priceCategory = invoicePriceCategory(category, unifiedPriceList);
-  const catalogZone = priceCatalogZone(zone, unifiedPriceList);
-  const matches = prices.filter((price) => price.zone === catalogZone
+  const matches = prices.filter((price) => price.zone === zone
     && invoicePriceCategory(price.category, unifiedPriceList) === priceCategory
     && canonicalInvoiceSize(price.size) === canonicalInvoiceSize(size)
     && price.active);
