@@ -79,7 +79,6 @@ function WhatsAppFloatingButton() {
 
 function SidebarContent({ onNav, companyName, companyId, user }) {
   const reduceMotion = useReducedMotion();
-  const { resolvedTheme, setTheme } = useTheme();
   const [openGroups, setOpenGroups] = useState({});
   const navigationId = (label) => ({
     WAREHOUSES: "warehouses-navigation",
@@ -175,6 +174,7 @@ function AnimatedOutlet() {
 
 export default function Layout() {
   const { user, logout, switchCompany } = useAuth();
+  const { resolvedTheme, setTheme } = useTheme();
   const reduceMotion = useReducedMotion();
   const [open, setOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
