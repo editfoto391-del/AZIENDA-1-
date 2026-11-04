@@ -436,7 +436,7 @@ export default function InvoiceEditor({ express = false }) {
       const knownCustomer = customers.some((customer) => customer.active && customer.name.trim().toLowerCase() === inv.customer_name.trim().toLowerCase());
       const newProducts = [...new Map(invoiceItems
         .filter((item) => item.category?.trim() && item.size?.trim())
-        .filter((item) => !prices.some((price) => price.zone === (unifiedPriceList ? 1 : inv.zone) &&
+        .filter((item) => !prices.some((price) => price.zone === inv.zone &&
           invoicePriceCategory(price.category, unifiedPriceList) === invoicePriceCategory(item.category, unifiedPriceList)
           && canonicalInvoiceSize(price.size) === canonicalInvoiceSize(item.size)))
         .map((item) => [`${invoicePriceCategory(item.category, unifiedPriceList)}|${canonicalInvoiceSize(item.size)}`, item])).values()];
