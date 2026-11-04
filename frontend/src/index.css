@@ -57,8 +57,6 @@
 
 @layer base {
   :root {
-    --sidebar: 222 35% 12%;
-    --sidebar-accent: 174 52% 56%;
     --background: 45 22% 96%;
     --foreground: 158 25% 12%;
     --card: 0 0% 100%;
@@ -315,8 +313,6 @@ html.dark {
   --border: 220 15% 21%;
   --input: 220 15% 24%;
   --ring: 174 52% 50%;
-  --sidebar: 222 27% 9%;
-  --sidebar-accent: 174 56% 56%;
 }
 
 html.dark body {
