@@ -29,18 +29,11 @@ const WORKER_SECTION_OPTIONS = [
   ["customers", "Customers"], ["suppliers", "Suppliers"], ["buyings", "Buyings"],
   ["invoices", "Invoice"], ["orders", "Orders"], ["stock", "Stock"],
   ["production", "Production"], ["attendance", "Attendance"],
-  ["fleet", "Fleet"], ["expenses", "Expenses"], ["grv", "GRV"],
+  ["deliveries", "Deliveries"], ["fleet", "Fleet"], ["expenses", "Expenses"],
+  ["costs", "Costs report"], ["grv", "GRV"],
   ["daily-report", "Daily Report"], ["client-payments", "Clients payment and balances"],
   ["settings", "Settings"],
-  ["warehouses", "Warehouses"],
-];
-const WORKER_SUPERVISOR_ACTION_OPTIONS = [
-  ["invoice_edit", "Edit invoices"],
-  ["price_edit", "Add or change prices"],
-  ["price_delete", "Delete prices"],
-  ["customer_delete", "Delete customers"],
-  ["stock_delete", "Delete stock items"],
-  ["balance_payment_delete", "Delete Other Balance payments"],
+  ["warehouses", "Warehouses, Chemical Inventory & Usage Log"],
 ];
 const SUPERVISOR_ACTION_SECTIONS = {
   invoice_edit: ["invoices"],
@@ -48,8 +41,58 @@ const SUPERVISOR_ACTION_SECTIONS = {
   price_delete: ["settings"],
   customer_delete: ["customers"],
   stock_delete: ["stock"],
+  production_block_record: ["production", "warehouses"],
   balance_payment_delete: ["customers", "client-payments"],
 };
+const WORKER_SECTION_OPERATIONS = {
+  customers: [["create", "Add customer"], ["update", "Edit customer"], ["delete", "Delete customer"]],
+  suppliers: [["create", "Add supplier"], ["update", "Edit supplier"], ["delete", "Delete supplier"]],
+  buyings: [["create", "Record purchase"], ["update", "Edit purchase"], ["delete", "Delete purchase"]],
+  invoices: [["create", "Create invoice"], ["update", "Edit / void invoice"], ["delete", "Delete invoice"]],
+  orders: [["create", "Create order"], ["update", "Edit order"], ["delete", "Delete order"]],
+  stock: [["create", "Add stock"], ["update", "Adjust stock"], ["delete", "Delete stock item"]],
+  production: [["create", "Record production"], ["update", "Edit production"], ["delete", "Delete production record"]],
+  attendance: [["create", "Record attendance"], ["update", "Edit attendance"], ["delete", "Delete attendance record"]],
+  deliveries: [["create", "Schedule delivery"], ["update", "Edit delivery"], ["delete", "Delete delivery"]],
+  fleet: [["create", "Add fleet record"], ["update", "Edit fleet record"], ["delete", "Delete fleet record"]],
+  expenses: [["create", "Record expense"], ["update", "Edit expense"], ["delete", "Delete expense"]],
+  costs: [],
+  grv: [["create", "Create GRV"], ["update", "Edit GRV"], ["delete", "Delete GRV"]],
+  "daily-report": [["update", "Edit daily report"]],
+  "client-payments": [["create", "Record payment"], ["update", "Reverse payment"], ["delete", "Delete payment"]],
+  settings: [["create", "Add price / setting"], ["update", "Change price / setting"], ["delete", "Delete price / setting"]],
+  warehouses: [["create", "Add warehouse record"], ["update", "Edit warehouse record"], ["delete", "Delete warehouse record"]],
+};
+const WORKER_WRITE_OPTIONS = [
+  ["deny", "No access"],
+  ["allow", "Without password"],
+  ["supervisor", "With supervisor password"],
+];
+const LEGACY_WORKER_ACTIONS = {
+  invoice_edit: [["invoices", "update"]],
+  price_edit: [["settings", "create"], ["settings", "update"]],
+  price_delete: [["settings", "delete"]],
+  customer_delete: [["customers", "delete"]],
+  stock_delete: [["stock", "delete"]],
+  production_block_record: [["production", "create"]],
+  balance_payment_delete: [["client-payments", "delete"]],
+};
+const defaultWorkerWritePermissions = (sections, current = {}, legacyActions = []) =>
+  Object.fromEntries(sections.map((section) => [section, Object.fromEntries(
+    ["create", "update", "delete"].map((operation) => {
+      const sectionOperations = WORKER_SECTION_OPERATIONS[section] || [];
+      if (!sectionOperations.some(([availableOperation]) => availableOperation === operation)) {
+        return [operation, "deny"];
+      }
+      const prior = current[section]?.[operation];
+      const legacyRequiresPassword = legacyActions.some((action) =>
+        LEGACY_WORKER_ACTIONS[action]?.some(([legacySection, legacyOperation]) =>
+          legacySection === section && legacyOperation === operation));
+      return [operation, WORKER_WRITE_OPTIONS.some(([value]) => value === prior)
+        ? prior
+        : legacyRequiresPassword ? "supervisor" : "allow"];
+    }),
+  )]));
 const MANUFACTURING_COMPANY_ID = "iqfoam-manufactoring";
 
 const currentMonth = today().slice(0, 7);
@@ -168,6 +211,7 @@ export default function Dashboard() {
     name: "", username: "", email: "", worker_role: "", password: "",
     company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
     is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [],
+    write_permissions: defaultWorkerWritePermissions(["invoices"]),
   });
   const canManageWorkers = !!(user?.is_owner || user?.is_admin);
 
@@ -284,6 +328,7 @@ export default function Dashboard() {
           is_supervisor: workerDraft.is_supervisor,
           warehouse_ids: workerDraft.warehouse_ids,
           supervisor_password_actions: workerDraft.supervisor_password_actions,
+          write_permissions: workerDraft.write_permissions,
         });
         setWorkers((current) => current.map((worker) => worker.id === updated.id ? updated : worker));
         toast.success("Worker access updated");
@@ -296,6 +341,7 @@ export default function Dashboard() {
         name: "", username: "", email: "", worker_role: "", password: "",
         company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
         is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [],
+        write_permissions: defaultWorkerWritePermissions(["invoices"]),
       });
       setWorkerModalOpen(false);
     } catch (error) {
@@ -309,12 +355,16 @@ export default function Dashboard() {
     const nextSections = removingSection
       ? current.allowed_sections.filter((item) => item !== section)
       : [...current.allowed_sections, section];
+    const writePermissions = { ...current.write_permissions };
+    if (removingSection) delete writePermissions[section];
+    else writePermissions[section] = defaultWorkerWritePermissions([section])[section];
     return {
       ...current,
       allowed_sections: nextSections,
       warehouse_ids: nextSections.includes("warehouses") ? current.warehouse_ids : [],
       supervisor_password_actions: current.supervisor_password_actions.filter((item) =>
         SUPERVISOR_ACTION_SECTIONS[item].some((required) => nextSections.includes(required))),
+      write_permissions: writePermissions,
     };
   });
   const activeCompanyName = companies.find((company) => company.id === workerDraft.company_id)?.name || workerDraft.company_id;
@@ -324,6 +374,9 @@ export default function Dashboard() {
       company_id: companyId,
       warehouse_ids: [],
       supervisor_password_actions: [],
+      write_permissions: Object.fromEntries(Object.entries(current.write_permissions)
+        .filter(([section]) => (companyId === MANUFACTURING_COMPANY_ID || section !== "warehouses")
+          && current.allowed_sections.includes(section))),
       allowed_sections: companyId === MANUFACTURING_COMPANY_ID
         ? current.allowed_sections
         : current.allowed_sections.filter((section) => section !== "warehouses"),
@@ -338,11 +391,16 @@ export default function Dashboard() {
       worker_role: worker.worker_role,
       password: "",
       company_id: worker.company_id,
-      allowed_sections: [...new Set((worker.allowed_sections || []).map((section) => section === "costs" ? "grv" : section))],
+      allowed_sections: [...new Set(worker.allowed_sections || [])],
       stock_only: worker.stock_only === true,
       is_supervisor: worker.is_supervisor === true,
       warehouse_ids: worker.warehouse_ids || [],
       supervisor_password_actions: worker.supervisor_password_actions || [],
+      write_permissions: defaultWorkerWritePermissions(
+        [...new Set(worker.allowed_sections || [])],
+        worker.write_permissions || {},
+        worker.supervisor_password_actions || [],
+      ),
     });
     setWorkerModalOpen(true);
   };
@@ -461,7 +519,7 @@ export default function Dashboard() {
         <h1 className="text-3xl sm:text-4xl font-normal text-slate-900 font-display mt-1">Business overview</h1>
         <p className="text-sm text-slate-500 mt-1">Performance, cash flow and daily operations</p>
         </div>
-        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [] }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
+        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [], write_permissions: defaultWorkerWritePermissions(["invoices"]) }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/70 p-3" data-testid="dashboard-period-controls">
         <div className="flex flex-wrap gap-1.5" role="group" aria-label="Dashboard date range">
@@ -628,41 +686,9 @@ export default function Dashboard() {
             />
             <span>
               <span className="block font-semibold">Make Supervisor</span>
-              <span className="block text-xs text-slate-500">Marks this worker as a supervisor. Manufacturing supervisors can be required to enter the Supervisor Password for the sensitive actions selected below.</span>
+              <span className="block text-xs text-slate-500">Marks this worker as a designated supervisor. Choose password requirements for individual actions in the permissions table.</span>
             </span>
           </label>
-          {workerDraft.company_id === MANUFACTURING_COMPANY_ID && workerDraft.is_supervisor && <fieldset className="space-y-2 rounded-md border border-amber-200 bg-amber-50/40 p-3" data-testid="worker-supervisor-password-actions">
-            <legend className="px-1 text-sm font-semibold text-slate-700">Require Supervisor Password for</legend>
-            <p className="text-xs text-slate-500">Selected actions require the company Supervisor Password every time. Unselected actions do not prompt for it.</p>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {WORKER_SUPERVISOR_ACTION_OPTIONS.map(([action, label]) => {
-                const requiredSections = SUPERVISOR_ACTION_SECTIONS[action];
-                const requiredSection = requiredSections[0];
-                const hasSection = requiredSections.some((section) => workerDraft.allowed_sections.includes(section));
-                return (
-                  <label key={action} className="flex items-center gap-2 rounded-md border border-amber-200/70 bg-white px-3 py-2 text-sm text-slate-700">
-                    <input
-                      type="checkbox"
-                      checked={workerDraft.supervisor_password_actions.includes(action)}
-                      onChange={() => setWorkerDraft((current) => {
-                        const selected = current.supervisor_password_actions.includes(action);
-                        const needsSection = !requiredSections.some((section) => current.allowed_sections.includes(section));
-                        return {
-                          ...current,
-                          allowed_sections: !selected && needsSection ? [...current.allowed_sections, requiredSection] : current.allowed_sections,
-                          supervisor_password_actions: selected
-                            ? current.supervisor_password_actions.filter((item) => item !== action)
-                            : [...current.supervisor_password_actions, action],
-                        };
-                      })}
-                      data-testid={`worker-supervisor-action-${action}`}
-                    />
-                    {label}{!hasSection && <span className="text-xs text-slate-400">- enables {WORKER_SECTION_OPTIONS.find(([key]) => key === requiredSection)?.[1] || requiredSection} access</span>}
-                  </label>
-                );
-              })}
-            </div>
-          </fieldset>}
           <label className="flex items-start gap-2 rounded-md border border-border px-3 py-2 text-sm text-slate-700">
             <input type="checkbox" checked={workerDraft.stock_only} onChange={(event) => setWorkerDraft((current) => ({
               ...current,
@@ -672,6 +698,9 @@ export default function Dashboard() {
               warehouse_ids: event.target.checked ? [] : current.warehouse_ids,
               is_supervisor: event.target.checked ? false : current.is_supervisor,
               supervisor_password_actions: event.target.checked ? [] : current.supervisor_password_actions,
+              write_permissions: event.target.checked
+                ? { stock: current.write_permissions.stock || defaultWorkerWritePermissions(["stock"]).stock }
+                : current.write_permissions,
             }))} data-testid="worker-stock-only" />
             <span><span className="block font-semibold">Stock-only sub-user</span><span className="block text-xs text-slate-500">Can access stock only; selling prices are visible, purchase costs are hidden.</span></span>
           </label>
@@ -686,6 +715,47 @@ export default function Dashboard() {
                   <input type="checkbox" checked={workerDraft.allowed_sections.includes(section)} onChange={() => toggleWorkerSection(section)} data-testid={`worker-section-${section}`} />
                   {label}
                 </label>
+              ))}
+            </div>
+          </fieldset>
+          <fieldset className="space-y-3 rounded-md border border-border p-3" data-testid="worker-write-permissions">
+            <legend className="px-1 text-sm font-semibold text-slate-700">Section actions and password rules</legend>
+            <p className="text-xs text-slate-500">Each section shows its relevant actions. For each one, choose no access, access without a password, or require the company Supervisor Password.</p>
+            <div className="space-y-2">
+              {workerDraft.allowed_sections.map((section) => (
+                <div key={section} className="space-y-3 rounded-md border border-border/70 bg-slate-50 p-3">
+                  <p className="self-center text-sm font-semibold text-slate-700">
+                    {WORKER_SECTION_OPTIONS.find(([key]) => key === section)?.[1] || section}
+                  </p>
+                  {(WORKER_SECTION_OPERATIONS[section] || []).length > 0 ? (
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                      {WORKER_SECTION_OPERATIONS[section].map(([operation, label]) => (
+                        <label key={operation} className="space-y-1 text-xs font-medium text-slate-500">
+                          <span>{label}</span>
+                          <select
+                            value={workerDraft.write_permissions[section]?.[operation] || "deny"}
+                            onChange={(event) => setWorkerDraft((current) => ({
+                              ...current,
+                              write_permissions: {
+                                ...current.write_permissions,
+                                [section]: {
+                                  ...current.write_permissions[section],
+                                  [operation]: event.target.value,
+                                },
+                              },
+                            }))}
+                            data-testid={`worker-permission-${section}-${operation}`}
+                            className="w-full rounded-md border border-input bg-white px-2 py-2 text-sm text-slate-700"
+                          >
+                            {WORKER_WRITE_OPTIONS.map(([value, optionLabel]) => <option key={value} value={value}>{optionLabel}</option>)}
+                          </select>
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-500">Read-only section; no create, edit, or delete actions.</p>
+                  )}
+                </div>
               ))}
             </div>
           </fieldset>

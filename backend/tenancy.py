@@ -5,6 +5,7 @@ from copy import deepcopy
 DEFAULT_COMPANY_ID = "superiqfoam"
 UNIFIED_PRICE_COMPANIES = frozenset({"iqfoam-manufactoring", "iqfoam-whole-sallers"})
 active_company_id = ContextVar("active_company_id", default=None)
+active_mongo_session = ContextVar("active_mongo_session", default=None)
 
 
 def uses_unified_price_list(company_id):
@@ -78,6 +79,9 @@ class ScopedCollection:
             return method
 
         def scoped_call(*args, **kwargs):
+            session = active_mongo_session.get()
+            if session is not None:
+                kwargs.setdefault("session", session)
             company_id = active_company_id.get()
             if not company_id:
                 return method(*args, **kwargs)

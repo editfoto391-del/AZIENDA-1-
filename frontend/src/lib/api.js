@@ -1,11 +1,16 @@
 import axios from "axios";
 import { GET_CACHE_MS, isCacheEntryFresh, pruneExpiredCache } from "./apiCache.mjs";
+import { activeAuthToken } from "./activeAuthToken.mjs";
 
 const BASE = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const client = axios.create({ baseURL: BASE, withCredentials: true });
 const pendingGets = new Map();
 const cachedGets = new Map();
 let supervisorPromptQueue = Promise.resolve();
+
+function activeToken() {
+  return activeAuthToken(localStorage, sessionStorage);
+}
 
 function requestSupervisorPassword() {
   const prompt = supervisorPromptQueue.then(() => new Promise((resolve) => {
@@ -25,7 +30,50 @@ const SUPERVISOR_ROUTES = [
   ["DELETE", /^payments\/[^/]+\/other-balance$/, "balance_payment_delete"],
 ];
 
+const WORKER_SECTION_PREFIXES = [
+  ["reports/costs", "costs"], ["simple-production", "production"],
+  ["piece-production", "production"], ["cost-records", "costs"],
+  ["intercompany", "orders"], ["employees", "attendance"],
+  ["salaries", "attendance"], ["deliveries", "deliveries"],
+  ["customers", "customers"], ["suppliers", "suppliers"], ["buyings", "buyings"],
+  ["invoices", "invoices"], ["orders", "orders"], ["stock", "stock"],
+  ["production", "production"], ["attendance", "attendance"], ["drivers", "settings"],
+  ["vehicles", "fleet"], ["spareparts", "fleet"], ["fleet", "fleet"],
+  ["expenses", "expenses"], ["grvs", "grv"], ["grv", "grv"],
+  ["daily-report", "daily-report"], ["prices", "settings"], ["settings", "settings"],
+  ["payments", "client-payments"], ["dashboard", "dashboard"], ["warehouses", "warehouses"],
+];
+
+function workerWriteActionForRequest(config) {
+  const path = String(config.url || "").split("?")[0].replace(/^\/api\//, "").replace(/\/+$/, "");
+  const method = String(config.method || "GET").toUpperCase();
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(method) || /\/authorize(?:-|$)/.test(path)) return null;
+  const section = /^invoices\/[^/]+\/payments$/.test(path)
+    ? "client-payments"
+    : WORKER_SECTION_PREFIXES.find(([prefix]) => path === prefix || path.startsWith(`${prefix}/`))?.[1];
+  if (!section) return null;
+  let operation = method === "DELETE" ? "delete" : ["PUT", "PATCH"].includes(method) ? "update" : "create";
+  if (
+    /^invoices\/[^/]+\/(issue|void|daily-report)$/.test(path)
+    || /^payments\/[^/]+\/(reverse|daily-report)$/.test(path)
+    || path === "daily-report"
+  ) operation = "update";
+  return `${section}:${operation}`;
+}
+
 function supervisorActionForRequest(config) {
+  if (sessionStorage.getItem("erp-worker-access-session") === "true") {
+    const workerAction = workerWriteActionForRequest(config);
+    if (workerAction) {
+      try {
+        const [section, operation] = workerAction.split(":");
+        const permissions = JSON.parse(sessionStorage.getItem("erp-worker-write-permissions") || "{}");
+        if (permissions[section]?.[operation] === "supervisor") return workerAction;
+      } catch {
+        return null;
+      }
+    }
+  }
   const path = String(config.url || "").split("?")[0].replace(/^\/api\//, "").replace(/\/+$/, "");
   const method = String(config.method || "GET").toUpperCase();
   return SUPERVISOR_ROUTES.find(([m, pattern]) => m === method && pattern.test(path))?.[2];
@@ -39,7 +87,7 @@ export function invalidateGetCache() {
 }
 
 client.interceptors.request.use((cfg) => {
-  const t = localStorage.getItem("token");
+  const t = activeToken();
   if (t) cfg.headers.Authorization = `Bearer ${t}`;
   return cfg;
 });
@@ -49,7 +97,18 @@ client.interceptors.response.use(
   async (err) => {
     const isPublicInvoiceRequest = err.config?.url?.includes("/public/invoices/");
     if (err.response?.status === 401 && err.config?.url && !err.config.url.includes("/auth/") && !isPublicInvoiceRequest) {
-      localStorage.removeItem("token");
+      if (sessionStorage.getItem("erp-worker-access-session") === "true") {
+        const workerEntry = sessionStorage.getItem("erp-worker-access-entry");
+        sessionStorage.removeItem("erp-worker-session-token");
+        sessionStorage.removeItem("erp-worker-access-session");
+        sessionStorage.removeItem("erp-worker-write-permissions");
+        if (workerEntry && window.location.pathname !== workerEntry) {
+          window.location.href = workerEntry;
+          return Promise.reject(err);
+        }
+      } else {
+        localStorage.removeItem("token");
+      }
       if (window.location.pathname !== "/login") window.location.href = "/login";
     }
     if (
@@ -81,7 +140,7 @@ client.interceptors.response.use(
 
 export const api = {
   get: (u, params) => {
-    const token = localStorage.getItem("token") || "anonymous";
+    const token = activeToken() || "anonymous";
     const key = `${token}:${client.getUri({ url: u, params })}`;
     const cached = cachedGets.get(key);
     if (isCacheEntryFresh(cached, Date.now())) return Promise.resolve(cached.data);
@@ -105,7 +164,7 @@ export const api = {
   getBlob: (u) => client.get(u, { responseType: "blob" }).then((r) => r.data),
   post: (u, d) => client.post(u, d).then((r) => { invalidateGetCache(); return r.data; }),
   logout: () => {
-    const token = localStorage.getItem("token");
+    const token = activeToken();
     return client.post("/auth/logout", {}, {
       timeout: 5000,
       ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),

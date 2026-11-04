@@ -249,7 +249,7 @@ export default function Stock() {
             {!user?.is_worker && (() => {
               const value = getStockValueTotal(valueZone);
               return (
-                <div className="bg-white rounded-md p-3 border border-slate-300 border-2">
+                <div className="col-span-2 bg-white rounded-md p-3 border border-slate-300 border-2">
                   <label htmlFor="stock-value-zone" className="block text-xs text-slate-600 font-semibold">Total Stock Value</label>
                   {!unifiedPriceList && (
                     <select id="stock-value-zone" value={valueZone} onChange={(event) => setValueZone(Number(event.target.value))}

@@ -3,9 +3,10 @@ import test from "node:test";
 import { GET_CACHE_MS, isCacheEntryFresh, pruneExpiredCache } from "./apiCache.mjs";
 
 test("cached GET data stays fresh until the configured expiry boundary", () => {
-  const entry = { expiresAt: 50_000 + GET_CACHE_MS };
-  assert.equal(isCacheEntryFresh(entry, 79_999), true);
-  assert.equal(isCacheEntryFresh(entry, 80_000), false);
+  const cachedAt = 50_000;
+  const entry = { expiresAt: cachedAt + GET_CACHE_MS };
+  assert.equal(isCacheEntryFresh(entry, cachedAt + GET_CACHE_MS - 1), true);
+  assert.equal(isCacheEntryFresh(entry, cachedAt + GET_CACHE_MS), false);
   assert.equal(isCacheEntryFresh(null, 50_000), false);
 });
 

@@ -7,9 +7,20 @@ import { Factory, Plus, Save, Trash2, Pencil, RotateCcw } from "lucide-react";
 import BarcodeScanner from "@/components/BarcodeScanner";
 import { useAuth } from "@/context/AuthContext";
 
+const unitFactor = (unit = "") => {
+  const normalized = unit.trim().toLowerCase();
+  if (["g", "gram", "grams"].includes(normalized)) return ["mass", 1];
+  if (["kg", "kilogram", "kilograms"].includes(normalized)) return ["mass", 1000];
+  if (["ml", "milliliter", "milliliters"].includes(normalized)) return ["volume", 1];
+  if (["l", "liter", "liters"].includes(normalized)) return ["volume", 1000];
+  return [normalized, 1];
+};
 export default function Production() {
   const { user } = useAuth();
   const canPermanentlyDelete = user?.is_admin || user?.role === "admin" || user?.is_owner;
+  const canRecordBlockProduction = user?.company_id === "iqfoam-manufactoring"
+    && (!user?.is_worker || (user?.is_supervisor && user?.allowed_sections?.includes("warehouses")));
+  const canManageRecipes = !user?.is_worker && (user?.is_owner || user?.is_admin || user?.is_company_owner);
   const [data, setData] = useState(null);
   const emptyForm = () => ({ date: today(), blocks: [{ block: "White", quantity: "" }], notes: "" });
   const [form, setForm] = useState(emptyForm);
@@ -19,6 +30,19 @@ export default function Production() {
   const [cutOpen, setCutOpen] = useState(false);
   const [cutForm, setCutForm] = useState({ block: "", size: "" });
   const [cutScanProduct, setCutScanProduct] = useState(null);
+  const [blockRecipes, setBlockRecipes] = useState([]);
+  const [blockProductions, setBlockProductions] = useState([]);
+  const [chemicalInventory, setChemicalInventory] = useState([]);
+  const [recipePrompt, setRecipePrompt] = useState(null);
+  const [recipeEditor, setRecipeEditor] = useState(null);
+  const [recipeHistory, setRecipeHistory] = useState(null);
+  const [blockProductionSaving, setBlockProductionSaving] = useState(false);
+  const [blockRequestId, setBlockRequestId] = useState(() => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+  const [blockProduction, setBlockProduction] = useState({
+    date: today(), recipe_id: "", block_type: "", custom_mode: false, quantity: "1",
+    automatic: false, components: [], invoice_reference: "", supplier: "", document_date: "",
+  });
+  const [recipeDraft, setRecipeDraft] = useState({ block_type: "", components: [], indicated_total_cost: "" });
   const [busy, setBusy] = useState(false);
   const [cutBusy, setCutBusy] = useState(false);
   const load = () => {
@@ -26,10 +50,207 @@ export default function Production() {
     api.get(showArchivedCuttings ? "/production/block-cutting?include_archived=true" : "/production/block-cutting")
       .then(setBlockCuttings).catch((e) => toast.error(apiError(e)));
     api.get("/stock").then(setStock).catch((e) => toast.error(apiError(e)));
+    if (canRecordBlockProduction) {
+      api.getUncached("/production/block-recipes").then(setBlockRecipes).catch((e) => toast.error(apiError(e)));
+      api.getUncached("/production/block-productions").then(setBlockProductions).catch((e) => toast.error(apiError(e)));
+      api.getUncached("/warehouses/chemical/inventory").then(setChemicalInventory).catch((e) => toast.error(apiError(e)));
+    }
   };
-  useEffect(() => { load(); }, [showArchivedCuttings]);
+  useEffect(() => { load(); }, [showArchivedCuttings, canRecordBlockProduction]);
 
   const availableSizes = [...new Set(stock.map((item) => item.size).filter(Boolean))].sort();
+  const selectedRecipe = blockRecipes.find((recipe) => recipe.id === blockProduction.recipe_id);
+  const availableChemicalNames = [...new Set(chemicalInventory.map((item) => item.chemical))].sort();
+  const remainingChemicalBase = new Map();
+  const productionMaterialSummary = blockProduction.components.map((component) => {
+    const required = (Number(component.quantity) || 0) * (Number(blockProduction.quantity) || 0);
+    const [kind, factor] = unitFactor(component.unit || "");
+    const key = `${component.chemical?.trim().toLowerCase()}|${kind}`;
+    if (!component.chemical || !component.unit) return { ...component, required, available: null, missing: null };
+    if (!remainingChemicalBase.has(key)) {
+      const availableBase = chemicalInventory
+        .filter((item) => item.chemical?.trim().toLowerCase() === component.chemical.trim().toLowerCase())
+        .reduce((total, item) => {
+          const [itemKind, itemFactor] = unitFactor(item.unit);
+          if (itemKind !== kind) return total;
+          const available = Number(item.available_quantity ?? (item.capacity * item.count - (item.quantity_used || 0)));
+          return total + available * itemFactor;
+        }, 0);
+      remainingChemicalBase.set(key, availableBase);
+    }
+    const available = remainingChemicalBase.get(key) / factor;
+    const requiredBase = required * factor;
+    const missing = Math.max(0, requiredBase - remainingChemicalBase.get(key)) / factor;
+    remainingChemicalBase.set(key, Math.max(0, remainingChemicalBase.get(key) - requiredBase));
+    return {
+      ...component,
+      required,
+      available,
+      missing,
+    };
+  });
+  const hasInsufficientChemical = productionMaterialSummary.some((item) =>
+    item.available == null || item.missing > 1e-8);
+  const knownCostPerBlock = blockProduction.components.reduce(
+    (total, component) => total + (component.cost === "" || component.cost == null ? 0 : Number(component.cost) || 0), 0,
+  );
+  const missingCosts = blockProduction.components
+    .filter((component) => component.cost === "" || component.cost == null)
+    .map((component) => component.label || component.chemical || "Unnamed material");
+
+  const selectBlockType = (blockType) => {
+    const recipe = blockRecipes.find((item) => item.block_type === blockType);
+    if (recipe) {
+      setRecipePrompt(recipe);
+      return;
+    }
+    setBlockProduction((current) => ({
+      ...current, recipe_id: "", block_type: blockType === "CUSTOM / MANUAL FORMULA" ? "" : blockType,
+      custom_mode: blockType === "CUSTOM / MANUAL FORMULA", automatic: false,
+      components: [{ chemical: "", quantity: "", unit: "", cost: "" }],
+    }));
+  };
+
+  const chooseRecipeMode = (automatic) => {
+    if (!recipePrompt) return;
+    const recipe = recipePrompt;
+    setBlockProduction((current) => ({
+      ...current,
+      recipe_id: automatic ? recipe.id : "",
+      block_type: recipe.block_type,
+      custom_mode: false,
+      automatic,
+      components: automatic
+        ? recipe.components.map((component) => ({
+          ...component,
+          quantity: String(component.quantity),
+          unit: component.unit || "",
+          cost: component.cost == null ? "" : String(component.cost),
+        }))
+        : recipe.components.map((component) => ({
+          chemical: component.chemical,
+          label: component.label || "",
+          quantity: "",
+          unit: "",
+          cost: "",
+        })),
+    }));
+    setRecipePrompt(null);
+  };
+
+  const updateProductionComponent = (index, patch) => setBlockProduction((current) => ({
+    ...current,
+    components: current.components.map((component, row) => row === index ? { ...component, ...patch } : component),
+  }));
+
+  const saveBlockProduction = async () => {
+    const quantity = Number(blockProduction.quantity);
+    if (!Number.isInteger(quantity) || quantity <= 0) return toast.error("Enter a positive number of blocks");
+    const components = blockProduction.components.map((component) => ({
+      ...component,
+      quantity: Number(component.quantity),
+      cost: component.cost === "" || component.cost == null ? null : Number(component.cost),
+      unit: String(component.unit || "").trim(),
+    }));
+    if (components.some((component) => !component.chemical.trim() || !Number.isFinite(component.quantity) || component.quantity <= 0 || !component.unit)) {
+      return toast.error("Enter a valid chemical, quantity and confirmed unit for every formula line");
+    }
+    if (components.some((component) => component.cost != null && (!Number.isFinite(component.cost) || component.cost < 0))) {
+      return toast.error("Enter valid non-negative component costs");
+    }
+    setBlockProductionSaving(true);
+    try {
+      await api.post("/production/block-productions", {
+        request_id: blockRequestId,
+        date: blockProduction.date,
+        recipe_id: blockProduction.recipe_id || null,
+        block_type: blockProduction.block_type,
+        quantity,
+        automatic: blockProduction.automatic,
+        components,
+        invoice_reference: blockProduction.invoice_reference.trim(),
+        supplier: blockProduction.supplier.trim(),
+        document_date: blockProduction.document_date || null,
+      });
+      toast.success("Production recorded; finished stock and chemical usage updated");
+      if (blockProduction.custom_mode && window.confirm("Vuoi salvare questa formula per utilizzarla nelle prossime produzioni?")) {
+        try {
+          await api.post("/production/block-recipes", {
+            block_type: blockProduction.block_type,
+            components: components.map(({ chemical, quantity, unit, cost, label }) => ({
+              chemical, quantity, unit, cost, label,
+            })),
+            indicated_total_cost: null,
+          });
+          toast.success("Formula saved for future productions");
+          api.getUncached("/production/block-recipes").then(setBlockRecipes).catch((error) => toast.error(apiError(error)));
+        } catch (error) {
+          toast.error(`Production was recorded, but the formula was not saved: ${apiError(error)}`);
+        }
+      }
+      setBlockProduction({
+        date: today(), recipe_id: "", block_type: "", custom_mode: false, quantity: "1",
+        automatic: false, components: [], invoice_reference: "", supplier: "", document_date: "",
+      });
+      setBlockRequestId(globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+      load();
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setBlockProductionSaving(false);
+    }
+  };
+
+  const openRecipeEditor = (recipe = null) => {
+    setRecipeDraft(recipe ? {
+      id: recipe.id,
+      block_type: recipe.block_type,
+      components: recipe.components.map((component) => ({ ...component })),
+      indicated_total_cost: recipe.indicated_total_cost == null ? "" : String(recipe.indicated_total_cost),
+    } : {
+      block_type: "",
+      components: [{ chemical: "", quantity: "", unit: "", cost: "" }],
+      indicated_total_cost: "",
+    });
+    setRecipeEditor(true);
+  };
+  const saveRecipeDraft = async (event) => {
+    event.preventDefault();
+    const body = {
+      block_type: recipeDraft.block_type.trim(),
+      components: recipeDraft.components.map((component) => ({
+        chemical: component.chemical.trim(),
+        quantity: Number(component.quantity),
+        unit: String(component.unit || "").trim(),
+        unit_confirmation_required: !String(component.unit || "").trim(),
+        cost: component.cost === "" || component.cost == null ? null : Number(component.cost),
+        label: component.label || "",
+      })),
+      indicated_total_cost: recipeDraft.indicated_total_cost === "" ? null : Number(recipeDraft.indicated_total_cost),
+    };
+    if (!body.block_type || !body.components.length || body.components.some((component) =>
+      !component.chemical || !Number.isFinite(component.quantity) || component.quantity <= 0
+      || (component.cost != null && (!Number.isFinite(component.cost) || component.cost < 0)))) {
+      return toast.error("Enter a block name and valid chemical recipe lines");
+    }
+    try {
+      if (recipeDraft.id) await api.put(`/production/block-recipes/${recipeDraft.id}`, body);
+      else await api.post("/production/block-recipes", body);
+      toast.success(recipeDraft.id ? "Recipe updated; previous production records are unchanged" : "Recipe saved");
+      setRecipeEditor(false);
+      api.getUncached("/production/block-recipes").then(setBlockRecipes).catch((error) => toast.error(apiError(error)));
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
+  const viewRecipeHistory = async (recipe) => {
+    try {
+      const entries = await api.get(`/production/block-recipes/${recipe.id}/history`);
+      setRecipeHistory({ recipe, entries });
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
 
   const save = async () => {
     const blocks = form.blocks
@@ -141,6 +362,118 @@ export default function Production() {
         </div>
         <p className="text-xs text-slate-400 mt-2">Saving the same date again replaces that day's numbers.</p>
       </Card>
+      {canRecordBlockProduction && <Card className="p-5 space-y-4" data-testid="block-production-card">
+        <div>
+          <h2 className="font-semibold text-slate-800">Production Warehouse · Block production</h2>
+          <p className="text-sm text-slate-500">Confirm production to add finished blocks to Stock and record actual chemical usage.</p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <Select label="Block type" value={blockProduction.custom_mode ? "CUSTOM / MANUAL FORMULA" : blockProduction.block_type} onChange={(event) => selectBlockType(event.target.value)} data-testid="block-production-type">
+            <option value="">Select block type</option>
+            {[...new Set([...blockRecipes.map((recipe) => recipe.block_type), "BIG BLOCK 2750", "MED 2350", "SMALL 2150", "CUSTOM / MANUAL FORMULA"])].map((item) => <option key={item} value={item}>{item}</option>)}
+          </Select>
+          {blockProduction.custom_mode && <Input label="Custom block name" value={blockProduction.block_type} onChange={(event) => setBlockProduction({ ...blockProduction, block_type: event.target.value })} data-testid="custom-block-name" />}
+          <Input label="Production date" type="date" value={blockProduction.date} max={today()} onChange={(event) => setBlockProduction({ ...blockProduction, date: event.target.value })} data-testid="block-production-date" />
+          <Input label="Number of blocks" type="number" min="1" step="1" value={blockProduction.quantity} onChange={(event) => setBlockProduction({ ...blockProduction, quantity: event.target.value })} data-testid="block-production-quantity" />
+        </div>
+        {blockProduction.components.length > 0 && <>
+          <div className="space-y-2">
+            <h3 className="text-sm font-semibold text-slate-700">{blockProduction.automatic ? "Saved formula · review before confirming" : "Manual formula entry"}</h3>
+            {blockProduction.components.map((component, index) => (
+              <div key={`${component.chemical}-${index}`} className="grid grid-cols-2 md:grid-cols-[1.5fr_1fr_1fr_1fr_auto] gap-2 items-end" data-testid={`block-formula-line-${index}`}>
+                {blockProduction.automatic
+                  ? <Input label="Chemical" value={component.chemical} readOnly />
+                  : <Select label="Chemical" value={component.chemical} onChange={(event) => {
+                    const chemical = event.target.value;
+                    const unit = chemicalInventory.find((item) => item.chemical === chemical)?.unit || "";
+                    updateProductionComponent(index, { chemical, unit });
+                  }} data-testid={`block-formula-chemical-${index}`}>
+                    <option value="">Select chemical in inventory</option>
+                    {availableChemicalNames.map((chemical) => <option key={chemical} value={chemical}>{chemical}</option>)}
+                  </Select>}
+                <Input label={component.unit_confirmation_required ? "Quantity per block (confirm from document)" : "Quantity per block"} type="number" min="0" step="any" value={component.quantity} onChange={(event) => updateProductionComponent(index, { quantity: event.target.value })} readOnly={blockProduction.automatic && !component.unit_confirmation_required} />
+                {blockProduction.automatic
+                  ? <Input label={component.unit_confirmation_required ? "Unit (confirm from document)" : "Unit"} value={component.unit} onChange={(event) => updateProductionComponent(index, { unit: event.target.value })} readOnly={!component.unit_confirmation_required} placeholder="Confirm unit" data-testid={`block-formula-unit-${index}`} />
+                  : <Select label="Unit" value={component.unit} onChange={(event) => updateProductionComponent(index, { unit: event.target.value })} data-testid={`block-formula-unit-${index}`}>
+                    <option value="">Select unit</option>
+                    {[...new Set(chemicalInventory.filter((item) => item.chemical === component.chemical).map((item) => item.unit))].map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+                  </Select>}
+                <Input label="Cost per block (R)" type="number" min="0" step="0.01" value={component.cost} onChange={(event) => updateProductionComponent(index, { cost: event.target.value })} readOnly={blockProduction.automatic} />
+                {!blockProduction.automatic && <Btn variant="outline" onClick={() => setBlockProduction((current) => ({ ...current, components: current.components.filter((_, row) => row !== index) }))} aria-label="Remove formula line"><Trash2 size={15} /></Btn>}
+              </div>
+            ))}
+            {!blockProduction.automatic && <Btn variant="outline" onClick={() => setBlockProduction((current) => ({ ...current, components: [...current.components, { chemical: "", quantity: "", unit: "", cost: "" }] }))} data-testid="add-manual-formula-line"><Plus size={15} /> Add chemical</Btn>}
+          </div>
+          <div className="overflow-x-auto rounded-md border border-slate-200 bg-white p-3" data-testid="production-chemical-summary">
+            <h4 className="mb-2 text-sm font-semibold text-slate-700">Required stock for {Number(blockProduction.quantity) || 0} block(s)</h4>
+            <table className="w-full min-w-[520px] text-sm">
+              <thead><tr className="border-b text-left text-xs text-slate-500"><th className="py-2">Chemical</th><th>Required</th><th>Available</th><th>Missing</th></tr></thead>
+              <tbody>{productionMaterialSummary.map((item, index) => (
+                <tr key={`${item.chemical}-${index}`} className="border-b last:border-0">
+                  <td className="py-2">{item.chemical || "Select chemical"}</td>
+                  <td>{item.required.toLocaleString()} {item.unit}</td>
+                  <td>{item.available == null ? "Confirm unit / stock" : `${item.available.toLocaleString()} ${item.unit}`}</td>
+                  <td className={item.missing > 1e-8 ? "font-semibold text-red-700" : "text-emerald-700"}>
+                    {item.missing == null ? "—" : `${item.missing.toLocaleString()} ${item.unit}`}
+                  </td>
+                </tr>
+              ))}</tbody>
+            </table>
+            {hasInsufficientChemical && <p className="mt-2 text-xs font-medium text-red-700">Production cannot be confirmed until each unit is confirmed and sufficient chemical stock is available.</p>}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <Input label="Invoice / document reference" value={blockProduction.invoice_reference} onChange={(event) => setBlockProduction({ ...blockProduction, invoice_reference: event.target.value })} />
+            <Input label="Supplier" value={blockProduction.supplier} onChange={(event) => setBlockProduction({ ...blockProduction, supplier: event.target.value })} />
+            <Input label="Document date" type="date" max={today()} value={blockProduction.document_date} onChange={(event) => setBlockProduction({ ...blockProduction, document_date: event.target.value })} />
+          </div>
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
+            <p>Known cost per block: <b>R {knownCostPerBlock.toFixed(2)}</b> · Known production cost: <b>R {(knownCostPerBlock * (Number(blockProduction.quantity) || 0)).toFixed(2)}</b></p>
+            {selectedRecipe?.indicated_total_cost != null && <p className="mt-1">Company indicated formula cost: <b>R {Number(selectedRecipe.indicated_total_cost).toFixed(2)}</b></p>}
+            {missingCosts.length > 0 && <p className="mt-1 text-amber-700">Cost incomplete; no value is estimated for: {missingCosts.join(", ")}.</p>}
+            {blockProduction.components.some((component) => component.unit_confirmation_required && !component.unit) && <p className="mt-1 text-amber-700">TDI MED 2350 is recorded as 28.00 with unit unconfirmed. Confirm its unit from the source document; no conversion will be applied.</p>}
+          </div>
+          <Btn disabled={blockProductionSaving || hasInsufficientChemical} onClick={saveBlockProduction} data-testid="confirm-block-production">
+            <Save size={16} /> {blockProductionSaving ? "Recording..." : "Confirm production"}
+          </Btn>
+        </>}
+        {blockProductions.length > 0 && <div className="overflow-x-auto">
+          <h3 className="mb-2 text-sm font-semibold text-slate-700">Recent block production records</h3>
+          <table className="w-full min-w-[720px] text-sm">
+            <thead><tr className="border-b text-left text-xs text-slate-500"><th className="py-2">Reference</th><th>Date</th><th>Block</th><th>Supervisor</th><th className="text-right">Quantity</th><th className="text-right">Known cost</th><th>Cost status</th></tr></thead>
+            <tbody>{blockProductions.slice(0, 20).map((record) => <tr key={record.id} className="border-b">
+              <td className="py-2 font-mono">{record.reference}</td><td>{record.date}</td><td>{record.block_type}</td><td>{record.supervisor_name}</td>
+              <td className="text-right">{record.quantity}</td><td className="text-right">R {Number(record.known_total_cost || 0).toFixed(2)}</td>
+              <td>{record.cost_complete ? "Complete" : `Incomplete: ${(record.missing_cost_components || []).join(", ")}`}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>}
+      </Card>}
+      {canManageRecipes && canRecordBlockProduction && <Card className="p-5" data-testid="production-recipe-library">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="font-semibold text-slate-800">Saved production recipes</h2>
+            <p className="text-xs text-slate-500">Recipe edits apply to future production only; each production keeps its formula snapshot.</p>
+          </div>
+          <Btn onClick={() => openRecipeEditor()} data-testid="add-production-recipe"><Plus size={15} /> Add recipe</Btn>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[640px] text-sm">
+            <thead><tr className="border-b text-left text-xs text-slate-500"><th className="py-2">Block type</th><th>Formula</th><th>Recipe cost</th><th>Version</th><th /></tr></thead>
+            <tbody>{blockRecipes.map((recipe) => (
+              <tr key={recipe.id} className="border-b last:border-0">
+                <td className="py-2 font-semibold">{recipe.block_type}</td>
+                <td>{recipe.components.map((component) => `${component.chemical}: ${component.quantity} ${component.unit || "(unit unconfirmed)"}`).join(" · ")}</td>
+                <td>{recipe.indicated_total_cost == null ? "Incomplete" : `R ${Number(recipe.indicated_total_cost).toFixed(2)}`}</td>
+                <td>{recipe.version || 1}</td>
+                <td className="space-x-3 text-right whitespace-nowrap">
+                  <button type="button" className="text-primary hover:underline" onClick={() => viewRecipeHistory(recipe)}>History</button>
+                  <button type="button" className="text-primary hover:underline" onClick={() => openRecipeEditor(recipe)} aria-label={`Edit ${recipe.block_type} recipe`}><Pencil size={14} /></button>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      </Card>}
       <Card className="p-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div><h2 className="font-semibold text-slate-800">Block Cutting</h2><p className="text-sm text-slate-500">Record cut block type and size without changing stock quantities.</p></div>
@@ -202,6 +535,54 @@ export default function Production() {
           </Select>
           <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setCutOpen(false)}>Cancel</Btn><Btn disabled={cutBusy || !cutForm.block || !cutForm.size} onClick={saveBlockCutting} data-testid="save-block-cutting-btn">Confirm</Btn></div>
         </div>
+      </Modal>
+      <Modal open={!!recipePrompt} onClose={() => setRecipePrompt(null)} title="Company formula">
+        {recipePrompt && <div className="space-y-4">
+          <p className="text-sm text-slate-700">Vuoi inserimento automatico per il blocco selezionato? Alcune formule sono salvate sul gestionale aziendale e questo rientra in queste.</p>
+          <div className="flex justify-end gap-2">
+            <Btn variant="outline" onClick={() => chooseRecipeMode(false)} data-testid="recipe-manual-no">NO</Btn>
+            <Btn onClick={() => chooseRecipeMode(true)} data-testid="recipe-automatic-yes">YES</Btn>
+          </div>
+        </div>}
+      </Modal>
+      <Modal open={recipeEditor} onClose={() => setRecipeEditor(false)} title={recipeDraft.id ? "Edit production recipe" : "Add production recipe"} wide>
+        <form className="space-y-4" onSubmit={saveRecipeDraft} data-testid="production-recipe-editor">
+          <Input label="Block name / reference" value={recipeDraft.block_type} onChange={(event) => setRecipeDraft((current) => ({ ...current, block_type: event.target.value }))} required />
+          {recipeDraft.components.map((component, index) => {
+            const units = [...new Set(chemicalInventory.filter((item) => item.chemical === component.chemical).map((item) => item.unit))];
+            return <div key={index} className="grid gap-2 sm:grid-cols-[1.4fr_1fr_1fr_1fr_auto] items-end">
+              <Select label="Chemical" value={component.chemical} onChange={(event) => {
+                const chemical = event.target.value;
+                const unit = chemicalInventory.find((item) => item.chemical === chemical)?.unit || "";
+                setRecipeDraft((current) => ({ ...current, components: current.components.map((row, i) => i === index ? { ...row, chemical, unit } : row) }));
+              }} required>
+                <option value="">Select chemical</option>
+                {availableChemicalNames.map((chemical) => <option key={chemical} value={chemical}>{chemical}</option>)}
+                {!availableChemicalNames.includes(component.chemical) && component.chemical && <option value={component.chemical}>{component.chemical} (not currently stocked)</option>}
+              </Select>
+              <Input label="Quantity per block" type="number" min="0" step="any" value={component.quantity} onChange={(event) => setRecipeDraft((current) => ({ ...current, components: current.components.map((row, i) => i === index ? { ...row, quantity: event.target.value } : row) }))} required />
+              <Select label="Unit" value={component.unit || ""} onChange={(event) => setRecipeDraft((current) => ({ ...current, components: current.components.map((row, i) => i === index ? { ...row, unit: event.target.value } : row) }))}>
+                <option value="">Unit unconfirmed</option>
+                {units.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+              </Select>
+              <Input label="Recipe cost (R)" type="number" min="0" step="0.01" value={component.cost ?? ""} onChange={(event) => setRecipeDraft((current) => ({ ...current, components: current.components.map((row, i) => i === index ? { ...row, cost: event.target.value } : row) }))} />
+              <Btn type="button" variant="outline" aria-label="Remove recipe ingredient" onClick={() => setRecipeDraft((current) => ({ ...current, components: current.components.filter((_, i) => i !== index) }))}><Trash2 size={14} /></Btn>
+            </div>;
+          })}
+          <Btn type="button" variant="outline" onClick={() => setRecipeDraft((current) => ({ ...current, components: [...current.components, { chemical: "", quantity: "", unit: "", cost: null }] }))}><Plus size={15} /> Add ingredient</Btn>
+          <Input label="Indicated total recipe cost (R)" type="number" min="0" step="0.01" value={recipeDraft.indicated_total_cost} onChange={(event) => setRecipeDraft((current) => ({ ...current, indicated_total_cost: event.target.value }))} />
+          <div className="flex justify-end gap-2"><Btn type="button" variant="outline" onClick={() => setRecipeEditor(false)}>Cancel</Btn><Btn type="submit"><Save size={15} /> Save recipe</Btn></div>
+        </form>
+      </Modal>
+      <Modal open={!!recipeHistory} onClose={() => setRecipeHistory(null)} title={`${recipeHistory?.recipe.block_type || "Recipe"} history`} wide>
+        {recipeHistory && (recipeHistory.entries.length === 0
+          ? <p className="text-sm text-slate-500">No prior versions recorded.</p>
+          : <div className="space-y-3">{recipeHistory.entries.map((entry) => (
+            <div key={`${entry.recipe_id}-${entry.version}`} className="rounded-md border p-3">
+              <p className="font-semibold">Version {entry.version} · {fmtDateTime(entry.changed_at)}</p>
+              <p className="text-xs text-slate-600">{entry.recipe.components.map((component) => `${component.chemical}: ${component.quantity} ${component.unit || "(unit unconfirmed)"}`).join(" · ")}</p>
+            </div>
+          ))}</div>)}
       </Modal>
     </div>
   );

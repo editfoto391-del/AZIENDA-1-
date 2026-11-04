@@ -14,7 +14,7 @@ import calendar
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel as _PydanticBaseModel, ConfigDict, Field, field_validator, model_validator
-from typing import List, Optional, Any, Literal
+from typing import Dict, List, Optional, Any, Literal
 from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
@@ -22,9 +22,10 @@ import uuid, logging, jwt, bcrypt, math, asyncio
 import base64, hashlib, secrets
 from cryptography.fernet import Fernet, InvalidToken
 from pymongo import IndexModel, ReturnDocument
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 
 import seed_data
+from production_recipes import PREDEFINED_BLOCK_RECIPES
 from costs_math import calculate_production_cost
 from piecework_math import calculate_piecework
 from salary_math import (
@@ -38,7 +39,7 @@ from grv_math import (
     grv_confirmation_status,
     validate_grv_line_quantities,
 )
-from tenancy import DEFAULT_COMPANY_ID, GLOBAL_COLLECTIONS, ScopedDatabase, active_company_id, tenant_database, uses_unified_price_list
+from tenancy import DEFAULT_COMPANY_ID, GLOBAL_COLLECTIONS, ScopedDatabase, active_company_id, active_mongo_session, tenant_database, uses_unified_price_list
 from attendance_math import summarize_attendance_records
 from workflow_engine import (
     ACTION_DEFINITIONS,
@@ -112,8 +113,42 @@ WORKER_SUPERVISOR_ACTION_SECTIONS = {
     "customer_delete": {"customers"},
     "stock_delete": {"stock"},
     "balance_payment_delete": {"customers", "client-payments"},
+    "production_block_record": {"production", "warehouses"},
 }
 WORKER_SUPERVISOR_ACTIONS = set(WORKER_SUPERVISOR_ACTION_SECTIONS)
+WORKER_SECTION_PREFIXES = {
+    "customers": "customers",
+    "suppliers": "suppliers",
+    "buyings": "buyings",
+    "invoices": "invoices",
+    "orders": "orders",
+    "intercompany": "orders",
+    "stock": "stock",
+    "production": "production",
+    "simple-production": "production",
+    "attendance": "attendance",
+    "employees": "attendance",
+    "salaries": "attendance",
+    "piece-production": "production",
+    "deliveries": "deliveries",
+    "drivers": "settings",
+    "vehicles": "fleet",
+    "spareparts": "fleet",
+    "fleet": "fleet",
+    "expenses": "expenses",
+    "cost-records": "costs",
+    "reports/costs": "costs",
+    "costs": "costs",
+    "grvs": "grv",
+    "grv": "grv",
+    "daily-report": "daily-report",
+    "prices": "settings",
+    "settings": "settings",
+    "payments": "client-payments",
+    "dashboard": "dashboard",
+    "warehouses": "warehouses",
+}
+WORKER_WRITE_PERMISSION_VALUES = {"deny", "allow", "supervisor"}
 
 COMPANY_INVOICE_DETAILS = {
     "iqfoam-manufactoring": {
@@ -209,6 +244,67 @@ class StockLock:
         if self.held:
             await db.stock.update_many({"id": {"$in": self.held}}, {"$unset": {"lock": ""}})
         self.held = []
+
+
+class ChemicalInventoryLock:
+    def __init__(self, ids):
+        self.ids = sorted(set(ids))
+        self.held = []
+
+    async def __aenter__(self):
+        for inventory_id in self.ids:
+            for _ in range(50):
+                if await db.chemical_inventory.find_one_and_update(
+                    {"id": inventory_id, "production_lock": {"$ne": True}},
+                    {"$set": {"production_lock": True}},
+                ):
+                    self.held.append(inventory_id)
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                await self.__aexit__()
+                raise HTTPException(409, "Chemical stock is being updated. Please retry")
+        return self
+
+    async def __aexit__(self, *args):
+        if self.held:
+            await db.chemical_inventory.update_many(
+                {"id": {"$in": self.held}},
+                {"$unset": {"production_lock": ""}},
+            )
+        self.held = []
+
+
+class BlockStockIdentityLock:
+    def __init__(self, block_type):
+        company_id = active_company_id.get() or DEFAULT_COMPANY_ID
+        self.lock_id = f"{company_id}:{block_type.casefold()}"
+        self.held = False
+
+    async def __aenter__(self):
+        for _ in range(50):
+            try:
+                locked = await db.production_block_stock_locks.find_one_and_update(
+                    {"_id": self.lock_id, "locked": {"$ne": True}},
+                    {"$set": {"locked": True}, "$setOnInsert": {"_id": self.lock_id}},
+                    upsert=True,
+                    return_document=ReturnDocument.AFTER,
+                )
+                if locked:
+                    self.held = True
+                    return self
+            except DuplicateKeyError:
+                pass
+            await asyncio.sleep(0.1)
+        raise HTTPException(409, "Finished block stock is being updated. Please retry")
+
+    async def __aexit__(self, *args):
+        if self.held:
+            await db.production_block_stock_locks.update_one(
+                {"_id": self.lock_id}, {"$set": {"locked": False}},
+            )
+        self.held = False
+
 
 class PurchaseOrderReceiptLock:
     def __init__(self, order_id, grv_id):
@@ -359,8 +455,10 @@ WORKER_SUPERVISOR_ROUTES = (
     ("PUT", r"prices/[^/]+", "price_edit"),
     ("DELETE", r"prices/[^/]+", "price_delete"),
     ("DELETE", r"customers/[^/]+", "customer_delete"),
+    ("DELETE", r"customers/[^/]+/other-balance-history/\d+", "balance_payment_delete"),
     ("DELETE", r"stock/[^/]+", "stock_delete"),
     ("DELETE", r"payments/[^/]+/other-balance", "balance_payment_delete"),
+    ("POST", r"production/block-productions", "production_block_record"),
 )
 
 def worker_supervisor_action(path, method):
@@ -377,8 +475,11 @@ def enforce_worker_api_access(request, user):
     path = request.url.path.removeprefix("/api/").strip("/")
     method = request.method.upper()
     allowed = set(user.get("worker_allowed_sections") or [])
+    write_permission = worker_write_permission(user, request.url.path, method)
+    if write_permission and write_permission[2] == "deny":
+        raise HTTPException(403, "This worker cannot perform this action in the selected section")
     sensitive_action = worker_supervisor_action(request.url.path, method)
-    if sensitive_action and "worker_is_supervisor" in user:
+    if sensitive_action and write_permission is None and "worker_is_supervisor" in user:
         if not user.get("worker_is_supervisor"):
             raise HTTPException(403, "Only a designated worker supervisor can make this change")
         required_sections = WORKER_SUPERVISOR_ACTION_SECTIONS[sensitive_action]
@@ -422,6 +523,8 @@ def enforce_worker_api_access(request, user):
         return
 
     if user.get("worker_stock_only"):
+        if write_permission and write_permission[0] == "stock":
+            return
         if path == "products" and method == "GET":
             return
         if path == "stock" and method in {"GET", "POST"}:
@@ -481,7 +584,11 @@ def enforce_worker_api_access(request, user):
             ("purchase-orders", "GET"), ("settings", "GET"),
         ],
         "suppliers": [("buyings", "GET")],
-        "production": [("stock", "GET"), ("piece-production", "GET"), ("piece-production", "POST")],
+        "production": [
+            ("stock", "GET"), ("piece-production", "GET"), ("piece-production", "POST"),
+            ("production/block-recipes", "GET"), ("production/block-productions", "GET"),
+            ("production/block-productions", "POST"),
+        ],
         "attendance": [("piece-production", "GET"), ("piece-production", "POST")],
         "orders": [
             ("customers", "GET"), ("prices", "GET"), ("settings", "GET"),
@@ -507,40 +614,8 @@ def enforce_worker_api_access(request, user):
                         continue
                 return
 
-    section_prefixes = {
-        "customers": "customers",
-        "suppliers": "suppliers",
-        "buyings": "buyings",
-        "invoices": "invoices",
-        "orders": "orders",
-        "intercompany": "orders",
-        "stock": "stock",
-        "production": "production",
-        "simple-production": "production",
-        "attendance": "attendance",
-        "employees": "attendance",
-        "salaries": "attendance",
-        "piece-production": "production",
-        "deliveries": "deliveries",
-        "drivers": "settings",
-        "vehicles": "fleet",
-        "spareparts": "fleet",
-        "fleet": "fleet",
-        "expenses": "expenses",
-        "cost-records": "costs",
-        "reports/costs": "costs",
-        "costs": "costs",
-        "grvs": "grv",
-        "grv": "grv",
-        "daily-report": "daily-report",
-        "prices": "settings",
-        "settings": "settings",
-        "payments": "client-payments",
-        "dashboard": "dashboard",
-        "warehouses": "warehouses",
-    }
     section = next(
-        (section for prefix, section in section_prefixes.items()
+        (section for prefix, section in WORKER_SECTION_PREFIXES.items()
          if path == prefix or path.startswith(f"{prefix}/")),
         None,
     )
@@ -590,15 +665,22 @@ async def require_supervisor_for_company_write(request, user):
 
     action = None
     if user.get("is_worker"):
-        action = worker_supervisor_action(request.url.path, request.method)
-        if (
-            user.get("_active_company_id") != MANUFACTURING_COMPANY_ID
-            or not user.get("worker_is_supervisor")
-            or action not in set(user.get("worker_supervisor_password_actions") or [])
-        ):
-            return
+        write_permission = worker_write_permission(user, request.url.path, request.method)
+        if write_permission:
+            if write_permission[2] != "supervisor":
+                return
+            section, operation, _ = write_permission
+            action = f"{section}:{operation}"
+        else:
+            action = worker_supervisor_action(request.url.path, request.method)
+            if (
+                user.get("_active_company_id") != MANUFACTURING_COMPANY_ID
+                or not user.get("worker_is_supervisor")
+                or action not in set(user.get("worker_supervisor_password_actions") or [])
+            ):
+                return
         grant_scope = "supervisor_worker_action"
-        grant_company_id = MANUFACTURING_COMPANY_ID
+        grant_company_id = user.get("_active_company_id")
     else:
         if (
             not is_delegated_company_admin(user)
@@ -738,6 +820,7 @@ class CreateWorkerIn(BaseModel):
     warehouse_id: Optional[str] = None
     warehouse_ids: List[str] = Field(default_factory=list)
     supervisor_password_actions: List[str] = Field(default_factory=list)
+    write_permissions: Dict[str, Dict[str, str]] = Field(default_factory=dict)
 
 class WorkerAccessUpdateIn(BaseModel):
     worker_role: str
@@ -747,6 +830,7 @@ class WorkerAccessUpdateIn(BaseModel):
     warehouse_id: Optional[str] = None
     warehouse_ids: List[str] = Field(default_factory=list)
     supervisor_password_actions: List[str] = Field(default_factory=list)
+    write_permissions: Dict[str, Dict[str, str]] = Field(default_factory=dict)
 
 class UserStatusIn(BaseModel):
     active: bool
@@ -833,6 +917,7 @@ def public_user(u):
             "is_supervisor": u.get("is_worker", False) and u.get("worker_is_supervisor", False),
             "warehouse_ids": worker_warehouse_ids(u),
             "allowed_sections": u.get("worker_allowed_sections", []),
+            "write_permissions": u.get("worker_write_permissions", {}),
             "admin_company_ids": admin_company_ids,
             "company_id": company_id, "company_ids": allowed_company_ids(u), "picture": u.get("picture", "")}
 
@@ -888,6 +973,67 @@ def validate_worker_supervisor_sections(sections, protected_actions):
             400,
             "Grant the matching section before configuring its supervisor-protected action",
         )
+
+def validate_worker_write_permissions(permissions, sections):
+    if not permissions:
+        return {}
+    normalized = {}
+    allowed_sections = set(sections)
+    if set(permissions) - allowed_sections:
+        raise HTTPException(400, "Write permissions must match the worker's allowed sections")
+    for section in allowed_sections:
+        section_permissions = permissions.get(section)
+        if not isinstance(section_permissions, dict):
+            raise HTTPException(400, f"Choose create, edit, and delete permissions for {section}")
+        if set(section_permissions) != {"create", "update", "delete"}:
+            raise HTTPException(400, f"Choose create, edit, and delete permissions for {section}")
+        if any(value not in WORKER_WRITE_PERMISSION_VALUES for value in section_permissions.values()):
+            raise HTTPException(400, "Choose a valid worker write permission")
+        normalized[section] = dict(section_permissions)
+    return normalized
+
+def worker_write_scope(path, method):
+    normalized_path = path.removeprefix("/api/").strip("/")
+    normalized_method = method.upper()
+    if normalized_method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    if re.search(r"/authorize(?:-|$)", normalized_path):
+        return None
+    if re.fullmatch(r"invoices/[^/]+/payments", normalized_path):
+        section = "client-payments"
+    else:
+        section = next(
+            (value for prefix, value in sorted(
+                WORKER_SECTION_PREFIXES.items(), key=lambda item: len(item[0]), reverse=True,
+            ) if normalized_path == prefix or normalized_path.startswith(f"{prefix}/")),
+            None,
+        )
+    if not section:
+        return None
+    operation = {
+        "POST": "create",
+        "PUT": "update",
+        "PATCH": "update",
+        "DELETE": "delete",
+    }[normalized_method]
+    if (
+        re.fullmatch(r"invoices/[^/]+/(issue|void|daily-report)", normalized_path)
+        or re.fullmatch(r"payments/[^/]+/(reverse|daily-report)", normalized_path)
+        or normalized_path == "daily-report"
+    ):
+        operation = "update"
+    return section, operation
+
+def worker_write_permission(user, path, method):
+    scope = worker_write_scope(path, method)
+    permissions = user.get("worker_write_permissions")
+    if not scope or not isinstance(permissions, dict) or not permissions:
+        return None
+    section, operation = scope
+    section_permissions = permissions.get(section)
+    if not isinstance(section_permissions, dict):
+        return section, operation, "deny"
+    return section, operation, section_permissions.get(operation, "deny")
 
 def require_profile_owner(user):
     if user.get("role") != "owner" and user.get("_active_role") != "owner":
@@ -1657,6 +1803,7 @@ async def get_workers(company_id: str = "", user=Depends(get_current_user)):
         "is_supervisor": worker.get("worker_is_supervisor", False),
         "warehouse_ids": worker_warehouse_ids(worker),
         "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
+        "write_permissions": worker.get("worker_write_permissions", {}),
         "company_id": company_id,
         "active": worker.get("active", True),
     } for worker in workers]
@@ -1689,6 +1836,7 @@ async def worker_access_details(worker_id, company_id, user):
         "is_supervisor": worker.get("worker_is_supervisor", False),
         "warehouse_ids": worker_warehouse_ids(worker),
         "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
+        "write_permissions": worker.get("worker_write_permissions", {}),
         "active": worker.get("active", True),
         "can_regenerate": worker.get("active", True) is not False
                           or worker.get("personal_access_revoked", False),
@@ -1823,6 +1971,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
     warehouse_ids, protected_actions = worker_supervisor_settings(
         company_id, body.is_supervisor, requested_warehouses, body.supervisor_password_actions, sections,
     )
+    write_permissions = validate_worker_write_permissions(body.write_permissions, sections)
     if body.stock_only and body.is_supervisor:
         raise HTTPException(400, "Stock-only workers cannot be supervisors")
     validate_worker_supervisor_sections(sections, protected_actions)
@@ -1851,6 +2000,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "worker_warehouse_ids": warehouse_ids,
         "worker_warehouse_id": warehouse_ids[0] if warehouse_ids else None,
         "worker_supervisor_password_actions": protected_actions,
+        "worker_write_permissions": write_permissions,
         "active": True,
         "auth_provider": "password",
         "created_at": now_iso(),
@@ -1867,6 +2017,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
             "is_supervisor": body.is_supervisor,
             "warehouse_ids": warehouse_ids,
             "supervisor_password_actions": protected_actions,
+            "write_permissions": write_permissions,
         })
     finally:
         active_company_id.reset(company_context)
@@ -1881,6 +2032,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "is_supervisor": body.is_supervisor,
         "warehouse_ids": warehouse_ids,
         "supervisor_password_actions": protected_actions,
+        "write_permissions": write_permissions,
         "active": True,
     }
 
@@ -1903,6 +2055,7 @@ async def update_worker_access(
     warehouse_ids, protected_actions = worker_supervisor_settings(
         company_id, body.is_supervisor, requested_warehouses, body.supervisor_password_actions, sections,
     )
+    write_permissions = validate_worker_write_permissions(body.write_permissions, sections)
     if body.stock_only and body.is_supervisor:
         raise HTTPException(400, "Stock-only workers cannot be supervisors")
     validate_worker_supervisor_sections(sections, protected_actions)
@@ -1913,7 +2066,8 @@ async def update_worker_access(
               "stock_only": worker.get("worker_stock_only", False),
               "is_supervisor": worker.get("worker_is_supervisor", False),
               "warehouse_ids": worker_warehouse_ids(worker),
-              "supervisor_password_actions": worker.get("worker_supervisor_password_actions", [])}
+              "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
+              "write_permissions": worker.get("worker_write_permissions", {})}
     await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": {
         "worker_role": worker_role, "worker_allowed_sections": sections,
         "worker_stock_only": body.stock_only,
@@ -1921,13 +2075,16 @@ async def update_worker_access(
         "worker_warehouse_ids": warehouse_ids,
         "worker_warehouse_id": warehouse_ids[0] if warehouse_ids else None,
         "worker_supervisor_password_actions": protected_actions,
+        "worker_write_permissions": write_permissions,
     }})
+    await base_db.user_sessions.delete_many({"user_id": worker_id})
     await log_audit("user", worker_id, "worker_access_updated", user, before=before,
                     after={"worker_role": worker_role, "allowed_sections": sections,
                            "stock_only": body.stock_only,
                            "is_supervisor": body.is_supervisor,
                            "warehouse_ids": warehouse_ids,
-                           "supervisor_password_actions": protected_actions})
+                           "supervisor_password_actions": protected_actions,
+                           "write_permissions": write_permissions})
     return {
         "id": worker_id,
         "name": worker.get("name", ""),
@@ -1939,6 +2096,7 @@ async def update_worker_access(
         "is_supervisor": body.is_supervisor,
         "warehouse_ids": warehouse_ids,
         "supervisor_password_actions": protected_actions,
+        "write_permissions": write_permissions,
         "active": worker.get("active", True),
     }
 
@@ -2295,28 +2453,34 @@ async def logout(request: Request, response: Response):
     return {"ok": True}
 
 # ---------------- Generic helpers ----------------
-async def insert(coll, data):
+async def insert(coll, data, session=None):
+    session = session or active_mongo_session.get()
+    session_options = {"session": session} if session is not None else {}
     data = dict(data)
     data.setdefault("id", new_id())
     data["created_at"] = now_iso()
-    await db[coll].insert_one(data)
-    return clean(await db[coll].find_one({"id": data["id"]}, {"_id": 0}))
+    await db[coll].insert_one(data, **session_options)
+    return clean(await db[coll].find_one({"id": data["id"]}, {"_id": 0}, **session_options))
 
-async def update_doc(coll, _id, data):
+async def update_doc(coll, _id, data, session=None):
+    session = session or active_mongo_session.get()
+    session_options = {"session": session} if session is not None else {}
     data = {k: v for k, v in data.items() if k not in ("id", "_id", "created_at")}
     data["updated_at"] = now_iso()
-    res = await db[coll].update_one({"id": _id}, {"$set": data})
+    res = await db[coll].update_one({"id": _id}, {"$set": data}, **session_options)
     if res.matched_count == 0:
         raise HTTPException(404, "Not found")
-    return clean(await db[coll].find_one({"id": _id}, {"_id": 0}))
+    return clean(await db[coll].find_one({"id": _id}, {"_id": 0}, **session_options))
 
 async def next_ref(key, prefix):
     year = local_today().year
     c = await db.counters.find_one_and_update({"id": f"{key}-{year}"}, {"$inc": {"seq": 1}}, upsert=True, return_document=ReturnDocument.AFTER)
     return f"{prefix}-{year}-{c['seq']:04d}"
 
-async def listall(coll, flt=None, sort=None, limit=5000):
-    cur = db[coll].find(flt or {}, {"_id": 0})
+async def listall(coll, flt=None, sort=None, limit=5000, session=None):
+    session = session or active_mongo_session.get()
+    session_options = {"session": session} if session is not None else {}
+    cur = db[coll].find(flt or {}, {"_id": 0}, **session_options)
     if sort:
         cur = cur.sort(sort[0], sort[1])
     return await cur.to_list(limit)
@@ -2532,6 +2696,11 @@ class ChemicalLineIn(BaseModel):
     used_quantity: float = Field(default=0, ge=0, le=1_000_000_000)
     initial_quantity: Optional[float] = Field(default=None, ge=0, le=1_000_000_000)
     remaining_estimate: Optional[float] = Field(default=None, ge=0, le=1_000_000_000)
+    production_id: Optional[str] = Field(default=None, max_length=100)
+    production_reference: Optional[str] = Field(default=None, max_length=100)
+    block_type: Optional[str] = Field(default=None, max_length=100)
+    block_quantity: Optional[int] = Field(default=None, ge=1)
+    component_cost: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def remaining_defaults_to_initial(self):
@@ -2590,10 +2759,701 @@ def require_chemical_access(user):
         raise HTTPException(403, "This worker account cannot access the Chemical section")
 
 
+class ProductionRecipeComponentIn(BaseModel):
+    chemical: str = Field(min_length=1, max_length=120)
+    quantity: float = Field(gt=0, allow_inf_nan=False)
+    unit: str = Field(default="", max_length=20)
+    unit_confirmation_required: bool = False
+    cost: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    label: Optional[str] = Field(default="", max_length=120)
+
+    @field_validator("chemical", "unit")
+    @classmethod
+    def strip_recipe_component_text(cls, value):
+        return value.strip()
+
+
+class ProductionRecipeIn(BaseModel):
+    block_type: str = Field(min_length=1, max_length=100)
+    components: List[ProductionRecipeComponentIn] = Field(min_length=1, max_length=30)
+    indicated_total_cost: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+
+    @field_validator("block_type")
+    @classmethod
+    def strip_recipe_name(cls, value):
+        return value.strip()
+
+
+class BlockProductionIn(BaseModel):
+    request_id: str = Field(min_length=8, max_length=100)
+    date: str = Field(default_factory=today_str, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    recipe_id: Optional[str] = Field(default=None, max_length=100)
+    block_type: str = Field(min_length=1, max_length=100)
+    quantity: int = Field(gt=0, le=10000)
+    automatic: bool = False
+    components: List[ProductionRecipeComponentIn] = Field(min_length=1, max_length=30)
+    invoice_reference: str = Field(default="", max_length=120)
+    supplier: str = Field(default="", max_length=120)
+    document_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @field_validator("date", "document_date")
+    @classmethod
+    def production_dates_are_valid(cls, value):
+        if value is not None:
+            try:
+                date.fromisoformat(value)
+            except ValueError as error:
+                raise ValueError("Enter a valid date") from error
+        return value
+
+    @field_validator("block_type", "invoice_reference", "supplier")
+    @classmethod
+    def strip_production_text(cls, value):
+        return value.strip()
+
+
+def _production_stock_unit_factor(unit):
+    normalized = unit.strip().casefold()
+    if normalized in ("g", "gram", "grams"):
+        return "mass", 1.0
+    if normalized in ("kg", "kilogram", "kilograms"):
+        return "mass", 1000.0
+    if normalized in ("ml", "milliliter", "milliliters"):
+        return "volume", 1.0
+    if normalized in ("l", "liter", "liters"):
+        return "volume", 1000.0
+    return normalized, 1.0
+
+
+def _convert_production_quantity(quantity, source_unit, target_unit):
+    source_kind, source_factor = _production_stock_unit_factor(source_unit)
+    target_kind, target_factor = _production_stock_unit_factor(target_unit)
+    if source_kind != target_kind:
+        raise HTTPException(
+            409,
+            f"Cannot convert {source_unit} to the inventory unit {target_unit}; verify the unit first",
+        )
+    return float(quantity) * source_factor / target_factor
+
+
+def _require_block_production_access(user):
+    if user.get("_active_company_id") != MANUFACTURING_COMPANY_ID:
+        raise HTTPException(403, "Block production recipes are only available in IQFOAM Manufacturing")
+    if user.get("is_worker") and (
+        not user.get("worker_is_supervisor")
+        or not {"production", "warehouses"}.issubset(set(user.get("worker_allowed_sections") or []))
+    ):
+        raise HTTPException(403, "Production and warehouse supervisor access is required")
+
+
+async def ensure_predefined_block_recipes():
+    for recipe in PREDEFINED_BLOCK_RECIPES:
+        await db.production_block_recipes.update_one(
+            {"id": recipe["id"]},
+            {"$setOnInsert": {**recipe, "active": True, "version": 1}},
+            upsert=True,
+        )
+    await db.production_block_recipes.update_one(
+        {
+            "id": "med-2350",
+            "version": 1,
+            "components": {"$elemMatch": {
+                "chemical": "MCL",
+                "quantity": 6.2,
+                "unit": "kg",
+            }},
+        },
+        {"$set": {"components.$.unit": "", "components.$.unit_confirmation_required": True}},
+    )
+
+
+@api.get("/production/block-recipes")
+async def get_production_block_recipes(user=Depends(get_current_user)):
+    _require_block_production_access(user)
+    await ensure_predefined_block_recipes()
+    return await listall("production_block_recipes", {"active": {"$ne": False}}, sort=("block_type", 1))
+
+
+def _require_recipe_manager(user):
+    if user.get("is_worker") or not is_company_admin(user):
+        raise HTTPException(403, "Only a company administrator can manage saved recipes")
+
+
+def _recipe_component_snapshot(components):
+    return [
+        {
+            **component.model_dump(),
+            "unit_confirmation_required": (
+                component.unit_confirmation_required or not component.unit
+            ),
+        }
+        for component in components
+    ]
+
+
+@api.post("/production/block-recipes")
+async def create_production_block_recipe(
+    body: ProductionRecipeIn, user=Depends(get_current_user),
+):
+    _require_block_production_access(user)
+    _require_recipe_manager(user)
+    recipe = {
+        "id": new_id(),
+        "block_type": body.block_type,
+        "components": _recipe_component_snapshot(body.components),
+        "indicated_total_cost": body.indicated_total_cost,
+        "active": True,
+        "version": 1,
+        "created_at": now_iso(),
+        "created_by": user["id"],
+    }
+    await db.production_block_recipes.insert_one(recipe)
+    await log_audit("production_block_recipe", recipe["id"], "created", user, after=recipe)
+    return clean(recipe)
+
+
+@api.put("/production/block-recipes/{recipe_id}")
+async def update_production_block_recipe(
+    recipe_id: str, body: ProductionRecipeIn, user=Depends(get_current_user),
+):
+    _require_block_production_access(user)
+    _require_recipe_manager(user)
+    await ensure_predefined_block_recipes()
+    before = await db.production_block_recipes.find_one({"id": recipe_id}, {"_id": 0})
+    if not before:
+        raise HTTPException(404, "Production recipe not found")
+    version = int(before.get("version") or 1) + 1
+    await insert("production_block_recipe_versions", {
+        "recipe_id": recipe_id,
+        "version": version - 1,
+        "recipe": before,
+        "changed_at": now_iso(),
+        "changed_by": user["id"],
+    })
+    recipe = await update_doc("production_block_recipes", recipe_id, {
+        "block_type": body.block_type,
+        "components": _recipe_component_snapshot(body.components),
+        "indicated_total_cost": body.indicated_total_cost,
+        "version": version,
+    })
+    await log_audit("production_block_recipe", recipe_id, "updated", user, before=before, after=recipe)
+    return recipe
+
+
+@api.get("/production/block-recipes/{recipe_id}/history")
+async def get_production_block_recipe_history(recipe_id: str, user=Depends(get_current_user)):
+    _require_block_production_access(user)
+    return await listall(
+        "production_block_recipe_versions",
+        {"recipe_id": recipe_id},
+        sort=("version", -1),
+        limit=100,
+    )
+
+
+async def _production_material_allocations(components, block_quantity):
+    rows = await listall("chemical_inventory", limit=5000)
+    remaining_by_id = {}
+    allocations = []
+    initial_by_component = []
+    for component_index, component in enumerate(components):
+        requested = float(component["quantity"]) * block_quantity
+        matching = [
+            row for row in rows
+            if row.get("chemical", "").strip().casefold() == component["chemical"].strip().casefold()
+            and _production_stock_unit_factor(row.get("unit", ""))[0]
+            == _production_stock_unit_factor(component["unit"])[0]
+        ]
+        if not matching:
+            raise HTTPException(409, f"No compatible Chemical Inventory stock found for {component['chemical']} ({component['unit']})")
+        available = 0.0
+        for row in matching:
+            row_total = float(row.get("capacity") or 0) * float(row.get("count") or 0)
+            row_used = float(row.get("quantity_used") or 0)
+            remaining_by_id.setdefault(row["id"], max(0.0, row_total - row_used))
+            available += _convert_production_quantity(
+                remaining_by_id[row["id"]], row["unit"], component["unit"],
+            )
+        initial_by_component.append(available)
+        if requested - available > 1e-8:
+            raise HTTPException(
+                409,
+                f"Insufficient chemical stock for {component['chemical']}: "
+                f"available {available:g} {component['unit']}, required {requested:g} "
+                f"{component['unit']}, missing {requested - available:g} {component['unit']}",
+            )
+        left = requested
+        for row in matching:
+            row_available = remaining_by_id[row["id"]]
+            if row_available <= 0:
+                continue
+            in_component_unit = _convert_production_quantity(
+                row_available, row["unit"], component["unit"],
+            )
+            used_in_component_unit = min(left, in_component_unit)
+            used_in_row_unit = _convert_production_quantity(
+                used_in_component_unit, component["unit"], row["unit"],
+            )
+            allocations.append({
+                "component_index": component_index,
+                "inventory_id": row["id"],
+                "chemical": component["chemical"],
+                "quantity": used_in_row_unit,
+                "unit": row["unit"],
+            })
+            remaining_by_id[row["id"]] -= used_in_row_unit
+            left -= used_in_component_unit
+            if left <= 1e-8:
+                break
+    return rows, allocations, initial_by_component
+
+
+def _transaction_unavailable(error):
+    message = str(error).casefold()
+    return isinstance(error, OperationFailure) and (
+        error.code in (20, 72, 251, 263)
+        or "transaction numbers are only allowed" in message
+        or "does not support transactions" in message
+    )
+
+
+@api.post("/production/block-productions")
+async def record_block_production(body: BlockProductionIn, user=Depends(get_current_user)):
+    _require_block_production_access(user)
+    existing = await db.production_block_records.find_one({"request_id": body.request_id}, {"_id": 0})
+    if existing:
+        if existing.get("status") == "completed":
+            return existing
+        raise HTTPException(409, "This production request is already being processed")
+    await ensure_predefined_block_recipes()
+
+    recipe = None
+    if body.automatic:
+        if not body.recipe_id:
+            raise HTTPException(400, "Select a saved company recipe")
+        recipe = await db.production_block_recipes.find_one(
+            {"id": body.recipe_id, "active": {"$ne": False}}, {"_id": 0},
+        )
+        if not recipe:
+            raise HTTPException(404, "Saved company recipe not found")
+        if recipe["block_type"] != body.block_type:
+            raise HTTPException(409, "Selected block type does not match the saved recipe")
+        if len(body.components) != len(recipe["components"]):
+            raise HTTPException(409, "Recipe changed; reload it and review the formula")
+        components = []
+        for saved, submitted in zip(recipe["components"], body.components):
+            if saved["chemical"].casefold() != submitted.chemical.casefold():
+                raise HTTPException(409, "Recipe changed; reload it and review the formula")
+            unit = submitted.unit if saved.get("unit_confirmation_required") else saved["unit"]
+            if not unit:
+                raise HTTPException(422, f"Confirm the unit for {saved['chemical']} before recording production")
+            components.append({
+                **saved,
+                "unit": unit,
+                "quantity": (
+                    float(submitted.quantity)
+                    if saved.get("unit_confirmation_required")
+                    else float(saved["quantity"])
+                ),
+            })
+    else:
+        components = [component.model_dump() for component in body.components]
+
+    for component in components:
+        if not component.get("unit", "").strip():
+            raise HTTPException(422, f"Unit is required for {component['chemical']}")
+        if not math.isfinite(float(component["quantity"])) or float(component["quantity"]) <= 0:
+            raise HTTPException(422, f"Enter a valid quantity for {component['chemical']}")
+        cost = component.get("cost")
+        if cost is not None and (not math.isfinite(float(cost)) or float(cost) < 0):
+            raise HTTPException(422, f"Enter a valid cost for {component['chemical']}")
+
+    inventory_rows, allocations, initial_by_component = await _production_material_allocations(
+        components, body.quantity,
+    )
+    record_id = new_id()
+    reference = f"BP-{body.date.replace('-', '')}-{record_id[:8].upper()}"
+    costs_complete = all(component.get("cost") is not None for component in components)
+    known_cost_per_block = round(sum(float(component["cost"] or 0) for component in components), 2)
+    missing_cost_components = list(dict.fromkeys(
+        component.get("label") or component["chemical"]
+        for component in components if component.get("cost") is None
+    ))
+    recipe_snapshot = {
+        "id": recipe.get("id") if recipe else None,
+        "version": recipe.get("version") if recipe else None,
+        "block_type": body.block_type,
+        "components": components,
+        "indicated_total_cost": recipe.get("indicated_total_cost") if recipe else None,
+    }
+    record = {
+        "id": record_id,
+        "request_id": body.request_id,
+        "reference": reference,
+        "date": body.date,
+        "block_type": body.block_type,
+        "quantity": body.quantity,
+        "recipe_id": recipe_snapshot["id"],
+        "recipe_version": recipe_snapshot["version"],
+        "recipe_snapshot": recipe_snapshot,
+        "automatic": body.automatic,
+        "components": components,
+        "invoice_reference": body.invoice_reference,
+        "supplier": body.supplier,
+        "document_date": body.document_date,
+        "supervisor_id": user["id"],
+        "supervisor_name": user.get("name") or user.get("username") or "",
+        "stock_id": "",
+        "known_cost_per_block": known_cost_per_block,
+        "known_total_cost": round(known_cost_per_block * body.quantity, 2),
+        "cost_complete": costs_complete,
+        "missing_cost_components": missing_cost_components,
+        "status": "processing",
+        "created_at": now_iso(),
+    }
+
+    inventory_ids = [row["id"] for row in inventory_rows if any(
+        allocation["inventory_id"] == row["id"] for allocation in allocations
+    )]
+    chemical_log_id = None
+    stock = None
+    created_stock = False
+    movement = None
+    try:
+        async with BlockStockIdentityLock(body.block_type):
+            stock = await db.stock.find_one(
+                {"product": body.block_type, "size": "Block"}, {"_id": 0},
+            )
+            if not stock:
+                stock = await insert("stock", {
+                    "product": body.block_type, "size": "Block", "opening": 0,
+                    "threshold": 0, "unit_cost": None,
+                })
+                created_stock = True
+            record["stock_id"] = stock["id"]
+            async with StockLock([stock["id"]]), ChemicalInventoryLock(inventory_ids):
+                session = await client.start_session()
+                async with session:
+                    async with session.start_transaction():
+                        session_token = active_mongo_session.set(session)
+                        try:
+                            await db.production_block_records.insert_one(record)
+                            current_rows = await listall(
+                                "chemical_inventory",
+                                {"id": {"$in": inventory_ids}},
+                                limit=len(inventory_ids) or 1,
+                            )
+                            current_by_id = {row["id"]: row for row in current_rows}
+                            for allocation in allocations:
+                                row = current_by_id.get(allocation["inventory_id"])
+                                if not row:
+                                    raise HTTPException(409, "Chemical stock changed; reload and try again")
+                                result = await db.chemical_inventory.update_one(
+                                    {
+                                        "id": row["id"],
+                                        "$expr": {
+                                            "$gte": [
+                                                {
+                                                    "$subtract": [
+                                                        {
+                                                            "$multiply": [
+                                                                {"$ifNull": ["$capacity", 0]},
+                                                                {"$ifNull": ["$count", 0]},
+                                                            ],
+                                                        },
+                                                        {"$ifNull": ["$quantity_used", 0]},
+                                                    ],
+                                                },
+                                                allocation["quantity"],
+                                            ],
+                                        },
+                                    },
+                                    {"$inc": {"quantity_used": allocation["quantity"]}},
+                                )
+                                if not result.matched_count:
+                                    raise HTTPException(409, "Chemical stock changed; reload and try again")
+                                movement_record = await insert("chemical_inventory_movements", {
+                                    "production_id": record_id,
+                                    "production_reference": reference,
+                                    "inventory_id": row["id"],
+                                    "chemical": allocation["chemical"],
+                                    "quantity": allocation["quantity"],
+                                    "unit": row["unit"],
+                                    "direction": -1,
+                                    "date": body.date,
+                                    "movement_type": "production_usage",
+                                    "block_type": body.block_type,
+                                    "block_quantity": body.quantity,
+                                    "supervisor_id": user["id"],
+                                    "supervisor_name": record["supervisor_name"],
+                                    "recipe_id": recipe_snapshot["id"],
+                                    "recipe_version": recipe_snapshot["version"],
+                                    "created_at": now_iso(),
+                                })
+                                allocation["movement_id"] = movement_record["id"]
+                            await post_movement(
+                                stock, "production", body.quantity, user,
+                                reason=f"Block production {reference}", reference=reference,
+                                dedupe_key=f"block-production:{record_id}",
+                                extra={
+                                    "block_production_id": record_id,
+                                    "unit_cost": known_cost_per_block if costs_complete else None,
+                                    "total_cost": record["known_total_cost"] if costs_complete else None,
+                                },
+                            )
+                            movement = await db.stock_movements.find_one(
+                                {"dedupe_key": f"block-production:{record_id}"}, {"_id": 0},
+                            )
+                            after_rows = await listall("chemical_inventory", limit=5000)
+                            usage_lines = []
+                            for index, component in enumerate(components):
+                                total_remaining = 0.0
+                                kind = _production_stock_unit_factor(component["unit"])[0]
+                                for row in after_rows:
+                                    if row.get("chemical", "").casefold() != component["chemical"].casefold():
+                                        continue
+                                    if _production_stock_unit_factor(row.get("unit", ""))[0] != kind:
+                                        continue
+                                    available = max(
+                                        0,
+                                        float(row.get("capacity") or 0) * float(row.get("count") or 0)
+                                        - float(row.get("quantity_used") or 0),
+                                    )
+                                    total_remaining += _convert_production_quantity(
+                                        available, row["unit"], component["unit"],
+                                    )
+                                usage_lines.append({
+                                    "chemical": component["chemical"],
+                                    "unit": component["unit"],
+                                    "used_quantity": float(component["quantity"]) * body.quantity,
+                                    "initial_quantity": initial_by_component[index],
+                                    "remaining_estimate": total_remaining,
+                                    "production_id": record_id,
+                                    "production_reference": reference,
+                                    "movement_ids": [
+                                        allocation["movement_id"]
+                                        for allocation in allocations
+                                        if allocation["component_index"] == index
+                                    ],
+                                    "block_type": body.block_type,
+                                    "block_quantity": body.quantity,
+                                    "supervisor_name": record["supervisor_name"],
+                                    "component_cost": (
+                                        round(float(component["cost"]) * body.quantity, 2)
+                                        if component.get("cost") is not None else None
+                                    ),
+                                    "unit_cost": None,
+                                    "valuation_status": "not_configured",
+                                })
+                            chemical_log = await insert("chemical_logs", {
+                                "date": body.date,
+                                "notes": f"Production {reference}: {body.quantity} x {body.block_type}",
+                                "lines": usage_lines,
+                                "production_id": record_id,
+                                "production_reference": reference,
+                                "created_by": user["id"],
+                                "created_by_name": record["supervisor_name"],
+                            })
+                            chemical_log_id = chemical_log["id"]
+                            record["chemical_log_id"] = chemical_log_id
+                            record["status"] = "completed"
+                            record["completed_at"] = now_iso()
+                            await db.production_block_records.update_one(
+                                {"id": record_id},
+                                {"$set": {
+                                    "chemical_log_id": chemical_log_id,
+                                    "status": "completed",
+                                    "completed_at": record["completed_at"],
+                                }},
+                            )
+                        finally:
+                            active_mongo_session.reset(session_token)
+    except Exception as error:
+        if created_stock and stock:
+            try:
+                await db.stock.delete_one({"id": stock["id"]})
+            except Exception:
+                logging.exception(
+                    "Could not remove empty stock item after failed block production %s",
+                    record_id,
+                )
+                raise HTTPException(
+                    500,
+                    "Block production failed and its new empty stock item could not be removed",
+                ) from error
+        if isinstance(error, HTTPException):
+            raise
+        if _transaction_unavailable(error):
+            raise HTTPException(
+                503,
+                "The database does not support transactions; no production or inventory changes were saved",
+            ) from error
+        if isinstance(error, DuplicateKeyError):
+            existing = await db.production_block_records.find_one({"request_id": body.request_id}, {"_id": 0})
+            if existing and existing.get("status") == "completed":
+                return existing
+            raise HTTPException(409, "This production request was already submitted") from error
+        logging.exception("Block production %s failed; database transaction was aborted", record_id)
+        raise HTTPException(500, "Block production failed; no inventory changes were saved") from error
+
+    await log_audit("production_block", record_id, "completed", user, after=record)
+    await log_audit("chemical_log", chemical_log_id, "production_usage_recorded", user, after=chemical_log)
+    await emit_workflow_event("stock.movement_recorded", movement)
+    await emit_workflow_event("production.completed", {
+        **record,
+        "quantity": record["quantity"],
+        "block_ref": record["block_type"],
+        "production_date": record["date"],
+    })
+    return record
+
+
+@api.get("/production/block-productions")
+async def get_block_productions(user=Depends(get_current_user)):
+    _require_block_production_access(user)
+    return await listall("production_block_records", sort=("date", -1), limit=500)
+
+LOW_STOCK_ALERT_RATIO = 0.2
+CHEMICAL_LOW_STOCK_COVERAGE_DAYS = 3
+CHEMICAL_USAGE_LOOKBACK_DAYS = 7
+
+
+def chemical_low_stock_threshold(logs, chemical, unit, today=None):
+    today = today or local_today()
+    chemical_key = chemical.strip().casefold()
+    unit_key = unit.strip().casefold()
+    rows = []
+    for log in logs:
+        try:
+            log_date = date.fromisoformat(log["date"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        for line in log.get("lines", []):
+            if (
+                line.get("chemical", "").strip().casefold() == chemical_key
+                and line.get("unit", "").strip().casefold() == unit_key
+            ):
+                rows.append((log_date, line))
+    if not rows:
+        return 0
+
+    reference_quantity = max(
+        (float(line.get("initial_quantity") or 0) for _, line in rows),
+        default=0,
+    )
+    reference_quantity = max(
+        reference_quantity,
+        max((float(line.get("remaining_estimate") or 0) for _, line in rows), default=0),
+    )
+    lookback_start = today - timedelta(days=CHEMICAL_USAGE_LOOKBACK_DAYS - 1)
+    recent_usage = sum(
+        float(line.get("used_quantity") or 0)
+        for log_date, line in rows
+        if lookback_start <= log_date <= today
+    )
+    usage_based_threshold = (
+        recent_usage * CHEMICAL_LOW_STOCK_COVERAGE_DAYS / CHEMICAL_USAGE_LOOKBACK_DAYS
+    )
+    return max(reference_quantity * LOW_STOCK_ALERT_RATIO, usage_based_threshold)
+
+
+async def update_low_stock_notification(
+    user, alert_key, is_low, title, message, action_path, reference_quantity=None,
+):
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    state_id = f"{company_id}:{alert_key}"
+    state = await db.inventory_alert_states.find_one({"id": state_id}, {"_id": 0})
+    reference = max(
+        float((state or {}).get("reference_quantity") or 0),
+        float(reference_quantity or 0),
+    )
+    if reference_quantity is not None and (
+        not state or reference > float(state.get("reference_quantity") or 0)
+    ):
+        await db.inventory_alert_states.update_one(
+            {"id": state_id},
+            {"$set": {
+                "active": bool((state or {}).get("active")),
+                "reference_quantity": reference,
+                "updated_at": now_iso(),
+            }},
+            upsert=True,
+        )
+        state = await db.inventory_alert_states.find_one({"id": state_id}, {"_id": 0})
+
+    if not is_low:
+        if not state or not state.get("active"):
+            return
+        await db.inventory_alert_states.update_one(
+            {"id": state_id, "active": True},
+            {"$set": {"active": False, "updated_at": now_iso()}},
+        )
+        await base_db.notifications.update_many(
+            {"company_id": company_id, "event_key": state["event_key"], "archived": {"$ne": True}},
+            {"$set": {"archived": True, "archived_at": now_iso()}},
+        )
+        return
+
+    if state and state.get("active"):
+        return
+
+    event_key = f"inventory-low:{state_id}:{new_id()}"
+    update = await db.inventory_alert_states.update_one(
+        {"id": state_id, "active": {"$ne": True}},
+        {"$set": {"active": True, "event_key": event_key, "updated_at": now_iso()}},
+        upsert=not bool(state),
+    )
+    if not update.modified_count and not update.upserted_id:
+        return
+
+    accounts = await base_db.users.find(
+        {"active": {"$ne": False}},
+        {"_id": 0, "id": 1, "email": 1, "role": 1, "company_roles": 1, "is_worker": 1},
+    ).to_list(None)
+    for recipient in fleet_notification_recipients(accounts, company_id):
+        notification = {
+            "id": new_id(),
+            "company_id": company_id,
+            "recipient_user_id": recipient["id"],
+            "type": "inventory_low_stock",
+            "event_key": event_key,
+            "title": title,
+            "message": message,
+            "action_path": action_path,
+            "created_at": now_iso(),
+            "read": False,
+            "dismiss_count": 0,
+            "permanently_dismissed": False,
+            "archived": False,
+        }
+        await base_db.notifications.update_one(
+            {
+                "company_id": company_id,
+                "event_key": event_key,
+                "recipient_user_id": recipient["id"],
+            },
+            {"$setOnInsert": notification},
+            upsert=True,
+        )
+
+
 @api.get("/warehouses/chemical/logs")
 async def get_chemical_logs(user=Depends(get_current_user)):
     require_chemical_access(user)
-    return await listall("chemical_logs", sort=("date", -1), limit=500)
+    logs = await listall("chemical_logs", sort=("date", -1), limit=500)
+    latest_keys = set()
+    for log in logs:
+        for line in log.get("lines", []):
+            key = (line.get("chemical", "").strip().casefold(), line.get("unit", "").strip().casefold())
+            if key in latest_keys:
+                continue
+            latest_keys.add(key)
+            threshold = chemical_low_stock_threshold(
+                logs, line.get("chemical", ""), line.get("unit", ""), local_today(),
+            )
+            line["low_stock_threshold"] = threshold
+            line["low_stock"] = float(line.get("remaining_estimate") or 0) <= threshold
+    return logs
 
 
 @api.post("/warehouses/chemical/logs")
@@ -2605,6 +3465,28 @@ async def save_chemical_log(body: ChemicalLogIn, user=Depends(get_current_user))
         "created_by_name": user.get("name") or user.get("username") or "",
     })
     await log_audit("chemical_log", log["id"], "created", user, after=log)
+    history = await listall("chemical_logs", sort=("date", -1), limit=500)
+    processed = set()
+    for line in body.lines:
+        chemical_key = line.chemical.strip().casefold()
+        unit_key = line.unit.strip().casefold()
+        key = (chemical_key, unit_key)
+        if key in processed:
+            continue
+        processed.add(key)
+        threshold = chemical_low_stock_threshold(
+            history, line.chemical, line.unit, date.fromisoformat(body.date),
+        )
+        remaining = line.remaining_estimate
+        await update_low_stock_notification(
+            user,
+            f"chemical:{chemical_key}:{unit_key}",
+            remaining <= threshold,
+            f"Low chemical stock: {line.chemical}",
+            f"Estimated remaining: {remaining:g} {line.unit}. Reorder level: {threshold:g} {line.unit} "
+            f"(about {CHEMICAL_LOW_STOCK_COVERAGE_DAYS} days of recent use or 20% of the recorded stock level).",
+            "/warehouses/chemical",
+        )
     return log
 
 
@@ -2639,10 +3521,106 @@ class ChemicalInventoryIn(BaseModel):
         return value
 
 
+class ChemicalMinimumStockIn(BaseModel):
+    chemical: str = Field(min_length=1, max_length=120)
+    unit: str = Field(min_length=1, max_length=20)
+    minimum_quantity: float = Field(ge=0, allow_inf_nan=False)
+
+    @field_validator("chemical", "unit")
+    @classmethod
+    def strip_minimum_stock_text(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("This field is required")
+        return value
+
+
+def chemical_inventory_setting_id(company_id, chemical, unit):
+    return f"{company_id}:{chemical.strip().casefold()}:{unit.strip().casefold()}"
+
+
 @api.get("/warehouses/chemical/inventory")
 async def get_chemical_inventory(user=Depends(get_current_user)):
     require_chemical_access(user)
-    return await listall("chemical_inventory", sort=("chemical", 1), limit=1000)
+    items = await listall("chemical_inventory", sort=("chemical", 1), limit=1000)
+    totals = {}
+    for item in items:
+        key = (item["chemical"].strip().casefold(), item["unit"].strip().casefold())
+        available = max(
+            0,
+            float(item.get("capacity") or 0) * float(item.get("count") or 0)
+            - float(item.get("quantity_used") or 0),
+        )
+        item["available_quantity"] = available
+        totals[key] = totals.get(key, 0) + available
+    states = await listall("inventory_alert_states", limit=2000)
+    states_by_id = {state["id"]: state for state in states if state.get("id")}
+    settings = await listall("chemical_inventory_settings", limit=2000)
+    settings_by_id = {setting["id"]: setting for setting in settings if setting.get("id")}
+    for item in items:
+        key = (item["chemical"].strip().casefold(), item["unit"].strip().casefold())
+        alert_key = f"chemical-inventory:{key[0]}:{key[1]}"
+        state = states_by_id.get(
+            f"{user.get('_active_company_id') or DEFAULT_COMPANY_ID}:{alert_key}",
+        )
+        reference = max(
+            float((state or {}).get("reference_quantity") or 0),
+            totals[key],
+        )
+        setting = settings_by_id.get(chemical_inventory_setting_id(
+            user.get("_active_company_id") or DEFAULT_COMPANY_ID,
+            item["chemical"],
+            item["unit"],
+        ))
+        item["minimum_stock"] = setting.get("minimum_quantity") if setting else None
+        item["low_stock_threshold"] = (
+            float(setting["minimum_quantity"])
+            if setting
+            else reference * LOW_STOCK_ALERT_RATIO
+        )
+        item["low_stock"] = (
+            totals[key] <= item["low_stock_threshold"]
+            if item["low_stock_threshold"] > 0 else False
+        )
+        item["stock_value"] = None
+        item["valuation_configured"] = False
+    return items
+
+
+@api.put("/warehouses/chemical/inventory/minimum")
+async def set_chemical_minimum_stock(body: ChemicalMinimumStockIn, user=Depends(get_current_user)):
+    require_chemical_access(user)
+    if user.get("is_worker"):
+        if not user.get("worker_is_supervisor"):
+            raise HTTPException(403, "Only a designated worker supervisor can change minimum stock levels")
+    elif not is_company_admin(user):
+        raise HTTPException(403, "Only a company administrator can change minimum stock levels")
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    setting_id = chemical_inventory_setting_id(company_id, body.chemical, body.unit)
+    setting = {
+        "id": setting_id,
+        "chemical": body.chemical,
+        "unit": body.unit,
+        "minimum_quantity": body.minimum_quantity,
+        "updated_at": now_iso(),
+        "updated_by": user["id"],
+    }
+    await db.chemical_inventory_settings.update_one(
+        {"id": setting_id},
+        {"$set": setting},
+        upsert=True,
+    )
+    total = await chemical_container_inventory_total(body.chemical, body.unit)
+    await update_low_stock_notification(
+        user,
+        f"chemical-inventory:{body.chemical.casefold()}:{body.unit.casefold()}",
+        body.minimum_quantity > 0 and total <= body.minimum_quantity,
+        f"Low chemical inventory: {body.chemical}",
+        f"Available: {total:g} {body.unit}. Minimum: {body.minimum_quantity:g} {body.unit}.",
+        "/warehouses/chemical-inventory",
+    )
+    await log_audit("chemical_inventory_setting", setting_id, "minimum_stock_updated", user, after=setting)
+    return setting
 
 
 @api.post("/warehouses/chemical/inventory")
@@ -2653,8 +3631,60 @@ async def save_chemical_inventory(body: ChemicalInventoryIn, user=Depends(get_cu
         "created_by": user["id"],
         "created_by_name": user.get("name") or user.get("username") or "",
     })
+    await insert("chemical_inventory_movements", {
+        "inventory_id": item["id"],
+        "chemical": item["chemical"],
+        "quantity": body.capacity * body.count,
+        "unit": item["unit"],
+        "direction": 1,
+        "movement_type": "stock_opening",
+        "date": local_today().isoformat(),
+        "created_at": now_iso(),
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("username") or "",
+    })
     await log_audit("chemical_inventory", item["id"], "created", user, after=item)
+    total = await chemical_container_inventory_total(item["chemical"], item["unit"])
+    alert_key = f"chemical-inventory:{item['chemical'].strip().casefold()}:{item['unit'].strip().casefold()}"
+    state = await db.inventory_alert_states.find_one(
+        {"id": f"{user.get('_active_company_id') or DEFAULT_COMPANY_ID}:{alert_key}"}, {"_id": 0},
+    )
+    reference = max(total, float((state or {}).get("reference_quantity") or 0))
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    setting = await db.chemical_inventory_settings.find_one(
+        {"id": chemical_inventory_setting_id(company_id, item["chemical"], item["unit"])},
+        {"_id": 0},
+    )
+    threshold = (
+        float(setting["minimum_quantity"])
+        if setting
+        else reference * LOW_STOCK_ALERT_RATIO
+    )
+    await update_low_stock_notification(
+        user,
+        alert_key,
+        threshold > 0 and total <= threshold,
+        f"Low chemical inventory: {item['chemical']}",
+        f"Available: {total:g} {item['unit']}. Reorder level: {threshold:g} {item['unit']} "
+        "(20% of the highest recorded quantity).",
+        "/warehouses/chemical-inventory",
+        reference_quantity=reference,
+    )
     return item
+
+
+async def chemical_container_inventory_total(chemical, unit):
+    rows = await listall("chemical_inventory", limit=1000)
+    return sum(
+        max(
+            0,
+            float(row.get("capacity") or 0) * float(row.get("count") or 0)
+            - float(row.get("quantity_used") or 0),
+        )
+        for row in rows
+        if row.get("chemical", "").strip().casefold() == chemical.strip().casefold()
+        and row.get("unit", "").strip().casefold() == unit.strip().casefold()
+    )
 
 
 @api.delete("/warehouses/chemical/inventory/{item_id}")
@@ -2664,7 +3694,26 @@ async def delete_chemical_inventory(item_id: str, user=Depends(get_current_user)
     item = await db.chemical_inventory.find_one({"id": item_id}, {"_id": 0})
     if not item:
         raise HTTPException(404, "Inventory entry not found")
+    if float(item.get("quantity_used") or 0) > 0:
+        raise HTTPException(409, "This chemical entry has production usage history and cannot be deleted")
     await db.chemical_inventory.delete_one({"id": item_id})
+    total = await chemical_container_inventory_total(item["chemical"], item["unit"])
+    alert_key = f"chemical-inventory:{item['chemical'].strip().casefold()}:{item['unit'].strip().casefold()}"
+    state = await db.inventory_alert_states.find_one(
+        {"id": f"{user.get('_active_company_id') or DEFAULT_COMPANY_ID}:{alert_key}"}, {"_id": 0},
+    )
+    reference = max(total, float((state or {}).get("reference_quantity") or 0))
+    threshold = reference * LOW_STOCK_ALERT_RATIO
+    await update_low_stock_notification(
+        user,
+        alert_key,
+        total <= threshold,
+        f"Low chemical inventory: {item['chemical']}",
+        f"Available: {total:g} {item['unit']}. Reorder level: {threshold:g} {item['unit']} "
+        "(20% of the highest recorded quantity).",
+        "/warehouses/chemical-inventory",
+        reference_quantity=reference,
+    )
     await log_audit("chemical_inventory", item_id, "permanently_deleted", user,
                     before=item, after={"deleted": True})
     return {"ok": True, "deleted": True}
@@ -2695,8 +3744,31 @@ class CompanyInventoryIn(BaseModel):
         return self
 
 
+class CompanyInventoryDailyUpdateIn(BaseModel):
+    quantity: float = Field(ge=0, allow_inf_nan=False)
+    date: str = Field(default_factory=today_str, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @field_validator("date")
+    @classmethod
+    def validate_daily_update_date(cls, value):
+        try:
+            date.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("Enter a valid date") from error
+        return value
+
+
 def company_inventory_total(item):
+    if item.get("daily_remaining_quantity") is not None:
+        return round(float(item["daily_remaining_quantity"]), 4)
     return round(item.get("packages", 0) * item.get("units_per_package", 0) + item.get("loose_units", 0), 4)
+
+
+def company_inventory_low_stock_threshold(item, reference_quantity=None):
+    reference = reference_quantity
+    if reference is None:
+        reference = item.get("stock_reference_quantity", company_inventory_total(item))
+    return max(0, float(reference or 0)) * LOW_STOCK_ALERT_RATIO
 
 
 def require_company_inventory_access(user, read_only=False):
@@ -2712,19 +3784,95 @@ async def get_company_inventory(user=Depends(get_current_user)):
     items = await listall("company_inventory", sort=("category", 1), limit=2000)
     for item in items:
         item["total"] = company_inventory_total(item)
+        item["low_stock_threshold"] = company_inventory_low_stock_threshold(item)
+        item["low_stock"] = item["total"] <= item["low_stock_threshold"]
     return items
 
 
 @api.post("/company-inventory")
 async def add_company_inventory(body: CompanyInventoryIn, user=Depends(get_current_user)):
     require_company_inventory_access(user)
+    inventory_data = body.model_dump()
+    total = company_inventory_total(inventory_data)
     item = await insert("company_inventory", {
-        **body.model_dump(),
+        **inventory_data,
+        "stock_reference_quantity": total,
         "created_by": user["id"],
         "created_by_name": user.get("name") or user.get("username") or "",
     })
     await log_audit("company_inventory", item["id"], "created", user, after=item)
     item["total"] = company_inventory_total(item)
+    threshold = company_inventory_low_stock_threshold(item)
+    await update_low_stock_notification(
+        user,
+        f"company-inventory:{item['id']}",
+        item["total"] <= threshold,
+        f"Low company inventory: {item['name']}",
+        f"Remaining: {item['total']:g} {item['unit']}. Reorder level: {threshold:g} {item['unit']} "
+        "(20% of the highest recorded quantity).",
+        "/company-inventory",
+    )
+    return item
+
+
+@api.post("/company-inventory/{item_id}/daily-update")
+async def update_company_inventory_daily_quantity(
+    item_id: str,
+    body: CompanyInventoryDailyUpdateIn,
+    user=Depends(get_current_user),
+):
+    require_company_inventory_access(user)
+    before = await db.company_inventory.find_one({"id": item_id}, {"_id": 0})
+    if not before:
+        raise HTTPException(404, "Inventory item not found")
+
+    previous_reference = before.get(
+        "stock_reference_quantity",
+        company_inventory_total(before),
+    )
+    reference_quantity = max(float(previous_reference or 0), body.quantity)
+    updated = await db.company_inventory.update_one(
+        {"id": item_id},
+        {"$set": {
+            "daily_remaining_quantity": body.quantity,
+            "daily_remaining_date": body.date,
+            "stock_reference_quantity": reference_quantity,
+            "updated_at": now_iso(),
+        }},
+    )
+    if not updated.matched_count:
+        raise HTTPException(404, "Inventory item not found")
+
+    daily_update = {
+        "company_inventory_id": item_id,
+        "date": body.date,
+        "quantity": body.quantity,
+        "unit": before.get("unit", ""),
+        "updated_by": user["id"],
+        "updated_by_name": user.get("name") or user.get("username") or "",
+        "updated_at": now_iso(),
+    }
+    await db.company_inventory_daily_updates.update_one(
+        {"company_inventory_id": item_id, "date": body.date},
+        {"$set": daily_update, "$setOnInsert": {"id": new_id()}},
+        upsert=True,
+    )
+    item = await db.company_inventory.find_one({"id": item_id}, {"_id": 0})
+    item["total"] = company_inventory_total(item)
+    threshold = company_inventory_low_stock_threshold(item, reference_quantity)
+    await update_low_stock_notification(
+        user,
+        f"company-inventory:{item_id}",
+        item["total"] <= threshold,
+        f"Low company inventory: {item['name']}",
+        f"Remaining: {item['total']:g} {item['unit']}. Reorder level: {threshold:g} {item['unit']} "
+        "(20% of the highest recorded quantity).",
+        "/company-inventory",
+    )
+    await log_audit(
+        "company_inventory", item_id, "daily_quantity_updated", user,
+        before=before, after=item,
+    )
     return item
 
 
@@ -2734,9 +3882,28 @@ async def update_company_inventory(item_id: str, body: CompanyInventoryIn, user=
     before = await db.company_inventory.find_one({"id": item_id}, {"_id": 0})
     if not before:
         raise HTTPException(404, "Inventory item not found")
-    item = await update_doc("company_inventory", item_id, body.model_dump())
+    inventory_data = body.model_dump()
+    total = company_inventory_total(inventory_data)
+    previous_reference = before.get(
+        "stock_reference_quantity", company_inventory_total(before),
+    )
+    reference_quantity = max(float(previous_reference or 0), total)
+    inventory_data["daily_remaining_quantity"] = None
+    inventory_data["daily_remaining_date"] = None
+    inventory_data["stock_reference_quantity"] = reference_quantity
+    item = await update_doc("company_inventory", item_id, inventory_data)
     await log_audit("company_inventory", item_id, "edited", user, before=before, after=item)
     item["total"] = company_inventory_total(item)
+    threshold = company_inventory_low_stock_threshold(item, reference_quantity)
+    await update_low_stock_notification(
+        user,
+        f"company-inventory:{item['id']}",
+        item["total"] <= threshold,
+        f"Low company inventory: {item['name']}",
+        f"Remaining: {item['total']:g} {item['unit']}. Reorder level: {threshold:g} {item['unit']} "
+        "(20% of the highest recorded quantity).",
+        "/company-inventory",
+    )
     return item
 
 
@@ -2748,6 +3915,9 @@ async def delete_company_inventory(item_id: str, user=Depends(get_current_user))
     if not item:
         raise HTTPException(404, "Inventory item not found")
     await db.company_inventory.delete_one({"id": item_id})
+    await update_low_stock_notification(
+        user, f"company-inventory:{item_id}", False, "", "", "/company-inventory",
+    )
     await log_audit("company_inventory", item_id, "permanently_deleted", user,
                     before=item, after={"deleted": True})
     return {"ok": True, "deleted": True}
@@ -3146,12 +4316,13 @@ async def customer_summary(
         )
         if bool(p.get("express")) == express_only
     ]
-    pays = [p for p in payment_records
-            if not p.get("reversed") and not p.get("archived") and not p.get("other_balance_payment")]
+    customer_payments = [p for p in payment_records
+                         if not p.get("archived") and not p.get("other_balance_payment")]
+    pays = [p for p in customer_payments if not p.get("reversed")]
     other_balance_record = await db.customers.find_one({"id": cid}, {"_id": 0, "other_balance": 1})
     other_balance = (other_balance_record or {}).get("other_balance") or 0
     invoices_outstanding = dsum(i.get("outstanding", 0) for i in valid)
-    return {"invoices": invs, "payments": pays,
+    return {"invoices": invs, "payments": customer_payments,
             "other_balance_payments": other_balance_history,
             "invoices_outstanding": invoices_outstanding,
             "other_balance": other_balance or 0,
@@ -3692,12 +4863,13 @@ async def create_invoice_action_authorization(iid, action, password, user, targe
         raise HTTPException(404, "Invoice not found")
     if inv.get("archived") or inv.get("status") == "void":
         raise HTTPException(400, "This invoice cannot be changed")
-    if action == "reverse_payment":
+    if action in {"reverse_payment", "delete_payment"}:
         payment = await db.payments.find_one({
-            "id": target_id, "invoice_id": iid, "reversed": {"$ne": True}, "archived": {"$ne": True},
+            "id": target_id, "invoice_id": iid, "archived": {"$ne": True},
+            **({"reversed": {"$ne": True}} if action == "reverse_payment" else {}),
         }, {"_id": 0, "id": 1})
         if not payment:
-            raise HTTPException(404, "Payment not found or already reversed")
+            raise HTTPException(404, "Payment not found or no longer available")
 
     supervisor_id, supervisor_name = await authenticate_supervisor(password, user)
     await db.invoice_edit_authorizations.delete_many({
@@ -3752,9 +4924,9 @@ async def authorize_invoice_edit(iid: str, body: InvoiceEditAuthorizationIn, use
 
 @api.post("/invoices/{iid}/authorize-action")
 async def authorize_invoice_action(iid: str, body: InvoiceActionAuthorizationIn, user=Depends(get_current_user)):
-    if body.action not in {"void", "reverse_payment"}:
+    if body.action not in {"void", "reverse_payment", "delete_payment"}:
         raise HTTPException(400, "Unsupported supervisor action")
-    if body.action == "reverse_payment" and not body.target_id:
+    if body.action in {"reverse_payment", "delete_payment"} and not body.target_id:
         raise HTTPException(400, "A payment is required for this action")
     if body.action == "void" and body.target_id:
         raise HTTPException(400, "This action does not accept a target")
@@ -4253,16 +5425,72 @@ async def reverse_payment(pid: str, body: ReasonIn, user=Depends(get_current_use
     await emit_workflow_event("payment.reversed", p)
     return p
 
+@api.delete("/payments/{pid}")
+async def delete_invoice_payment(pid: str, body: ReasonIn, user=Depends(get_current_user)):
+    if not body.reason.strip():
+        raise HTTPException(400, "A reason is required to delete a payment")
+    payment = await db.payments.find_one({
+        "id": pid, "other_balance_payment": {"$ne": True}, "archived": {"$ne": True},
+    }, {"_id": 0})
+    if not payment:
+        raise HTTPException(404, "Invoice payment not found")
+    await consume_invoice_action_authorization(
+        body.supervisor_authorization, payment["invoice_id"], "delete_payment", user, pid,
+    )
+    deleted = await db.payments.find_one_and_delete({
+        "id": pid, "invoice_id": payment["invoice_id"], "other_balance_payment": {"$ne": True},
+        "archived": {"$ne": True},
+    }, projection={"_id": 0})
+    if not deleted:
+        raise HTTPException(404, "Invoice payment not found")
+    await recalc_invoice_payments(payment["invoice_id"])
+    await log_audit("payment", pid, "deleted", user, before=deleted, after=None, reason=body.reason)
+    return {"ok": True, "deleted": True}
+
 @api.delete("/payments/{pid}/other-balance")
 async def delete_other_balance_payment(pid: str, user=Depends(get_current_user)):
     payment = await db.payments.find_one({"id": pid, "other_balance_payment": True}, {"_id": 0})
+    has_payment_record = payment is not None
     if not payment:
-        raise HTTPException(404, "Other balance payment not found")
+        customer = await db.customers.find_one(
+            {"other_balance_payments.payment_id": pid}, {"_id": 0},
+        )
+        history = (customer or {}).get("other_balance_payments") or []
+        entry = next((item for item in history if item.get("payment_id") == pid), None)
+        if not customer or not entry:
+            raise HTTPException(404, "Other balance payment not found")
+        payment = {**entry, "id": pid, "customer_id": customer["id"]}
     await db.customers.update_one(
         {"id": payment["customer_id"]}, {"$pull": {"other_balance_payments": {"payment_id": pid}}},
     )
-    await db.payments.delete_one({"id": pid})
+    if has_payment_record:
+        await db.payments.delete_one({"id": pid})
     await log_audit("payment", pid, "deleted", user, before=payment, after=None)
+    return {"ok": True, "deleted": True}
+
+@api.delete("/customers/{cid}/other-balance-history/{index}")
+async def delete_legacy_other_balance_history(cid: str, index: int, user=Depends(get_current_user)):
+    customer = await db.customers.find_one({"id": cid}, {"_id": 0})
+    if not customer:
+        raise HTTPException(404, "Customer not found")
+    history = customer.get("other_balance_payments") or []
+    if index < 0 or index >= len(history):
+        raise HTTPException(404, "Other balance payment history entry not found")
+    entry = history[index]
+    if entry.get("id") or entry.get("payment_id"):
+        raise HTTPException(409, "Payment history changed; refresh and try again")
+
+    updated_history = history[:index] + history[index + 1:]
+    result = await db.customers.update_one(
+        {"id": cid, "other_balance_payments": history},
+        {"$set": {"other_balance_payments": updated_history}},
+    )
+    if not result.matched_count:
+        raise HTTPException(409, "Payment history changed; refresh and try again")
+    await log_audit(
+        "customer", cid, "other_balance_payment_history_deleted", user,
+        before={"entry": entry}, after={"other_balance_payments": updated_history},
+    )
     return {"ok": True, "deleted": True}
 
 @api.get("/payments")
@@ -4929,8 +6157,8 @@ def mov_sign(m):
         return m["direction"]
     return 1 if m["type"] in INC_TYPES else -1
 
-async def stock_current(s):
-    movs = await listall("stock_movements", {"stock_id": s["id"]})
+async def stock_current(s, session=None):
+    movs = await listall("stock_movements", {"stock_id": s["id"]}, session=session)
     return apply_stock_movements(s, movs)
 
 def apply_stock_movements(stock, movements):
@@ -4951,10 +6179,13 @@ def stock_for_user(stock, user):
         stock.pop("unit_cost", None)
     return stock
 
-async def post_movement(stock, mtype, qty, user, reason="", reference="", notes="", dedupe_key=None, direction=None, allow_negative=False, extra=None):
+async def post_movement(stock, mtype, qty, user, reason="", reference="", notes="", dedupe_key=None, direction=None, allow_negative=False, extra=None, session=None):
     sign = direction or (1 if mtype in INC_TYPES else -1)
     if sign < 0 and not allow_negative:
-        await stock_current(stock)
+        if session is None:
+            await stock_current(stock)
+        else:
+            await stock_current(stock, session=session)
         if D(qty) > D(stock["current"]):
             raise HTTPException(400, f"Insufficient stock for {stock['product']} {stock['size']}: available {stock['current']}, requested {qty}")
     m = {"stock_id": stock["id"], "product_id": stock.get("product_id"),
@@ -4963,8 +6194,10 @@ async def post_movement(stock, mtype, qty, user, reason="", reference="", notes=
          "date": today_str(), "user": user["email"] if user else "system", **(extra or {})}
     if dedupe_key:
         m["dedupe_key"] = dedupe_key
-    record = await insert("stock_movements", m)
-    await emit_workflow_event("stock.movement_recorded", record)
+    session_options = {"session": session} if session is not None else {}
+    record = await insert("stock_movements", m, **session_options)
+    if session is None and active_mongo_session.get() is None:
+        await emit_workflow_event("stock.movement_recorded", record)
     return record
 
 def allocate_fifo_batches(stock_id, opening_quantity, movements, requested_quantity):
@@ -8065,15 +9298,25 @@ async def authorize_supervisor_company_change(
 ):
     if user.get("is_worker"):
         action = body.action
-        if (
-            user.get("_active_company_id") != MANUFACTURING_COMPANY_ID
-            or not user.get("worker_is_supervisor")
-            or action not in WORKER_SUPERVISOR_ACTIONS
-            or action not in set(user.get("worker_supervisor_password_actions") or [])
-        ):
-            raise HTTPException(403, "This worker is not authorized for that supervisor-protected action")
+        generic_action = None
+        if ":" in action:
+            section, operation = action.split(":", 1)
+            if operation in {"create", "update", "delete"}:
+                configured = (user.get("worker_write_permissions") or {}).get(section, {})
+                if configured.get(operation) == "supervisor":
+                    generic_action = (section, operation)
+        if generic_action:
+            grant_company_id = user.get("_active_company_id")
+        else:
+            if (
+                user.get("_active_company_id") != MANUFACTURING_COMPANY_ID
+                or not user.get("worker_is_supervisor")
+                or action not in WORKER_SUPERVISOR_ACTIONS
+                or action not in set(user.get("worker_supervisor_password_actions") or [])
+            ):
+                raise HTTPException(403, "This worker is not authorized for that supervisor-protected action")
+            grant_company_id = MANUFACTURING_COMPANY_ID
         grant_scope = "supervisor_worker_action"
-        grant_company_id = MANUFACTURING_COMPANY_ID
     else:
         if not is_delegated_company_admin(user) or user.get("_active_company_id") != DEFAULT_COMPANY_ID:
             raise HTTPException(403, "This authorization is only available to company owners in SUPERIQFOAM")
@@ -12876,6 +14119,13 @@ async def initialize_empty_company(company_id):
                                 ("prices", [("zone", 1), ("category", 1), ("size", 1)], {"unique": True}),
                                 ("audit_log", [("entity", 1), ("entity_id", 1)], {})):
         await company_db[coll].create_index(keys, **options)
+    if company_id == MANUFACTURING_COMPANY_ID:
+        await company_db.production_block_records.create_index(
+            "request_id",
+            unique=True,
+            partialFilterExpression={"request_id": {"$type": "string"}},
+            name="block_production_request_once",
+        )
     for coll in ("invoices", "payments", "expenses"):
         await company_db[coll].create_index([("company_id", 1), ("date", 1)])
     await company_db.invoices.create_index(

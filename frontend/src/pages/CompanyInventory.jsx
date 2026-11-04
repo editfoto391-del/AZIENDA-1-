@@ -4,6 +4,7 @@ import { Boxes, Pencil, Plus, Trash2 } from "lucide-react";
 import { Btn, Card, Empty, Input, Modal, PageHeader } from "@/components/common";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
+import { today } from "@/lib/format";
 
 const CATEGORIES = ["Glue", "Solo Tape", "Fabric Roll", "Ribbon", "Cotton"];
 const PACKAGINGS = ["Box", "Carton", "Pallet", "Roll", "Drum"];
@@ -41,9 +42,11 @@ export default function CompanyInventory() {
   const canDelete = canEdit && (user?.is_owner || user?.is_company_owner);
   const [items, setItems] = useState(null);
   const [form, setForm] = useState(null);
+  const [dailyUpdate, setDailyUpdate] = useState(null);
   const [editId, setEditId] = useState(null);
   const [filter, setFilter] = useState("");
   const [saving, setSaving] = useState(false);
+  const [savingDailyUpdate, setSavingDailyUpdate] = useState(false);
   const set = (patch) => setForm((current) => ({ ...current, ...patch }));
 
   const load = () => api.getUncached("/company-inventory")
@@ -95,6 +98,33 @@ export default function CompanyInventory() {
     }
   };
 
+  const openDailyUpdate = (item) => setDailyUpdate({
+    item,
+    date: today(),
+    quantity: String(item.total ?? 0),
+  });
+
+  const saveDailyUpdate = async () => {
+    const quantity = Number(dailyUpdate?.quantity);
+    if (!dailyUpdate || !Number.isFinite(quantity) || quantity < 0) {
+      return toast.error("Enter a valid remaining quantity");
+    }
+    setSavingDailyUpdate(true);
+    try {
+      await api.post(`/company-inventory/${dailyUpdate.item.id}/daily-update`, {
+        date: dailyUpdate.date,
+        quantity,
+      });
+      toast.success("Daily remaining quantity updated");
+      setDailyUpdate(null);
+      await load();
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setSavingDailyUpdate(false);
+    }
+  };
+
   const remove = async (item) => {
     if (!window.confirm(`Delete ${item.name}${item.size ? ` ${item.size}` : ""}?`)) return;
     try {
@@ -143,7 +173,7 @@ export default function CompanyInventory() {
         {items === null ? <p className="text-sm text-slate-400">Loading...</p> : visible.length === 0 ? <Empty icon={Boxes} title="No products" /> : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr className="text-left text-xs text-slate-500 border-b"><th className="py-2">Product</th><th>Category</th><th>Size</th><th>Packaging</th><th className="text-right">Loose</th><th className="text-right">Total</th><th /></tr></thead>
+              <thead><tr className="text-left text-xs text-slate-500 border-b"><th className="py-2">Product</th><th>Category</th><th>Size</th><th>Packaging</th><th className="text-right">Loose</th><th className="text-right">Total</th><th>Last daily update</th><th /></tr></thead>
               <tbody>{visible.map((item) => (
                 <tr key={item.id} className="border-b last:border-0">
                   <td className="py-2 font-semibold text-slate-800">{item.name}</td>
@@ -151,8 +181,13 @@ export default function CompanyInventory() {
                   <td className="font-mono">{item.size || "-"}</td>
                   <td>{item.packages > 0 ? `${fmt(item.packages)} ${item.packaging}` : "-"}</td>
                   <td className="text-right font-mono">{item.loose_units > 0 ? `${fmt(item.loose_units)} ${item.unit}` : "-"}</td>
-                  <td className="text-right font-mono font-bold">{fmt(item.total)} {item.unit}</td>
+                  <td className="text-right font-mono font-bold">
+                    {fmt(item.total)} {item.unit}
+                    {item.low_stock && <span className="ml-2 whitespace-nowrap rounded-full bg-amber-100 px-2 py-0.5 font-sans text-[11px] font-semibold text-amber-800">Low stock</span>}
+                  </td>
+                  <td className="text-slate-500">{item.daily_remaining_date || "-"}</td>
                   {canEdit && <td className="text-right whitespace-nowrap">
+                    <Btn variant="outline" onClick={() => openDailyUpdate(item)} aria-label={`Update remaining quantity for ${item.name}`} data-testid={`daily-update-${item.id}`}>Update</Btn>
                     <Btn variant="outline" onClick={() => openEdit(item)} aria-label="Edit product"><Pencil size={14} /></Btn>
                     {canDelete && <Btn variant="outline" className="ml-1" onClick={() => remove(item)} aria-label="Delete product"><Trash2 size={14} /></Btn>}
                   </td>}
@@ -162,6 +197,20 @@ export default function CompanyInventory() {
           </div>
         )}
       </Card>
+
+      <Modal open={!!dailyUpdate} onClose={() => setDailyUpdate(null)} title="Daily stock update">
+        {dailyUpdate && <div className="space-y-4">
+          <p className="text-sm text-slate-600">
+            {dailyUpdate.item.name} · Unit: <span className="font-semibold">{dailyUpdate.item.unit}</span>
+          </p>
+          <Input label="Date" type="date" value={dailyUpdate.date} max={today()} onChange={(event) => setDailyUpdate({ ...dailyUpdate, date: event.target.value })} data-testid="inventory-daily-date" />
+          <Input label={`Remaining quantity (${dailyUpdate.item.unit})`} type="number" min="0" step="any" value={dailyUpdate.quantity} onChange={(event) => setDailyUpdate({ ...dailyUpdate, quantity: event.target.value })} data-testid="inventory-daily-quantity" />
+          <div className="flex justify-end gap-2">
+            <Btn variant="outline" onClick={() => setDailyUpdate(null)}>Cancel</Btn>
+            <Btn disabled={savingDailyUpdate} onClick={saveDailyUpdate} data-testid="inventory-daily-save">{savingDailyUpdate ? "Saving..." : "Save daily update"}</Btn>
+          </div>
+        </div>}
+      </Modal>
 
       <Modal open={!!form} onClose={() => setForm(null)} title={editId ? "Edit Product" : "Add Product"}>
         {form && <div className="space-y-4">

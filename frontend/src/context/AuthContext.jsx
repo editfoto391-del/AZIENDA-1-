@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
-import { api, apiError } from "@/lib/api";
+import { api, apiError, invalidateGetCache } from "@/lib/api";
 import { dedicatedCompanyDomain } from "@/lib/company";
 import { Btn, Input, Modal } from "@/components/common";
 
@@ -44,17 +44,34 @@ export function AuthProvider({ children }) {
   }, []);
 
   useEffect(() => {
+    const refreshVisibleData = () => {
+      if (document.visibilityState === "visible") invalidateGetCache();
+    };
+    window.addEventListener("focus", refreshVisibleData);
+    document.addEventListener("visibilitychange", refreshVisibleData);
+    return () => {
+      window.removeEventListener("focus", refreshVisibleData);
+      document.removeEventListener("visibilitychange", refreshVisibleData);
+    };
+  }, []);
+
+  useEffect(() => {
     // Returning from Google OAuth: AuthCallback exchanges session_id first
     if (window.location.hash?.includes("session_id=")) { setBooting(false); return; }
     const sharedEntry = new URLSearchParams(window.location.search).get("utm_source") === "share";
     const workerAccessEntry = window.location.pathname.startsWith("/worker-access/");
     if (sharedEntry) {
       window.history.replaceState(null, "", "/login");
+      localStorage.removeItem("token");
       window.sessionStorage.removeItem("erp-worker-access-session");
+      window.sessionStorage.removeItem("erp-worker-session-token");
     }
     if (workerAccessEntry || sharedEntry) {
-      localStorage.removeItem("token");
-      if (workerAccessEntry) window.sessionStorage.removeItem("erp-worker-access-session");
+      if (workerAccessEntry) {
+        window.sessionStorage.removeItem("erp-worker-session-token");
+        window.sessionStorage.removeItem("erp-worker-access-session");
+        window.sessionStorage.removeItem("erp-worker-write-permissions");
+      }
       setUser(false);
       setBooting(false);
       return;
@@ -75,8 +92,9 @@ export function AuthProvider({ children }) {
         generalSiteEntry
         || window.sessionStorage.getItem("erp-worker-access-session") !== "true"
       )) {
-        localStorage.removeItem("token");
+        window.sessionStorage.removeItem("erp-worker-session-token");
         window.sessionStorage.removeItem("erp-worker-access-session");
+        window.sessionStorage.removeItem("erp-worker-write-permissions");
         setUser(false);
         return;
       }
@@ -91,11 +109,17 @@ export function AuthProvider({ children }) {
   }, []);
 
   const finishLogin = async (data, shareLocation, workerAccessLogin = false) => {
-    localStorage.setItem("token", data.token);
     if (workerAccessLogin && data.user.is_worker) {
       window.sessionStorage.setItem("erp-worker-access-session", "true");
+      window.sessionStorage.setItem("erp-worker-session-token", data.token);
+      window.sessionStorage.setItem("erp-worker-access-entry", window.location.pathname);
+      window.sessionStorage.setItem("erp-worker-write-permissions", JSON.stringify(data.user.write_permissions || {}));
     } else {
+      localStorage.setItem("token", data.token);
+      window.sessionStorage.removeItem("erp-worker-session-token");
       window.sessionStorage.removeItem("erp-worker-access-session");
+      window.sessionStorage.removeItem("erp-worker-access-entry");
+      window.sessionStorage.removeItem("erp-worker-write-permissions");
     }
     setUser(data.user);
     deviceInfo(shareLocation).then((info) => api.post("/auth/device", info)).catch(() => {});
@@ -135,12 +159,19 @@ export function AuthProvider({ children }) {
   };
 
   const logout = async () => {
+    const workerSession = user?.is_worker === true;
+    const workerEntry = window.sessionStorage.getItem("erp-worker-access-entry");
     try { await api.logout(); } catch { /* Local logout must still complete if the server is unavailable. */ }
     finally {
-      localStorage.removeItem("token");
+      if (workerSession) {
+        window.sessionStorage.removeItem("erp-worker-session-token");
+        window.sessionStorage.removeItem("erp-worker-write-permissions");
+      } else {
+        localStorage.removeItem("token");
+      }
       window.sessionStorage.removeItem("erp-worker-access-session");
       setUser(false);
-      window.location.replace("/login");
+      window.location.replace(workerSession && workerEntry ? workerEntry : "/login");
     }
   };
 

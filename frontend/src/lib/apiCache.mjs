@@ -1,4 +1,4 @@
-export const GET_CACHE_MS = 30_000;
+export const GET_CACHE_MS = 5_000;
 
 export function isCacheEntryFresh(entry, now) {
   return Boolean(entry && entry.expiresAt > now);

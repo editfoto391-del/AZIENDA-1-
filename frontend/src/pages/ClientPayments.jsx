@@ -37,6 +37,9 @@ export default function ClientPayments({ express = false }) {
   const [payment, setPayment] = useState(null);
   const [viewPayment, setViewPayment] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [pendingPaymentReverse, setPendingPaymentReverse] = useState(null);
+  const [supervisorPassword, setSupervisorPassword] = useState("");
+  const [authorizingReverse, setAuthorizingReverse] = useState(false);
   const [expressPaymentsSummaryOpen, setExpressPaymentsSummaryOpen] = useState(false);
   const [expressPaymentsDate, setExpressPaymentsDate] = useState(today());
   const [expressPayments, setExpressPayments] = useState([]);
@@ -170,6 +173,59 @@ export default function ClientPayments({ express = false }) {
       toast.success("Payment deleted");
       await Promise.all([refreshProfile(), loadCustomers()]);
     } catch (error) { toast.error(apiError(error)); }
+  };
+
+  const performInvoicePaymentAction = async (action, record, reason, supervisorAuthorization) => {
+    try {
+      if (action === "delete_payment") {
+        await api.delWithData(`/payments/${record.id}`, {
+          reason,
+          supervisor_authorization: supervisorAuthorization,
+        });
+      } else {
+        await api.post(`/payments/${record.id}/reverse`, {
+          reason,
+          supervisor_authorization: supervisorAuthorization,
+        });
+      }
+      setPendingPaymentReverse(null);
+      setSupervisorPassword("");
+      toast.success(action === "delete_payment" ? "Payment deleted" : "Payment reversed");
+      await Promise.all([refreshProfile(), loadCustomers()]);
+    } catch (error) { toast.error(apiError(error)); }
+  };
+
+  const requestInvoicePaymentAction = (action, record) => {
+    if (action === "delete_payment" && !window.confirm(`Permanently delete this payment of ${fmtMoney(record.amount)}? Its invoice balance will be recalculated.`)) return;
+    const verb = action === "delete_payment" ? "Delete" : "Reverse";
+    const reason = window.prompt(`${verb} payment of ${fmtMoney(record.amount)}? Enter a reason:`);
+    if (reason === null) return;
+    if (!reason.trim()) return toast.error("A reason is required");
+    const pendingAction = { action, record, reason: reason.trim() };
+    if (user?.can_skip_supervisor_approval) {
+      performInvoicePaymentAction(action, record, pendingAction.reason);
+    } else {
+      setPendingPaymentReverse(pendingAction);
+    }
+  };
+
+  const authorizePaymentReverse = async (event) => {
+    event.preventDefault();
+    if (!pendingPaymentReverse || !supervisorPassword || authorizingReverse) return;
+    setAuthorizingReverse(true);
+    try {
+      const { action, record } = pendingPaymentReverse;
+      const approval = await api.post(`/invoices/${record.invoice_id}/authorize-action`, {
+        password: supervisorPassword,
+        action,
+        target_id: record.id,
+      });
+      await performInvoicePaymentAction(action, record, pendingPaymentReverse.reason, approval.authorization_id);
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setAuthorizingReverse(false);
+    }
   };
 
   const recordPayment = async () => {
@@ -464,13 +520,26 @@ export default function ClientPayments({ express = false }) {
               {!profile.summary.payments.length ? <p className="text-sm text-slate-400">No payments.</p> : (
                 <div className="space-y-1.5">
                   {profile.summary.payments.map((record) => (
-                    <div key={record.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm">
+                    <div key={record.id} className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm ${record.reversed ? "opacity-60" : ""}`}>
                       <span className="text-slate-500">
                         {fmtDate(record.date)} · {record.method} · {record.invoice_number || "Invoice"}
                         {record.customer_deleted && <Badge cls="ml-2 border-red-200 bg-red-50 text-red-700">Deleted customer</Badge>}
+                        {record.reversed && <span className="ml-2 font-semibold text-red-600">Reversed</span>}
                       </span>
                       <div className="flex items-center gap-2">
-                        <span className="font-mono font-semibold text-emerald-600">{fmtMoney(record.amount)}</span>
+                        <span className={`font-mono font-semibold ${record.reversed ? "line-through text-slate-400" : "text-emerald-600"}`}>{fmtMoney(record.amount)}</span>
+                        {!record.reversed && <button
+                          type="button"
+                          onClick={() => requestInvoicePaymentAction("reverse_payment", record)}
+                          className="text-xs text-red-500 hover:underline"
+                          data-testid={`reverse-payment-${record.id}`}
+                        >Reverse</button>}
+                        <button
+                          type="button"
+                          onClick={() => requestInvoicePaymentAction("delete_payment", record)}
+                          className="text-xs text-red-700 hover:underline"
+                          data-testid={`delete-payment-${record.id}`}
+                        >Delete</button>
                         <button
                           type="button"
                           onClick={() => setViewPayment(record)}
@@ -585,6 +654,30 @@ export default function ClientPayments({ express = false }) {
             </div>
           </div>
         )}
+      </Modal>
+
+      <Modal
+        open={!!pendingPaymentReverse && !user?.can_skip_supervisor_approval}
+        onClose={() => { setPendingPaymentReverse(null); setSupervisorPassword(""); }}
+        title="Supervisor approval required"
+      >
+        <form onSubmit={authorizePaymentReverse} className="space-y-4" data-testid="payment-action-authorization-form">
+          <p className="text-sm text-slate-600">Enter the supervisor password to {pendingPaymentReverse?.action === "delete_payment" ? "delete" : "reverse"} this payment. This approval is required for every user role.</p>
+          <Input
+            label="Supervisor password"
+            type="password"
+            autoComplete="current-password"
+            autoFocus
+            required
+            value={supervisorPassword}
+            onChange={(event) => setSupervisorPassword(event.target.value)}
+            data-testid="supervisor-password-input"
+          />
+          <div className="flex justify-end gap-2">
+            <Btn type="button" variant="outline" onClick={() => { setPendingPaymentReverse(null); setSupervisorPassword(""); }}>Cancel</Btn>
+            <Btn type="submit" disabled={authorizingReverse} data-testid="authorize-payment-action-btn">{authorizingReverse ? "Checking..." : "Approve action"}</Btn>
+          </div>
+        </form>
       </Modal>
 
       <Modal open={!!payment} onClose={() => setPayment(null)} title="Make Payment">

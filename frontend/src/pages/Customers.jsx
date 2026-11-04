@@ -94,10 +94,12 @@ export default function Customers() {
       toast.success(flag ? "Balance added to Express Balances and Payments" : "Balance removed from Express Balances and Payments");
     } catch (e) { toast.error(apiError(e)); }
   };
-  const deleteOtherBalancePayment = async (payment) => {
+  const deleteOtherBalancePayment = async (payment, index) => {
     if (!window.confirm("Delete this payment from the history? The balance will NOT change.")) return;
+    const paymentId = payment.id || payment.payment_id;
     try {
-      await api.del(`/payments/${payment.id}/other-balance`);
+      if (paymentId) await api.del(`/payments/${paymentId}/other-balance`);
+      else await api.del(`/customers/${profile.c.id}/other-balance-history/${index}`);
       toast.success("Payment deleted");
       try {
         const summary = await api.get(`/customers/${profile.c.id}/summary`);
@@ -241,7 +243,7 @@ export default function Customers() {
                     </span>
                     <button
                       type="button"
-                      onClick={() => deleteOtherBalancePayment(p)}
+                      onClick={() => deleteOtherBalancePayment(p, idx)}
                       className="text-xs text-red-600 hover:underline"
                       aria-label={`Delete other balance payment of ${fmtMoney(p.amount)}`}
                       data-testid={`delete-other-balance-${p.id}`}

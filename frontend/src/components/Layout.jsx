@@ -37,6 +37,9 @@ const NAV_GROUPS = [
     { to: "/stock", label: "Stock", icon: Package, section: "stock" },
     { to: "/fleet", label: "Fleet", icon: CarFront, section: "fleet" },
   ] },
+  { label: "COMPANY INVENTORY", collapsible: true, items: [
+    { to: "/company-inventory", label: "Company Inventory", icon: Boxes, section: "stock" },
+  ] },
   { label: "PRODUCTION", collapsible: true, companyIds: ["superiqfoam", "iqfoam-manufactoring"], items: [
     { to: "/production", label: "Production", icon: Factory, section: "production" },
     { to: "/warehouses/chemical-inventory", label: "Chemicals Quantity", icon: FlaskConical, section: "warehouses", companyId: "superiqfoam" },
@@ -56,9 +59,6 @@ const NAV_GROUPS = [
   ] },
   { label: "Administration", items: [
     { to: "/settings", label: "Settings", icon: Cog, section: "settings" },
-  ] },
-  { label: "COMPANY INVENTORY", collapsible: true, items: [
-    { to: "/company-inventory", label: "Company Inventory", icon: Boxes, section: "stock" },
   ] },
 ];
 

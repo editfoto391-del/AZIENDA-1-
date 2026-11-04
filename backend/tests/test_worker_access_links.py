@@ -135,6 +135,70 @@ def test_manufacturing_worker_supervisor_configuration_is_validated():
     assert action_without_supervisor.value.status_code == 400
 
 
+def test_worker_write_permissions_are_enforced_by_section_and_operation():
+    permissions = {
+        "invoices": {"create": "deny", "update": "supervisor", "delete": "deny"},
+    }
+    worker = {
+        "is_worker": True,
+        "worker_allowed_sections": ["invoices"],
+        "worker_write_permissions": permissions,
+    }
+    assert server.worker_write_scope("/api/invoices/inv-1/payments", "POST") == (
+        "client-payments", "create",
+    )
+    assert server.worker_write_scope("/api/invoices/inv-1", "PUT") == ("invoices", "update")
+
+    with pytest.raises(HTTPException) as denied_create:
+        server.enforce_worker_api_access(request("/api/invoices", "unused", "POST"), worker)
+    assert denied_create.value.status_code == 403
+
+    server.enforce_worker_api_access(request("/api/invoices/inv-1", "unused", "PUT"), worker)
+
+    with pytest.raises(HTTPException) as missing_delete_permission:
+        server.enforce_worker_api_access(request("/api/invoices/inv-1", "unused", "DELETE"), worker)
+    assert missing_delete_permission.value.status_code == 403
+
+
+def test_worker_supervisor_permission_is_scoped_to_company_and_action(monkeypatch):
+    class GrantCollection:
+        async def delete_one(self, query):
+            self.query = query
+            return type("DeleteResult", (), {"deleted_count": 1})()
+
+    class GrantDatabase:
+        supervisor_action_grants = GrantCollection()
+
+    database = GrantDatabase()
+    monkeypatch.setattr(server, "base_db", database)
+    worker = {
+        "id": "worker-a",
+        "is_worker": True,
+        "_active_company_id": "superiqfoam",
+        "_session_id": "session-a",
+        "worker_allowed_sections": ["customers"],
+        "worker_write_permissions": {
+            "customers": {"create": "allow", "update": "supervisor", "delete": "deny"},
+        },
+    }
+    req = request("/api/customers/customer-a", "unused", "PUT")
+    req.scope["headers"] = [(b"x-supervisor-authorization", b"signed-grant")]
+    grant = {
+        "scope": "supervisor_worker_action",
+        "sub": "worker-a",
+        "company_id": "superiqfoam",
+        "sid": "session-a",
+        "action": "customers:update",
+        "jti": "grant-a",
+    }
+    monkeypatch.setattr(server.jwt, "decode", lambda *args, **kwargs: grant)
+
+    asyncio.run(server.require_supervisor_for_company_write(req, worker))
+
+    assert database.supervisor_action_grants.query["action"] == "customers:update"
+    assert database.supervisor_action_grants.query["company_id"] == "superiqfoam"
+
+
 def test_warehouses_section_is_only_available_to_manufacturing_workers():
     server.validate_worker_company_sections("iqfoam-manufactoring", ["warehouses"])
 
@@ -389,6 +453,7 @@ def test_worker_link_auth_scope_dynamic_permissions_and_revocation(worker_accoun
 
 def test_company_admin_can_view_add_and_change_worker_roles(worker_accounts):
     _, database = worker_accounts
+    database.user_sessions.documents.append({"id": "worker-session", "user_id": "worker-a"})
     admin = {
         "id": "company-admin",
         "role": "user",
@@ -408,9 +473,15 @@ def test_company_admin_can_view_add_and_change_worker_roles(worker_accounts):
             password="secure-pass-123",
             company_id="superiqfoam",
             allowed_sections=["invoices"],
+            write_permissions={
+                "invoices": {"create": "deny", "update": "supervisor", "delete": "deny"},
+            },
         ), admin)
         assert created["worker_role"] == "Packing"
         assert created["company_id"] == "superiqfoam"
+        assert created["write_permissions"]["invoices"]["update"] == "supervisor"
+        stored = next(item for item in database.users.documents if item["id"] == created["id"])
+        assert stored["worker_write_permissions"] == created["write_permissions"]
 
         updated = await server.update_worker_access(
             "worker-a",
@@ -423,6 +494,7 @@ def test_company_admin_can_view_add_and_change_worker_roles(worker_accounts):
         )
         assert updated["worker_role"] == "Senior Invoicing"
         assert updated["allowed_sections"] == ["invoices", "stock"]
+        assert database.user_sessions.documents == []
 
         with pytest.raises(HTTPException) as other_company:
             await server.get_workers("iqfoam-whole-sallers", admin)
