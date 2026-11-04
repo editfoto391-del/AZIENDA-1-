@@ -49,6 +49,16 @@ export const invoicePriceCategory = (category, unifiedPriceList) => {
   return canonical === "Candy" ? "Ribbon Black" : canonical;
 };
 
+// Backend price lookup is case-insensitive for category labels. Keep invoice
+// selectors and issue validation aligned with that contract for custom stock products.
+const invoicePriceCategoryKey = (category, unifiedPriceList) =>
+  String(invoicePriceCategory(category, unifiedPriceList) || "").trim().toLowerCase();
+
+export const sameInvoicePriceCategory = (left, right, unifiedPriceList) => {
+  const leftKey = invoicePriceCategoryKey(left, unifiedPriceList);
+  return Boolean(leftKey) && leftKey === invoicePriceCategoryKey(right, unifiedPriceList);
+};
+
 export const canonicalInvoiceSize = (size) => {
   const value = String(size || "").trim();
   if (!/^\d+(?:\.\d+)?(?:\s*[x×]\s*\d+(?:\.\d+)?){1,2}$/i.test(value)) return value;
@@ -73,18 +83,24 @@ export const invoiceCategoriesFor = (zone, unifiedPriceList, prices, stockItems)
   const stocked = stockItems
     .map((item) => displayInvoiceCategory(item.product))
     .filter(Boolean);
-  return [...new Set([...defaults, ...configured, ...stocked])];
+  const seen = new Set();
+  return [...defaults, ...configured, ...stocked].filter((category) => {
+    const key = String(category || "").trim().toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 };
 
 export const invoiceSizesFor = (zone, category, unifiedPriceList, prices, stockItems) => {
   const priceCategory = invoicePriceCategory(category, unifiedPriceList);
   const pricedSizes = prices
     .filter((price) => price.zone === zone
-      && invoicePriceCategory(price.category, unifiedPriceList) === priceCategory
+      && sameInvoicePriceCategory(price.category, category, unifiedPriceList)
       && price.active)
     .map((price) => price.size);
   const stockedSizes = stockItems
-    .filter((item) => invoicePriceCategory(item.product, unifiedPriceList) === priceCategory)
+    .filter((item) => sameInvoicePriceCategory(item.product, category, unifiedPriceList))
     .map((item) => item.size);
   return [...new Set([...pricedSizes, ...stockedSizes])];
 };
@@ -95,10 +111,12 @@ export const lookupInvoicePrice = (zone, category, size, unifiedPriceList, price
   }
   const priceCategory = invoicePriceCategory(category, unifiedPriceList);
   const matches = prices.filter((price) => price.zone === zone
-    && invoicePriceCategory(price.category, unifiedPriceList) === priceCategory
+    && sameInvoicePriceCategory(price.category, category, unifiedPriceList)
     && canonicalInvoiceSize(price.size) === canonicalInvoiceSize(size)
     && price.active);
-  const price = matches.find((item) => item.category === priceCategory) || matches[0];
+  const price = matches.find((item) =>
+    String(item.category || "").trim().toLowerCase() === String(priceCategory || "").trim().toLowerCase()
+  ) || matches[0];
   if (!price) return { price: null, needsConfig: false, missing: true };
   if (price.price == null || !price.confirmed) return { price: null, needsConfig: true };
   return { price: price.price, needsConfig: false };
