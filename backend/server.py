@@ -112,8 +112,8 @@ WORKER_SUPERVISOR_ACTION_SECTIONS = {
     "price_delete": {"settings"},
     "customer_delete": {"customers"},
     "stock_delete": {"stock"},
-    "balance_payment_delete": {"customers", "client-payments"},
-    "production_block_record": {"production", "warehouses"},
+    "balance_payment_delete": {"customers", "client-payments", "express-client-payments"},
+    "production_block_record": {"production"},
 }
 WORKER_SUPERVISOR_ACTIONS = set(WORKER_SUPERVISOR_ACTION_SECTIONS)
 WORKER_SECTION_PREFIXES = {
@@ -121,9 +121,13 @@ WORKER_SECTION_PREFIXES = {
     "suppliers": "suppliers",
     "buyings": "buyings",
     "invoices": "invoices",
+    "express-invoices": "express-invoices",
+    "express-client-payments": "express-client-payments",
+    "express-payments": "express-client-payments",
     "orders": "orders",
-    "intercompany": "orders",
+    "intercompany": "intercompany",
     "stock": "stock",
+    "company-inventory": "company-inventory",
     "production": "production",
     "simple-production": "production",
     "attendance": "attendance",
@@ -384,6 +388,9 @@ WORKER_SECTIONS = {
     "customers", "suppliers", "buyings", "invoices", "orders", "stock",
     "production", "attendance", "deliveries", "fleet", "expenses",
     "costs", "grv", "daily-report", "client-payments", "settings", "warehouses",
+    "express-invoices", "express-client-payments", "intercompany", "company-inventory",
+    "chemicals-quantity", "chemical-usage-log", "warehouse-a", "warehouse-b",
+    "warehouse-c", "warehouse-chemical", "warehouse-chemical-inventory",
 }
 
 def canonical_email(email):
@@ -469,6 +476,45 @@ def worker_supervisor_action(path, method):
             return action
     return None
 
+def worker_section_for_request(path, user):
+    if path == "company-inventory" or path.startswith("company-inventory/"):
+        return "company-inventory"
+    if path == "intercompany" or path.startswith("intercompany/"):
+        return "intercompany"
+    allowed = set(user.get("worker_allowed_sections") or [])
+    if path == "invoices" or path.startswith("invoices/"):
+        if "invoices" in allowed:
+            return "invoices"
+        if "express-invoices" in allowed:
+            return "express-invoices"
+        if "express-client-payments" in allowed:
+            return "express-client-payments"
+        return "invoices"
+    if path == "payments" or path.startswith("payments/"):
+        if "client-payments" in allowed:
+            return "client-payments"
+        if "express-client-payments" in allowed:
+            return "express-client-payments"
+        return "client-payments"
+    if path == "warehouses" or path.startswith("warehouses/"):
+        parts = path.split("/")
+        if len(parts) < 2:
+            return "warehouses"
+        warehouse = parts[1].lower()
+        if warehouse in {"a", "b", "c"}:
+            return f"warehouse-{warehouse}"
+        if warehouse == "chemical":
+            if len(parts) > 2 and parts[2] == "inventory":
+                return "chemicals-quantity" if user.get("_active_company_id") == "superiqfoam" else "warehouse-chemical-inventory"
+            return "chemical-usage-log" if user.get("_active_company_id") == "superiqfoam" else "warehouse-chemical"
+        return "warehouses"
+    return next(
+        (value for prefix, value in sorted(
+            WORKER_SECTION_PREFIXES.items(), key=lambda item: len(item[0]), reverse=True,
+        ) if path == prefix or path.startswith(f"{prefix}/")),
+        None,
+    )
+
 def enforce_worker_api_access(request, user):
     if not user.get("is_worker"):
         return
@@ -501,12 +547,12 @@ def enforce_worker_api_access(request, user):
         return
 
     stock_access = "stock" in allowed or user.get("worker_stock_only")
-    if path == "company-inventory" and method == "GET" and stock_access:
+    if path == "company-inventory" and method == "GET" and "company-inventory" in allowed:
         return
     if path == "products" and method == "GET" and stock_access:
         return
     if path == "products/scan" and method == "POST" and (
-        stock_access or allowed.intersection({"invoices", "production", "orders", "deliveries", "grv"})
+        stock_access or allowed.intersection({"invoices", "express-invoices", "production", "orders", "deliveries", "grv"})
     ):
         return
     if re.fullmatch(r"stock/[^/]+/identification", path):
@@ -578,6 +624,9 @@ def enforce_worker_api_access(request, user):
 
     support_rules = {
         "invoices": [("drivers", "GET")],
+        "express-invoices": [
+            ("customers", "GET"), ("prices", "GET"), ("settings", "GET"), ("drivers", "GET"),
+        ],
         "buyings": [("suppliers", "GET"), ("stock", "GET")],
         "grv": [
             ("suppliers", "GET"), ("stock", "GET"),
@@ -588,6 +637,7 @@ def enforce_worker_api_access(request, user):
             ("stock", "GET"), ("piece-production", "GET"), ("piece-production", "POST"),
             ("production/block-recipes", "GET"), ("production/block-productions", "GET"),
             ("production/block-productions", "POST"),
+            ("warehouses/chemical/inventory", "GET"),
         ],
         "attendance": [("piece-production", "GET"), ("piece-production", "POST")],
         "orders": [
@@ -601,6 +651,12 @@ def enforce_worker_api_access(request, user):
         "client-payments": [
             ("customers", "GET"), ("invoices", "GET"), ("settings", "GET"),
         ],
+        "express-client-payments": [
+            ("customers", "GET"), ("invoices", "GET"), ("settings", "GET"),
+            ("express-payments", "GET"), ("express-payments", "POST"),
+        ],
+        "chemical-usage-log": [("warehouses/chemical/inventory", "GET")],
+        "warehouse-chemical": [("warehouses/chemical/inventory", "GET")],
     }
     for section, rules in support_rules.items():
         if section not in allowed:
@@ -614,14 +670,8 @@ def enforce_worker_api_access(request, user):
                         continue
                 return
 
-    section = next(
-        (section for prefix, section in WORKER_SECTION_PREFIXES.items()
-         if path == prefix or path.startswith(f"{prefix}/")),
-        None,
-    )
-    if section and (
-        section in allowed or (section == "grv" and "costs" in allowed)
-    ):
+    section = worker_section_for_request(path, user)
+    if section and section in allowed:
         return
     raise HTTPException(403, "This worker account cannot access this section")
 
@@ -939,8 +989,14 @@ def worker_sections(sections, stock_only=False):
     return normalized
 
 def validate_worker_company_sections(company_id, sections):
-    if "warehouses" in sections and company_id != MANUFACTURING_COMPANY_ID:
+    manufacturing_sections = {
+        "warehouses", "warehouse-a", "warehouse-b", "warehouse-c",
+        "warehouse-chemical", "warehouse-chemical-inventory",
+    }
+    if set(sections) & manufacturing_sections and company_id != MANUFACTURING_COMPANY_ID:
         raise HTTPException(400, "Warehouse access is only available in IQFOAM Manufacturing")
+    if set(sections) & {"chemicals-quantity", "chemical-usage-log"} and company_id != "superiqfoam":
+        raise HTTPException(400, "These chemical sections are only available in SUPERIQFOAM")
 
 def worker_warehouse_ids(doc):
     ids = doc.get("worker_warehouse_ids")
@@ -954,8 +1010,11 @@ def worker_supervisor_settings(company_id, is_supervisor, warehouse_ids, protect
         raise HTTPException(400, "Choose valid warehouses")
     if warehouse_ids and company_id != MANUFACTURING_COMPANY_ID:
         raise HTTPException(400, "Warehouse assignment is only available for Manufacturing workers")
-    if warehouse_ids and "warehouses" not in sections:
-        raise HTTPException(400, "Enable the Warehouses section to assign warehouses")
+    if warehouse_ids and any(
+        "warehouses" not in sections and f"warehouse-{warehouse.lower()}" not in sections
+        for warehouse in warehouse_ids
+    ):
+        raise HTTPException(400, "Enable each assigned warehouse section")
 
     actions = list(dict.fromkeys(protected_actions))
     if any(action not in WORKER_SUPERVISOR_ACTIONS for action in actions):
@@ -997,7 +1056,7 @@ def validate_worker_write_permissions(permissions, sections):
         normalized[section] = dict(section_permissions)
     return normalized
 
-def worker_write_scope(path, method):
+def worker_write_scope(path, method, user=None):
     normalized_path = path.removeprefix("/api/").strip("/")
     normalized_method = method.upper()
     if normalized_method not in {"POST", "PUT", "PATCH", "DELETE"}:
@@ -1005,14 +1064,10 @@ def worker_write_scope(path, method):
     if re.search(r"/authorize(?:-|$)", normalized_path):
         return None
     if re.fullmatch(r"invoices/[^/]+/payments", normalized_path):
-        section = "client-payments"
+        allowed = set((user or {}).get("worker_allowed_sections") or [])
+        section = "client-payments" if "client-payments" in allowed else "express-client-payments"
     else:
-        section = next(
-            (value for prefix, value in sorted(
-                WORKER_SECTION_PREFIXES.items(), key=lambda item: len(item[0]), reverse=True,
-            ) if normalized_path == prefix or normalized_path.startswith(f"{prefix}/")),
-            None,
-        )
+        section = worker_section_for_request(normalized_path, user or {})
     if not section:
         return None
     operation = {
@@ -1030,7 +1085,7 @@ def worker_write_scope(path, method):
     return section, operation
 
 def worker_write_permission(user, path, method):
-    scope = worker_write_scope(path, method)
+    scope = worker_write_scope(path, method, user)
     permissions = user.get("worker_write_permissions")
     if not scope or not isinstance(permissions, dict) or not permissions:
         return None
@@ -2523,6 +2578,7 @@ class WarehouseBlockQuantityIn(WarehouseReportLineIn):
 
 
 class WarehouseFoamCutIn(WarehouseReportLineIn):
+    pieces_recovered: int = Field(gt=0, le=1_000_000_000)
     size: str = Field(min_length=1, max_length=120)
     unit: str = Field(min_length=1, max_length=20)
 
@@ -2536,6 +2592,7 @@ class WarehouseFoamCutIn(WarehouseReportLineIn):
 
 class WarehouseSheetCutIn(WarehouseReportLineIn):
     quantity: int = Field(gt=0, le=1_000_000_000)
+    pieces_recovered: int = Field(gt=0, le=1_000_000_000)
     size: str = Field(min_length=1, max_length=120)
 
     @field_validator("size")
@@ -2687,7 +2744,10 @@ def require_warehouse_report_access(user, warehouse_id):
     if user.get("_active_company_id") != MANUFACTURING_COMPANY_ID:
         raise HTTPException(403, "Warehouse reports are only available in IQFOAM Manufacturing")
     if user.get("is_worker") and (
-        "warehouses" not in user.get("worker_allowed_sections", [])
+        not {
+            "warehouses",
+            f"warehouse-{warehouse_id.lower()}",
+        }.intersection(user.get("worker_allowed_sections", []))
         or warehouse_id not in worker_warehouse_ids(user)
     ):
         raise HTTPException(403, f"This worker account cannot access Warehouse {warehouse_id} reports")
@@ -2758,9 +2818,17 @@ CHEMICAL_COMPANY_IDS = {MANUFACTURING_COMPANY_ID, DEFAULT_COMPANY_ID}
 
 
 def require_chemical_access(user):
-    if user.get("_active_company_id") not in (MANUFACTURING_COMPANY_ID, DEFAULT_COMPANY_ID):
+    company_id = user.get("_active_company_id")
+    if company_id not in CHEMICAL_COMPANY_IDS:
         raise HTTPException(403, "Chemical stock is not available for this company")
-    if user.get("is_worker") and "warehouses" not in user.get("worker_allowed_sections", []):
+    company_sections = (
+        {"warehouse-chemical", "warehouse-chemical-inventory"}
+        if company_id == MANUFACTURING_COMPANY_ID
+        else {"chemical-usage-log", "chemicals-quantity"}
+    )
+    if user.get("is_worker") and not company_sections.union({"warehouses"}).intersection(
+        user.get("worker_allowed_sections", [])
+    ):
         raise HTTPException(403, "This worker account cannot access the Chemical section")
 
 
@@ -6754,7 +6822,11 @@ async def get_production(include_archived: bool = False, user=Depends(get_curren
 
 class BlockCuttingIn(BaseModel):
     block: str
-    size: str
+    size: Optional[str] = None
+    pieces_recovered: int = Field(gt=0, le=1_000_000_000)
+    has_sheet: bool = False
+    sheet_mm: Optional[int] = Field(default=None, gt=0, le=1_000_000_000)
+    sheet_pieces_recovered: Optional[int] = Field(default=None, gt=0, le=1_000_000_000)
 
 def normalize_block_name(block):
     value = str(block or "").strip()
@@ -6774,12 +6846,21 @@ async def add_block_cutting(body: BlockCuttingIn, user=Depends(get_current_user)
     block = normalize_block_name(body.block)
     if not block:
         raise HTTPException(400, "A block name is required")
-    size = body.size.strip()
-    if not size:
+    size = (body.size or "").strip()
+    if body.has_sheet:
+        size = ""
+    elif not size:
         raise HTTPException(400, "A size is required")
-    if not await db.stock.find_one({"size": size}):
+    elif not await db.stock.find_one({"size": size}):
         raise HTTPException(400, "Select a size currently available in Stock")
-    record = await insert("block_cuttings", {"block": block, "size": size})
+    record = await insert("block_cuttings", {
+        "block": block,
+        "size": size or None,
+        "pieces_recovered": body.pieces_recovered,
+        "has_sheet": body.has_sheet,
+        "sheet_mm": body.sheet_mm if body.has_sheet else None,
+        "sheet_pieces_recovered": body.sheet_pieces_recovered if body.has_sheet else None,
+    })
     await log_audit("block_cutting", record["id"], "created", user, after=record)
     return record
 
@@ -6791,10 +6872,21 @@ async def edit_block_cutting(record_id: str, body: BlockCuttingIn, user=Depends(
     block = normalize_block_name(body.block)
     if not block:
         raise HTTPException(400, "A block name is required")
-    size = body.size.strip()
-    if not size or not await db.stock.find_one({"size": size}):
+    size = (body.size or "").strip()
+    if body.has_sheet:
+        size = ""
+    elif not size:
+        raise HTTPException(400, "A size is required")
+    elif not await db.stock.find_one({"size": size}):
         raise HTTPException(400, "Select a size currently available in Stock")
-    record = await update_doc("block_cuttings", record_id, {"block": block, "size": size})
+    record = await update_doc("block_cuttings", record_id, {
+        "block": block,
+        "size": size or None,
+        "pieces_recovered": body.pieces_recovered,
+        "has_sheet": body.has_sheet,
+        "sheet_mm": body.sheet_mm if body.has_sheet else None,
+        "sheet_pieces_recovered": body.sheet_pieces_recovered if body.has_sheet else None,
+    })
     await log_audit("block_cutting", record_id, "updated", user, before=before, after=record)
     return record
 

@@ -29,6 +29,14 @@ def test_chemical_log_requires_remaining_estimate_and_valid_quantities():
 def test_chemical_access_rules():
     server.require_chemical_access(MANUFACTURING)
     server.require_chemical_access({**MANUFACTURING, "is_worker": True, "worker_allowed_sections": ["warehouses"]})
+    server.require_chemical_access({
+        **MANUFACTURING, "is_worker": True, "worker_allowed_sections": ["warehouse-chemical"],
+    })
+    server.require_chemical_access({
+        "_active_company_id": server.DEFAULT_COMPANY_ID,
+        "is_worker": True,
+        "worker_allowed_sections": ["chemical-usage-log"],
+    })
     with pytest.raises(HTTPException):
         server.require_chemical_access({"_active_company_id": "iqfoam-whole-sallers"})
     server.require_chemical_access({"_active_company_id": server.DEFAULT_COMPANY_ID})

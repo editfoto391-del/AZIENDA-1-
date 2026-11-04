@@ -39,6 +39,7 @@ export default function InvoiceEditor({ express = false }) {
   const [previousInvoices, setPreviousInvoices] = useState([]);
   const [loadingPreviousInvoices, setLoadingPreviousInvoices] = useState(false);
   const [prices, setPrices] = useState([]);
+  const [stockItems, setStockItems] = useState([]);
   const [settings, setSettings] = useState({});
   const [inv, setInv] = useState({
     customer_id: "", customer_name: "", date: today(), due_date: today(), zone: 1,
@@ -76,10 +77,15 @@ export default function InvoiceEditor({ express = false }) {
     : invoice;
 
   useEffect(() => {
-    Promise.all([api.get("/customers"), api.get("/prices"), api.get("/settings"), api.get("/drivers")]).then(([c, p, s, d]) => {
-      setCustomers(c); setPrices(p); setSettings(s); setDrivers(d.filter((driver) => driver.active !== false));
-      if (!id) setInv((prev) => ({ ...prev, tax_enabled: s.tax_enabled, tax_rate: s.tax_rate }));
-    });
+    Promise.all([api.get("/customers"), api.getUncached("/prices"), api.get("/settings"), api.get("/drivers")])
+      .then(([c, p, s, d]) => {
+        setCustomers(c); setPrices(p); setSettings(s); setDrivers(d.filter((driver) => driver.active !== false));
+        if (!id) setInv((prev) => ({ ...prev, tax_enabled: s.tax_enabled, tax_rate: s.tax_rate }));
+      })
+      .catch((error) => toast.error(apiError(error)));
+    api.getUncached("/stock")
+      .then(setStockItems)
+      .catch((error) => toast.error(`Could not load stock products for invoices: ${apiError(error)}`));
     setEditing(false);
     if (id) api.get(`/invoices/${id}`).then((d) => {
       if ((d.invoice_type || "standard") !== (express ? "express" : "standard")) {
@@ -108,6 +114,25 @@ export default function InvoiceEditor({ express = false }) {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, user?.can_skip_supervisor_approval, express]);
+
+  useEffect(() => {
+    let active = true;
+    const refreshCatalog = () => {
+      api.getUncached("/prices")
+        .then((nextPrices) => { if (active) setPrices(nextPrices); })
+        .catch((error) => { if (active) toast.error(`Could not refresh invoice prices: ${apiError(error)}`); });
+      api.getUncached("/stock")
+        .then((nextStock) => { if (active) setStockItems(nextStock); })
+        .catch((error) => { if (active) toast.error(`Could not refresh invoice stock products: ${apiError(error)}`); });
+    };
+    window.addEventListener("focus", refreshCatalog);
+    window.addEventListener("erp:data-changed", refreshCatalog);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refreshCatalog);
+      window.removeEventListener("erp:data-changed", refreshCatalog);
+    };
+  }, []);
 
   useEffect(() => {
     if (id || !inv.customer_id) {
@@ -224,10 +249,22 @@ export default function InvoiceEditor({ express = false }) {
     const configured = prices
       .filter((p) => p.zone === zone && p.active && p.category)
       .map((p) => ["Standard", "Simple"].includes(p.category) ? "Simple/Mix color" : p.category);
-    return [...new Set([...defaults, ...configured])];
+    const stocked = stockItems
+      .map((item) => ["Standard", "Simple"].includes(item.product) ? "Simple/Mix color" : item.product)
+      .filter(Boolean);
+    return [...new Set([...defaults, ...configured, ...stocked])];
   };
 
-  const sizesFor = (zone, cat) => prices.filter((p) => p.zone === zone && p.category === priceCat(zone, cat, unifiedPriceList) && p.active).map((p) => p.size);
+  const sizesFor = (zone, cat) => {
+    const category = priceCat(zone, cat, unifiedPriceList);
+    const priced = prices
+      .filter((p) => p.zone === zone && p.category === category && p.active)
+      .map((p) => p.size);
+    const stocked = stockItems
+      .filter((item) => priceCat(zone, item.product, unifiedPriceList) === category)
+      .map((item) => item.size);
+    return [...new Set([...priced, ...stocked])];
+  };
 
   const lookupPrice = (zone, cat, size) => {
     if (!unifiedPriceList && manualOnly(cat, size)) return { price: null, needsConfig: true };
@@ -459,6 +496,10 @@ export default function InvoiceEditor({ express = false }) {
       setPendingSave(null);
       const payload = { ...buildPayload(status), customer_id: customerId, customer_name: inv.customer_name.trim(), deduct_stock: !!deductStock, allow_negative_stock: allowNegativeStock };
       const res = id ? await api.put(`/invoices/${id}`, { ...payload, supervisor_authorization: editAuthorization }) : await api.post("/invoices", payload);
+      if (downloadAfterSave && (status !== "draft" && (res.status === "draft" || !res.number))) {
+        toast.error("Invoice was not issued; no issued invoice PDF was downloaded");
+        return;
+      }
       const submitted = !id && status !== "draft";
       toast.success(submitted ? "INVOICE SUBMITTED" : status === "draft" ? "Saved as draft" : "Invoice saved");
       setPendingSave(null);
@@ -524,6 +565,10 @@ export default function InvoiceEditor({ express = false }) {
       });
       setInv(res);
       if (action === "download") {
+        if (res.status === "draft" || !res.number) {
+          toast.error("Invoice could not be issued, so no issued invoice PDF was downloaded");
+          return;
+        }
         setDownloadIssuedDraft(true);
         toast.success("Invoice issued");
       } else {

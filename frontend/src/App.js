@@ -99,8 +99,16 @@ function Protected({ children }) {
   if (booting || user === null) return <RouteLoading />;
   if (!user) return <Navigate to="/login" replace />;
   if (user.is_worker) {
-    const section = location.pathname.startsWith("/express-invoices") ? "invoices"
-      : location.pathname.startsWith("/express-client-payments") ? "client-payments"
+    const warehousePath = location.pathname.match(/^\/warehouses\/([^/]+)/)?.[1];
+    const warehouseSection = warehousePath === "chemical"
+      ? user.company_id === "superiqfoam" ? "chemical-usage-log" : "warehouse-chemical"
+      : warehousePath === "chemical-inventory"
+        ? user.company_id === "superiqfoam" ? "chemicals-quantity" : "warehouse-chemical-inventory"
+        : ["A", "B", "C"].includes(warehousePath) ? `warehouse-${warehousePath.toLowerCase()}`
+          : null;
+    const section = location.pathname.startsWith("/express-invoices") ? "express-invoices"
+      : location.pathname.startsWith("/express-client-payments") ? "express-client-payments"
+        : location.pathname.startsWith("/intercompany") ? "intercompany"
         : location.pathname.startsWith("/invoices") ? "invoices"
       : location.pathname.startsWith("/customers") ? "customers"
         : location.pathname.startsWith("/suppliers") ? "suppliers"
@@ -108,7 +116,8 @@ function Protected({ children }) {
             : location.pathname.startsWith("/orders") ? "orders"
               : location.pathname.startsWith("/stock") ? "stock"
                 : location.pathname.startsWith("/production") ? "production"
-                  : location.pathname.startsWith("/warehouses") ? "warehouses"
+                    : location.pathname.startsWith("/company-inventory") ? "company-inventory"
+                      : location.pathname.startsWith("/warehouses") ? warehouseSection
                   : location.pathname.startsWith("/attendance") ? "attendance"
                       : location.pathname.startsWith("/fleet") ? "fleet"
                         : location.pathname.startsWith("/expenses") ? "expenses"
@@ -119,21 +128,31 @@ function Protected({ children }) {
                                 : location.pathname.startsWith("/settings") ? "settings"
                                   : null;
     const allowedSections = user.allowed_sections || [];
-    if (!section || (!allowedSections.includes(section) && !(section === "grv" && allowedSections.includes("costs")))) {
+    if (!section || !allowedSections.includes(section)) {
       const landingPath = [
+        ["express-invoices", "/express-invoices"],
+        ["express-client-payments", "/express-client-payments"],
+        ["intercompany", "/intercompany"],
         ["invoices", "/invoices"],
         ["customers", "/customers"],
         ["suppliers", "/suppliers"],
         ["buyings", "/buyings"],
         ["orders", "/orders"],
         ["stock", "/stock"],
+        ["company-inventory", "/company-inventory"],
         ["production", "/production"],
-        ["warehouses", "/warehouses"],
+        ["chemicals-quantity", "/warehouses/chemical-inventory"],
+        ["chemical-usage-log", "/warehouses/chemical"],
+        ["warehouse-a", "/warehouses/A"],
+        ["warehouse-b", "/warehouses/B"],
+        ["warehouse-c", "/warehouses/C"],
+        ["warehouse-chemical", "/warehouses/chemical"],
+        ["warehouse-chemical-inventory", "/warehouses/chemical-inventory"],
         ["attendance", "/attendance"],
         ["fleet", "/fleet"],
         ["expenses", "/expenses"],
         ["grv", "/grv"],
-        ["costs", "/grv"],
+        ["costs", "/costs"],
         ["daily-report", "/daily-report"],
         ["client-payments", "/client-payments"],
         ["settings", "/settings"],

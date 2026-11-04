@@ -46,6 +46,7 @@ const REPORT_SECTIONS = [
       { key: "size", label: "Cut size" },
       { key: "quantity", label: "Quantity", numeric: true },
       { key: "unit", label: "Unit (e.g. m, m2, m3)" },
+      { key: "pieces_recovered", label: "Pieces recovered", numeric: true, integer: true },
     ],
   },
   {
@@ -67,6 +68,7 @@ const REPORT_SECTIONS = [
     fields: [
       { key: "size", label: "Sheet size" },
       { key: "quantity", label: "Quantity", numeric: true, integer: true },
+      { key: "pieces_recovered", label: "Pieces recovered", numeric: true, integer: true },
     ],
   },
 ];
@@ -202,9 +204,10 @@ function reportLineSummary(line) {
     return `${line.customer_name} · Invoice ${line.invoice_number} · ${line.size}: ${line.loaded_quantity} loaded / ${line.ordered_quantity} ordered`;
   }
   const quantity = `${line.quantity} ${line.unit || ""}`.trim();
+  const recoveredPieces = line.pieces_recovered == null ? "" : ` · Pieces recovered: ${line.pieces_recovered}`;
   if (line.chemical) return `${line.chemical}: ${quantity}`;
-  if (line.block_type) return `${line.block_type} · ${line.size}: ${line.quantity}`;
-  if (line.size) return `${line.size}: ${quantity}`;
+  if (line.block_type) return `${line.block_type} · ${line.size}: ${line.quantity}${recoveredPieces}`;
+  if (line.size) return `${line.size}: ${quantity}${recoveredPieces}`;
   return quantity;
 }
 
@@ -239,7 +242,13 @@ export default function Warehouses() {
     : warehouseId === "C" ? WAREHOUSE_C_REPORT_SECTIONS : REPORT_SECTIONS;
   const canAccessWarehouseA = manufacturingProfile && (
     !user?.is_worker
-    || (user.allowed_sections?.includes("warehouses") && (user.warehouse_ids || []).includes(warehouseId))
+    || (
+      (
+        user.allowed_sections?.includes(`warehouse-${String(warehouseId || "").toLowerCase()}`)
+        || user.allowed_sections?.includes("warehouses")
+      )
+      && (user.warehouse_ids || []).includes(warehouseId)
+    )
   );
   const canAccessReports = ["A", "B", "C"].includes(warehouseId) && canAccessWarehouseA;
   const canDeleteReports = !user?.is_worker && (user?.is_owner || user?.is_company_owner);
@@ -276,7 +285,8 @@ export default function Warehouses() {
 
   if (!manufacturingProfile || (
     user?.is_worker
-    && (!user.allowed_sections?.includes("warehouses"))
+    && !user.allowed_sections?.includes(`warehouse-${String(warehouseId || "").toLowerCase()}`)
+    && !user.allowed_sections?.includes("warehouses")
   )) {
     return <Navigate to="/" replace />;
   }

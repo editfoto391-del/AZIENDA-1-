@@ -43,9 +43,9 @@ export function warehouseReportDetails(warehouseId, report) {
     A: [
       ["chemicals", "Chemical usage", [["chemical", "Chemical"], ["quantity", "Quantity"], ["unit", "Unit"]]],
       ["manufactured_blocks", "Manufactured blocks", [["block_type", "Block type"], ["size", "Size"], ["quantity", "Quantity"]]],
-      ["foam_cut", "Foam cut", [["size", "Size"], ["quantity", "Quantity"], ["unit", "Unit"]]],
+      ["foam_cut", "Foam cut", [["size", "Size"], ["quantity", "Quantity"], ["unit", "Unit"], ["pieces_recovered", "Pieces recovered"]]],
       ["damaged_blocks", "Damaged and broken blocks", [["block_type", "Block type"], ["size", "Size"], ["quantity", "Quantity"]]],
-      ["sheets_cut", "Sheets cut", [["size", "Size"], ["quantity", "Quantity"]]],
+      ["sheets_cut", "Sheets cut", [["size", "Size"], ["quantity", "Quantity"], ["pieces_recovered", "Pieces recovered"]]],
     ],
     B: [
       ["foam_received", "Foam received", [["quantity", "Quantity"], ["unit", "Unit"]]],
@@ -81,9 +81,11 @@ export function warehouseReportMetrics(warehouseId, report) {
       { label: "Total blocks manufactured", value: countValue(manufactured, "quantity", "block") },
       { label: "Manufactured by type and size", value: groupedQuantitySummary(manufactured, (line) => `${line.block_type} · ${line.size}`) },
       { label: "Total foam cut", value: groupedQuantitySummary(foamCut, (line) => `${line.size} ${line.unit}`) },
+      { label: "Pieces recovered from foam cuts", value: countValue(foamCut, "pieces_recovered", "pc", "pcs") },
       { label: "Total damaged and broken blocks", value: countValue(damaged, "quantity", "block") },
       { label: "Damaged blocks by type and size", value: groupedQuantitySummary(damaged, (line) => `${line.block_type} · ${line.size}`) },
       { label: "Total sheets cut", value: countValue(sheets, "quantity", "sheet") },
+      { label: "Pieces recovered from sheets", value: countValue(sheets, "pieces_recovered", "pc", "pcs") },
       { label: "Sheets cut by size", value: groupedQuantitySummary(sheets, (line) => line.size) },
     ];
   }

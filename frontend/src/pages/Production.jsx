@@ -19,7 +19,7 @@ export default function Production() {
   const { user } = useAuth();
   const canPermanentlyDelete = user?.is_admin || user?.role === "admin" || user?.is_owner;
   const canRecordBlockProduction = user?.company_id === "iqfoam-manufactoring"
-    && (!user?.is_worker || (user?.is_supervisor && user?.allowed_sections?.includes("warehouses")));
+    && (!user?.is_worker || (user?.is_supervisor && user?.allowed_sections?.includes("production")));
   const canManageRecipes = !user?.is_worker && (user?.is_owner || user?.is_admin || user?.is_company_owner);
   const [data, setData] = useState(null);
   const emptyForm = () => ({ date: today(), blocks: [{ block: "White", quantity: "" }], notes: "" });
@@ -28,7 +28,9 @@ export default function Production() {
   const [blockCuttings, setBlockCuttings] = useState([]);
   const [showArchivedCuttings, setShowArchivedCuttings] = useState(false);
   const [cutOpen, setCutOpen] = useState(false);
-  const [cutForm, setCutForm] = useState({ block: "", size: "" });
+  const [cutForm, setCutForm] = useState({
+    block: "", size: "", pieces_recovered: "", has_sheet: false,
+  });
   const [cutScanProduct, setCutScanProduct] = useState(null);
   const [blockRecipes, setBlockRecipes] = useState([]);
   const [blockProductions, setBlockProductions] = useState([]);
@@ -266,15 +268,26 @@ export default function Production() {
     } catch (e) { toast.error(apiError(e)); } finally { setBusy(false); }
   };
   const saveBlockCutting = async () => {
-    if (!cutForm.block || !cutForm.size) return toast.error("Select a block and size");
+    if (!cutForm.block || (!cutForm.has_sheet && !cutForm.size)) {
+      return toast.error(cutForm.has_sheet ? "Select a block" : "Select a block and size");
+    }
+    const piecesRecovered = Number(cutForm.pieces_recovered);
+    if (!Number.isInteger(piecesRecovered) || piecesRecovered <= 0) {
+      return toast.error("Enter a positive whole number of pieces recovered");
+    }
     if (cutBusy) return;
     setCutBusy(true);
     try {
-      if (cutForm.id) await api.put(`/production/block-cutting/${cutForm.id}`, cutForm);
-      else await api.post("/production/block-cutting", cutForm);
+      const payload = {
+        ...cutForm,
+        size: cutForm.has_sheet ? "" : cutForm.size,
+        pieces_recovered: piecesRecovered,
+      };
+      if (cutForm.id) await api.put(`/production/block-cutting/${cutForm.id}`, payload);
+      else await api.post("/production/block-cutting", payload);
       toast.success(cutForm.id ? "Block cutting updated" : "Block cutting recorded");
       setCutOpen(false);
-      setCutForm({ block: "", size: "" });
+      setCutForm({ block: "", size: "", pieces_recovered: "", has_sheet: false });
       api.get(showArchivedCuttings ? "/production/block-cutting?include_archived=true" : "/production/block-cutting")
         .then(setBlockCuttings).catch((e) => toast.error(apiError(e)));
     } catch (e) {
@@ -482,21 +495,31 @@ export default function Production() {
               <input type="checkbox" checked={showArchivedCuttings} onChange={(event) => setShowArchivedCuttings(event.target.checked)} data-testid="show-archived-block-cuttings" />
               Show archived
             </label>
-            <Btn onClick={() => { setCutForm({ block: "", size: "" }); setCutScanProduct(null); setCutOpen(true); }} data-testid="add-block-cutting-btn"><Plus size={16} /> Add Block Cutted</Btn>
+            <Btn onClick={() => { setCutForm({ block: "", size: "", pieces_recovered: "", has_sheet: false }); setCutScanProduct(null); setCutOpen(true); }} data-testid="add-block-cutting-btn"><Plus size={16} /> Add Block Cutted</Btn>
           </div>
         </div>
         {blockCuttings.length === 0 ? <p className="text-sm text-slate-400">{showArchivedCuttings ? "No archived block cutting records." : "No block cutting records yet."}</p> : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-sm">
-              <thead><tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500"><th className="px-3 py-2">Block</th><th className="px-3 py-2">Size</th><th className="px-3 py-2">Date and Time</th><th className="px-3 py-2 text-right">Actions</th></tr></thead>
+            <table className="w-full min-w-[800px] text-sm">
+              <thead><tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500"><th className="px-3 py-2">Block</th><th className="px-3 py-2">Size</th><th className="px-3 py-2">Pieces recovered</th><th className="px-3 py-2">Sheet</th><th className="px-3 py-2">Date and Time</th><th className="px-3 py-2 text-right">Actions</th></tr></thead>
               <tbody>{blockCuttings.map((record) => <tr key={record.id} className="border-b border-border/70" data-testid={`block-cutting-row-${record.id}`}>
-                <td className="px-3 py-2 font-semibold">{record.block}{record.archived && <Badge cls="ml-2 bg-amber-50 text-amber-700 border-amber-200">Archived</Badge>}</td><td className="px-3 py-2">{record.size}</td><td className="px-3 py-2 text-slate-500">{fmtDateTime(record.created_at)}</td>
+                <td className="px-3 py-2 font-semibold">{record.block}{record.archived && <Badge cls="ml-2 bg-amber-50 text-amber-700 border-amber-200">Archived</Badge>}</td>
+                <td className="px-3 py-2">{record.size || (record.has_sheet ? "Sheet" : "—")}</td>
+                <td className="px-3 py-2">{record.pieces_recovered ?? "—"}</td>
+                <td className="px-3 py-2">{record.has_sheet ? (record.sheet_mm && record.sheet_pieces_recovered
+                  ? `${record.sheet_mm} mm · ${record.sheet_pieces_recovered} pcs`
+                  : "Yes") : "—"}</td>
+                <td className="px-3 py-2 text-slate-500">{fmtDateTime(record.created_at)}</td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">
                   {record.archived ? <>
                     <button onClick={() => restoreBlockCutting(record)} className="mr-3 text-emerald-700 hover:text-emerald-900" aria-label={`Restore ${record.block} ${record.size}`} data-testid={`restore-block-cutting-${record.id}`}><RotateCcw size={15} /></button>
                     {canPermanentlyDelete && <button onClick={() => permanentlyDeleteBlockCutting(record)} className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50" aria-label={`Permanently delete ${record.block} ${record.size}`} data-testid={`permanently-delete-block-cutting-${record.id}`}><Trash2 size={12} /><span>Delete permanently</span></button>}
                   </> : <>
-                    <button onClick={() => { setCutForm({ id: record.id, block: record.block, size: record.size }); setCutScanProduct(null); setCutOpen(true); }} className="mr-3 text-slate-400 hover:text-primary" aria-label={`Edit ${record.block} ${record.size}`} data-testid={`edit-block-cutting-${record.id}`}><Pencil size={15} /></button>
+                    <button onClick={() => { setCutForm({
+                      id: record.id, block: record.block, size: record.size,
+                      pieces_recovered: record.pieces_recovered == null ? "" : String(record.pieces_recovered),
+                      has_sheet: !!record.has_sheet,
+                    }); setCutScanProduct(null); setCutOpen(true); }} className="mr-3 text-slate-400 hover:text-primary" aria-label={`Edit ${record.block} ${record.size}`} data-testid={`edit-block-cutting-${record.id}`}><Pencil size={15} /></button>
                     <button onClick={() => deleteBlockCutting(record)} className="text-slate-400 hover:text-red-600" aria-label={`Archive ${record.block} ${record.size}`} data-testid={`delete-block-cutting-${record.id}`}><Trash2 size={15} /></button>
                   </>}
                 </td>
@@ -529,11 +552,18 @@ export default function Production() {
           </p>}
           <Input label="Which block?" list="block-cutting-options" value={cutForm.block} onChange={(event) => setCutForm({ ...cutForm, block: event.target.value, size: "" })} placeholder="Choose or type a block" data-testid="block-cutting-type-select" />
           <datalist id="block-cutting-options"><option value="Black" /><option value="White" /></datalist>
-          <Select label="Which size?" value={cutForm.size} onChange={(event) => setCutForm({ ...cutForm, size: event.target.value })} disabled={!cutForm.block || availableSizes.length === 0} data-testid="block-cutting-size-select">
+          <label className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-slate-700">
+            <input type="checkbox" checked={!!cutForm.has_sheet} onChange={(event) => setCutForm({
+              ...cutForm, has_sheet: event.target.checked,
+            })} data-testid="block-cutting-sheet-toggle" />
+            Sheet
+          </label>
+          {!cutForm.has_sheet && <Select label="Which size?" value={cutForm.size} onChange={(event) => setCutForm({ ...cutForm, size: event.target.value })} disabled={!cutForm.block || availableSizes.length === 0} data-testid="block-cutting-size-select">
             <option value="">{availableSizes.length ? "Select size..." : "No sizes available in Stock"}</option>
             {availableSizes.map((size) => <option key={size} value={size}>{size}</option>)}
-          </Select>
-          <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setCutOpen(false)}>Cancel</Btn><Btn disabled={cutBusy || !cutForm.block || !cutForm.size} onClick={saveBlockCutting} data-testid="save-block-cutting-btn">Confirm</Btn></div>
+          </Select>}
+          <Input label={cutForm.has_sheet ? "Pieces recovered from sheet" : "Pieces recovered from this block"} type="number" min="1" step="1" value={cutForm.pieces_recovered} onChange={(event) => setCutForm({ ...cutForm, pieces_recovered: event.target.value })} required data-testid="block-cutting-pieces-recovered" />
+          <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setCutOpen(false)}>Cancel</Btn><Btn disabled={cutBusy || !cutForm.block || (!cutForm.has_sheet && !cutForm.size)} onClick={saveBlockCutting} data-testid="save-block-cutting-btn">Confirm</Btn></div>
         </div>
       </Modal>
       <Modal open={!!recipePrompt} onClose={() => setRecipePrompt(null)} title="Company formula">

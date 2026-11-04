@@ -110,6 +110,91 @@ def test_workers_can_access_only_their_own_notification_routes(section):
     assert unrelated_section.value.status_code == 403
 
 
+def test_workers_need_explicit_grv_access_and_production_access_stays_independent():
+    production_worker = {"is_worker": True, "worker_allowed_sections": ["production"]}
+    server.enforce_worker_api_access(request("/api/production/daily", "unused"), production_worker)
+    with pytest.raises(HTTPException) as production_cannot_access_grv:
+        server.enforce_worker_api_access(request("/api/grv", "unused"), production_worker)
+    assert production_cannot_access_grv.value.status_code == 403
+
+    costs_worker = {"is_worker": True, "worker_allowed_sections": ["costs"]}
+    with pytest.raises(HTTPException) as costs_cannot_access_grv:
+        server.enforce_worker_api_access(request("/api/grv", "unused"), costs_worker)
+    assert costs_cannot_access_grv.value.status_code == 403
+
+    grv_worker = {"is_worker": True, "worker_allowed_sections": ["grv"]}
+    server.enforce_worker_api_access(request("/api/grv", "unused"), grv_worker)
+
+
+def test_yellow_navigation_pages_require_their_individual_worker_sections():
+    cases = (
+        ("/api/intercompany/requests", "intercompany", "orders"),
+        ("/api/company-inventory", "company-inventory", "stock"),
+        ("/api/warehouses/A/reports", "warehouse-a", "warehouse-b"),
+        ("/api/warehouses/chemical/logs", "chemical-usage-log", "chemicals-quantity"),
+    )
+    for path, granted_section, denied_section in cases:
+        company_id = "superiqfoam" if granted_section.startswith(("chemical-", "chemicals-")) else "iqfoam-manufactoring"
+        worker = {
+            "is_worker": True,
+            "worker_allowed_sections": [granted_section],
+            "_active_company_id": company_id,
+        }
+        server.enforce_worker_api_access(request(path, "unused"), worker)
+        worker["worker_allowed_sections"] = [denied_section]
+        with pytest.raises(HTTPException) as denied:
+            server.enforce_worker_api_access(request(path, "unused"), worker)
+        assert denied.value.status_code == 403
+
+    chemical_usage_worker = {
+        "is_worker": True,
+        "worker_allowed_sections": ["chemical-usage-log"],
+        "_active_company_id": "superiqfoam",
+    }
+    server.enforce_worker_api_access(
+        request("/api/warehouses/chemical/inventory", "unused"),
+        chemical_usage_worker,
+    )
+
+    manufacturing_chemical_worker = {
+        "is_worker": True,
+        "worker_allowed_sections": ["warehouse-chemical"],
+        "_active_company_id": "iqfoam-manufactoring",
+    }
+    server.enforce_worker_api_access(
+        request("/api/warehouses/chemical/logs", "unused"),
+        manufacturing_chemical_worker,
+    )
+    server.enforce_worker_api_access(
+        request("/api/warehouses/chemical/inventory", "unused"),
+        manufacturing_chemical_worker,
+    )
+
+
+def test_chemical_routes_require_the_matching_company_specific_section():
+    cases = (
+        ("superiqfoam", "chemical-usage-log", "/api/warehouses/chemical/logs"),
+        ("iqfoam-manufactoring", "warehouse-chemical", "/api/warehouses/chemical/logs"),
+        ("superiqfoam", "chemicals-quantity", "/api/warehouses/chemical/inventory"),
+        ("iqfoam-manufactoring", "warehouse-chemical-inventory", "/api/warehouses/chemical/inventory"),
+    )
+    for company_id, section, path in cases:
+        worker = {
+            "is_worker": True,
+            "worker_allowed_sections": [section],
+            "_active_company_id": company_id,
+        }
+        server.enforce_worker_api_access(request(path, "unused"), worker)
+
+    with pytest.raises(HTTPException) as wrong_chemical_page:
+        server.enforce_worker_api_access(request("/api/warehouses/chemical/inventory", "unused", "POST"), {
+            "is_worker": True,
+            "worker_allowed_sections": ["warehouse-chemical"],
+            "_active_company_id": "iqfoam-manufactoring",
+        })
+    assert wrong_chemical_page.value.status_code == 403
+
+
 def test_manufacturing_worker_supervisor_configuration_is_validated():
     W = ("warehouses",)
     assert server.worker_supervisor_settings(

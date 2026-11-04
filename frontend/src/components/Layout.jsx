@@ -24,11 +24,11 @@ const NAV_GROUPS = [
     { to: "/client-payments", label: "Clients payment and balances", icon: HandCoins, section: "client-payments" },
   ] },
   { label: "Express Websites - Old Invoices and Payments", collapsible: true, items: [
-    { to: "/express-invoices", label: "Express Website Invoices", icon: ReceiptText, section: "invoices" },
-    { to: "/express-client-payments", label: "Express Website Payments and Balances", icon: HandCoins, section: "client-payments" },
+    { to: "/express-invoices", label: "Express Website Invoices", icon: ReceiptText, section: "express-invoices" },
+    { to: "/express-client-payments", label: "Express Website Payments and Balances", icon: HandCoins, section: "express-client-payments" },
   ] },
   { label: "Purchasing", items: [
-    { to: "/intercompany", label: "Intercompany", icon: Building2, section: "orders" },
+    { to: "/intercompany", label: "Intercompany", icon: Building2, section: "intercompany" },
     { to: "/grv", label: "GRV", icon: ClipboardCheck, section: "grv" },
     { to: "/suppliers", label: "Suppliers", icon: Handshake, section: "suppliers" },
     { to: "/buyings", label: "Buyings", icon: ShoppingCart, section: "buyings" },
@@ -38,19 +38,19 @@ const NAV_GROUPS = [
     { to: "/fleet", label: "Fleet", icon: CarFront, section: "fleet" },
   ] },
   { label: "COMPANY INVENTORY", collapsible: true, items: [
-    { to: "/company-inventory", label: "Company Inventory", icon: Boxes, section: "stock" },
+    { to: "/company-inventory", label: "Company Inventory", icon: Boxes, section: "company-inventory" },
   ] },
   { label: "PRODUCTION", collapsible: true, companyIds: ["superiqfoam"], items: [
     { to: "/production", label: "Production", icon: Factory, section: "production" },
-    { to: "/warehouses/chemical-inventory", label: "Chemicals Quantity", icon: FlaskConical, section: "warehouses", companyId: "superiqfoam" },
-    { to: "/warehouses/chemical", label: "Chemical Usage Log", icon: FlaskConical, section: "warehouses", companyId: "superiqfoam" },
+    { to: "/warehouses/chemical-inventory", label: "Chemicals Quantity", icon: FlaskConical, section: "chemicals-quantity", companyId: "superiqfoam" },
+    { to: "/warehouses/chemical", label: "Chemical Usage Log", icon: FlaskConical, section: "chemical-usage-log", companyId: "superiqfoam" },
   ] },
   { label: "WAREHOUSES", collapsible: true, companyId: "iqfoam-manufactoring", items: [
-    { to: "/warehouses/A", label: "Warehouse A", icon: Warehouse, section: "warehouses", warehouseId: "A" },
-    { to: "/warehouses/B", label: "Warehouse B", icon: Warehouse, section: "warehouses", warehouseId: "B" },
-    { to: "/warehouses/C", label: "Warehouse C", icon: Warehouse, section: "warehouses", warehouseId: "C" },
-    { to: "/warehouses/chemical", label: "Chemical", icon: FlaskConical, section: "warehouses" },
-    { to: "/warehouses/chemical-inventory", label: "Chemical Inventory", icon: Boxes, section: "warehouses" },
+    { to: "/warehouses/A", label: "Warehouse A", icon: Warehouse, section: "warehouse-a", warehouseId: "A" },
+    { to: "/warehouses/B", label: "Warehouse B", icon: Warehouse, section: "warehouse-b", warehouseId: "B" },
+    { to: "/warehouses/C", label: "Warehouse C", icon: Warehouse, section: "warehouse-c", warehouseId: "C" },
+    { to: "/warehouses/chemical", label: "Chemical", icon: FlaskConical, section: "warehouse-chemical" },
+    { to: "/warehouses/chemical-inventory", label: "Chemical Inventory", icon: Boxes, section: "warehouse-chemical-inventory" },
   ] },
   { label: "Finance & team", items: [
     { to: "/expenses", label: "Expenses", icon: Receipt, section: "expenses" },
@@ -90,9 +90,7 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
       (!item.companyId || item.companyId === companyId)
       && (!user?.is_worker || !item.warehouseId || (user.warehouse_ids || []).includes(item.warehouseId))
       && (!item.globalOwnerOnly || (user?.is_primary_owner && user?.is_owner && !user?.is_worker))
-      && (!user?.is_worker
-        || user.allowed_sections?.includes(item.section)
-        || (item.section === "grv" && user.allowed_sections?.includes("costs")))
+      && (!user?.is_worker || user.allowed_sections?.includes(item.section))
     ),
   })).filter((group) => (!group.companyId || group.companyId === companyId) && (!group.companyIds || group.companyIds.includes(companyId)) && group.items.length);
   return (
@@ -113,7 +111,6 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
           const items = group.items.map((n) => (
             user?.is_worker
               && !user.allowed_sections?.includes(n.section)
-              && !(n.section === "grv" && user.allowed_sections?.includes("costs"))
               ? <div key={n.to} aria-disabled="true" title="Your administrator has not granted access to this section" data-testid={`nav-locked-${n.label.toLowerCase()}`}
                 className="flex min-h-9 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium leading-tight text-emerald-50/35">
                 <n.icon size={18} />

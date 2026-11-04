@@ -6,7 +6,7 @@ import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
 import { Banknote, Eye, Plus, TrendingUp, TrendingDown, Wallet, Trash2, Pencil } from "lucide-react";
 
-const CATS = ["General", "Materials", "Fuel", "Diesel", "Salaries", "Rent", "Utilities", "Vehicle", "Maintenance", "Other"];
+const CATS = ["Factory Expenses", "General", "Materials", "Diesel", "Salaries", "Rent", "Vehicle", "Maintenance", "Other"];
 const SUPERIQFOAM_CATS = ["Bilal", "Yassine", "Bilal and Yassine", "Personal Car", "Home"];
 const blank = () => ({ description: "", amount: "", date: today(), category: "General", payment_method: "Cash", reference: "", vehicle_id: "", notes: "" });
 

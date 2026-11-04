@@ -62,9 +62,9 @@ def report_payload():
         date="2026-11-02",
         chemicals=[{"chemical": "Polyol", "quantity": 12.5, "unit": "L"}],
         manufactured_blocks=[{"block_type": "White", "size": "2m x 1m", "quantity": 8}],
-        foam_cut=[{"size": "50mm", "quantity": 4.5, "unit": "m³"}],
+        foam_cut=[{"size": "50mm", "quantity": 4.5, "unit": "m³", "pieces_recovered": 9}],
         damaged_blocks=[{"block_type": "White", "size": "2m x 1m", "quantity": 1}],
-        sheets_cut=[{"size": "1000 x 2000mm", "quantity": 12}],
+        sheets_cut=[{"size": "1000 x 2000mm", "quantity": 12, "pieces_recovered": 24}],
         notes="Shift report",
     )
 
@@ -159,6 +159,21 @@ def test_warehouse_block_counts_must_be_whole_numbers():
         )
 
 
+def test_warehouse_a_cut_entries_require_positive_whole_piece_counts():
+    with pytest.raises(ValidationError):
+        server.WarehouseReportIn(
+            date="2026-11-02",
+            foam_cut=[{"size": "50mm", "quantity": 4.5, "unit": "m³"}],
+        )
+    with pytest.raises(ValidationError):
+        server.WarehouseReportIn(
+            date="2026-11-02",
+            sheets_cut=[{
+                "size": "1000 x 2000mm", "quantity": 12, "pieces_recovered": 0,
+            }],
+        )
+
+
 def test_warehouse_report_access_is_limited_to_assigned_manufacturing_workers():
     worker = {
         "_active_company_id": server.MANUFACTURING_COMPANY_ID,
@@ -167,6 +182,12 @@ def test_warehouse_report_access_is_limited_to_assigned_manufacturing_workers():
         "worker_warehouse_id": "A",
     }
     server.require_warehouse_report_access(worker, "A")
+    server.require_warehouse_report_access({
+        **worker,
+        "worker_allowed_sections": ["warehouse-a"],
+        "worker_warehouse_ids": ["A"],
+        "worker_warehouse_id": None,
+    }, "A")
 
     with pytest.raises(HTTPException) as wrong_warehouse:
         server.require_warehouse_report_access({**worker, "worker_warehouse_id": "B"}, "A")
@@ -234,6 +255,8 @@ def test_warehouse_a_report_saves_and_loads_with_audit(monkeypatch):
     assert saved["created_by"] == "worker-a"
     assert saved["created_by_name"] == "Warehouse Worker"
     assert saved["manufactured_blocks"][0]["quantity"] == 8
+    assert saved["foam_cut"][0]["pieces_recovered"] == 9
+    assert saved["sheets_cut"][0]["pieces_recovered"] == 24
     assert [report["id"] for report in reports] == [saved["id"]]
     assert audit_entries[0][0][:3] == ("warehouse_report", saved["id"], "created")
 

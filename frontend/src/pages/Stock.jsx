@@ -1,11 +1,12 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { api, apiError } from "@/lib/api";
 import { fmtDateTime, fmtMoney } from "@/lib/format";
 import { companyProfileName, usesUnifiedPriceList } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
-import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2, Search, X } from "lucide-react";
+import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2, Search, X, ChevronDown, ChevronUp } from "lucide-react";
 import { listViewState, loadListRequest } from "@/lib/listRequest.mjs";
 
 const ProductIdentificationManager = lazy(() => import("@/components/ProductIdentificationManager"));
@@ -18,7 +19,6 @@ const MOVE_TYPES = [
 ];
 const TYPE_LABEL = { production: "Production Received", production_consumption: "Production Material Used", purchase: "Purchase Received", dispatch: "Delivery Dispatched", invoice: "Invoice Submitted", adjustment_in: "Adjustment In", adjustment_out: "Adjustment Out", return: "Return", damage: "Damage/Waste", reversal: "Reversal" };
 const sign = (m) => (m.direction ? m.direction : ["production", "purchase", "adjustment_in", "return"].includes(m.type) ? 1 : -1);
-const CATEGORIES = ["Simple", "Ribbon Black", "Ribbon Pink", "Candy", "Uncovered", "Strong Boy"];
 const STOCK_CATEGORY = {
   "Ribbon Black": ["Ribbon Black", "Ribbon Balck", "Black"],
   "Ribbon Balck": ["Ribbon Black", "Black"],
@@ -27,6 +27,7 @@ const STOCK_CATEGORY = {
 
 export default function Stock() {
   const { user } = useAuth();
+  const reduceMotion = useReducedMotion();
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const [list, setList] = useState(null);
   const [prices, setPrices] = useState([]);
@@ -34,6 +35,7 @@ export default function Stock() {
   const [category, setCategory] = useState("");
   const [stockSearch, setStockSearch] = useState("");
   const [showStockSearch, setShowStockSearch] = useState(false);
+  const [showStockTotals, setShowStockTotals] = useState(true);
   const [movementRequest, setMovementRequest] = useState({ items: [], loading: true, error: "" });
   const [addModal, setAddModal] = useState(null);
   const [moveModal, setMoveModal] = useState(null);
@@ -59,10 +61,7 @@ export default function Stock() {
     (!category || (STOCK_CATEGORY[category] || [category]).includes(item.product))
     && (!stockSearch.trim() || `${item.product} ${item.size}`.toLowerCase().includes(stockSearch.trim().toLowerCase()))
   );
-  const stockCategories = [...new Set([
-    ...CATEGORIES,
-    ...(list || []).map((item) => item.product).filter(Boolean),
-  ])];
+  const stockCategories = [...new Set((list || []).map((item) => item.product).filter(Boolean))];
 
   const run = async (fn, ok) => {
     if (busy) return; setBusy(true);
@@ -170,6 +169,37 @@ export default function Stock() {
     }
   };
 
+  const deleteStockCategory = async () => {
+    const product = addModal?.category;
+    if (!product || busy) return;
+    const categoryStocks = (list || []).filter((stock) => stock.product === product);
+    if (!categoryStocks.length) return toast.error("This category has no stock records to delete");
+    const quantity = categoryStocks.reduce((total, stock) => total + Number(stock.current || 0), 0);
+    if (!window.confirm(
+      `Permanently delete "${product}" and all ${categoryStocks.length} stock record(s) across its sizes? `
+      + `${quantity} current units and all related stock movements will be deleted. This cannot be undone.`,
+    )) return;
+
+    setBusy(true);
+    let deletedCount = 0;
+    try {
+      for (const stock of categoryStocks) {
+        await api.del(`/stock/${stock.id}`);
+        deletedCount += 1;
+      }
+      toast.success(`Category "${product}" and its stock records permanently deleted`);
+      setAddModal(null);
+    } catch (error) {
+      const progress = deletedCount
+        ? `${deletedCount} of ${categoryStocks.length} records were deleted before the error. `
+        : "";
+      toast.error(`${progress}${apiError(error)}`);
+    } finally {
+      setBusy(false);
+      load();
+    }
+  };
+
   const saveMove = async () => {
     if (!Number.isFinite(Number(moveModal.quantity)) || Number(moveModal.quantity) < 0) {
       return toast.error("Quantity cannot be negative");
@@ -226,51 +256,79 @@ export default function Stock() {
       </div>
 
       <Card className="p-4 mb-6 bg-slate-50 border-slate-200">
-        <h2 className="text-xs font-bold uppercase tracking-wide text-slate-600 mb-3">Stock Total</h2>
-        {list === null ? (
-          <p className="text-sm text-slate-400">Loading...</p>
-        ) : (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-            {stockCategories.map((cat) => {
-              const total = getTotalsByCategory()[cat] || 0;
-              return total > 0 ? (
-                <div key={cat} className="bg-white rounded-md p-3 border border-slate-200">
-                  <p className="text-xs text-slate-500 font-semibold">{cat}</p>
-                  <p className="text-lg font-mono font-bold text-slate-800">{total}</p>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h2 className="text-xs font-bold uppercase tracking-wide text-slate-600">Stock Total</h2>
+          <Btn
+            type="button"
+            variant="outline"
+            className="px-3 py-1.5 text-xs"
+            onClick={() => setShowStockTotals((visible) => !visible)}
+            aria-expanded={showStockTotals}
+            aria-controls="stock-total-summary"
+            data-testid="stock-total-toggle"
+          >
+            {showStockTotals ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+            {showStockTotals ? "Hide totals" : "Show totals"}
+          </Btn>
+        </div>
+        <AnimatePresence initial={false}>
+          {showStockTotals && (
+            <motion.div
+              id="stock-total-summary"
+              key="stock-total-summary"
+              initial={reduceMotion ? false : { height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: reduceMotion ? 0 : 0.22, ease: "easeInOut" }}
+              className="overflow-hidden"
+            >
+              {list === null ? (
+                <p className="text-sm text-slate-400">Loading...</p>
+              ) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+                  {stockCategories.map((cat) => {
+                    const total = getTotalsByCategory()[cat] || 0;
+                    return total > 0 ? (
+                      <div key={cat} className="bg-white rounded-md p-3 border border-slate-200">
+                        <p className="text-xs text-slate-500 font-semibold">{cat}</p>
+                        <p className="text-lg font-mono font-bold text-slate-800">{total}</p>
+                      </div>
+                    ) : null;
+                  })}
+                  <div className="bg-white rounded-md p-3 border border-slate-300 border-2">
+                    <p className="text-xs text-slate-600 font-semibold">Overall Total</p>
+                    <p className="text-lg font-mono font-bold text-slate-900">{getTotalStock()}</p>
+                  </div>
+                  <div className="bg-white rounded-md p-3 border border-slate-200">
+                    <p className="text-xs text-slate-500 font-semibold">Ribbon Total</p>
+                    <p className="text-lg font-mono font-bold text-slate-800">{(getTotalsByCategory()["Ribbon Pink"] || 0) + (getTotalsByCategory()["Ribbon Black"] || 0)}</p>
+                  </div>
+                  <div className="bg-white rounded-md p-3 border border-slate-200">
+                    <p className="text-xs text-slate-500 font-semibold">Strong Boy Total</p>
+                    <p className="text-lg font-mono font-bold text-slate-800">{getTotalsByCategory()["Strong Boy"] || 0}</p>
+                  </div>
+                  {!user?.is_worker && (() => {
+                    const value = getStockValueTotal(valueZone);
+                    return (
+                      <div className="col-span-2 bg-white rounded-md p-3 border border-slate-300 border-2">
+                        <label htmlFor="stock-value-zone" className="block text-xs text-slate-600 font-semibold">Total Stock Value</label>
+                        {!unifiedPriceList && (
+                          <select id="stock-value-zone" value={valueZone} onChange={(event) => setValueZone(Number(event.target.value))}
+                            className="mt-1 mb-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs" data-testid="stock-value-zone">
+                            <option value={1}>Zone 1</option>
+                            <option value={2}>Zone 2</option>
+                          </select>
+                        )}
+                        <p className="text-lg font-mono font-bold text-slate-900">{value.total}</p>
+                        {value.unpriced > 0 && <p className="text-[11px] text-amber-600">{value.unpriced} item(s) without confirmed price not included</p>}
+                      </div>
+                    );
+                  })()}
                 </div>
-              ) : null;
-            })}
-            <div className="bg-white rounded-md p-3 border border-slate-300 border-2">
-              <p className="text-xs text-slate-600 font-semibold">Overall Total</p>
-              <p className="text-lg font-mono font-bold text-slate-900">{getTotalStock()}</p>
-            </div>
-            <div className="bg-white rounded-md p-3 border border-slate-200">
-              <p className="text-xs text-slate-500 font-semibold">Ribbon Total</p>
-              <p className="text-lg font-mono font-bold text-slate-800">{(getTotalsByCategory()["Ribbon Pink"] || 0) + (getTotalsByCategory()["Ribbon Black"] || 0)}</p>
-            </div>
-            <div className="bg-white rounded-md p-3 border border-slate-200">
-              <p className="text-xs text-slate-500 font-semibold">Strong Boy Total</p>
-              <p className="text-lg font-mono font-bold text-slate-800">{getTotalsByCategory()["Strong Boy"] || 0}</p>
-            </div>
-            {!user?.is_worker && (() => {
-              const value = getStockValueTotal(valueZone);
-              return (
-                <div className="col-span-2 bg-white rounded-md p-3 border border-slate-300 border-2">
-                  <label htmlFor="stock-value-zone" className="block text-xs text-slate-600 font-semibold">Total Stock Value</label>
-                  {!unifiedPriceList && (
-                    <select id="stock-value-zone" value={valueZone} onChange={(event) => setValueZone(Number(event.target.value))}
-                      className="mt-1 mb-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs" data-testid="stock-value-zone">
-                      <option value={1}>Zone 1</option>
-                      <option value={2}>Zone 2</option>
-                    </select>
-                  )}
-                  <p className="text-lg font-mono font-bold text-slate-900">{value.total}</p>
-                  {value.unpriced > 0 && <p className="text-[11px] text-amber-600">{value.unpriced} item(s) without confirmed price not included</p>}
-                </div>
-              );
-            })()}
-          </div>
-        )}
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </Card>
 
       <Card className="overflow-hidden">
@@ -311,18 +369,31 @@ export default function Stock() {
 
       <Modal open={!!addModal} onClose={() => setAddModal(null)} title="Add Stock Product">
         {addModal && <div className="space-y-4">
-          <Select
-            label="Category (optional)"
-            value={addModal.category || ""}
-            onChange={(event) => {
-              const selectedCategory = event.target.value;
-              setAddModal({ ...addModal, category: selectedCategory, product: selectedCategory || addModal.product });
-            }}
-            data-testid="stock-category-input"
-          >
-            <option value="">No category — enter a product manually</option>
-            {stockCategories.map((item) => <option key={item} value={item}>{item}</option>)}
-          </Select>
+          <div className="grid items-end gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <Select
+              label="Category (optional)"
+              value={addModal.category || ""}
+              onChange={(event) => {
+                const selectedCategory = event.target.value;
+                setAddModal({ ...addModal, category: selectedCategory, product: selectedCategory || addModal.product });
+              }}
+              data-testid="stock-category-input"
+            >
+              <option value="">No category — enter a product manually</option>
+              {stockCategories.map((item) => <option key={item} value={item}>{item}</option>)}
+            </Select>
+            {addModal.category && !user?.is_stock_only_worker && (
+              <Btn
+                type="button"
+                variant="danger"
+                onClick={deleteStockCategory}
+                disabled={busy || list === null}
+                data-testid="delete-stock-category-btn"
+              >
+                <Trash2 size={15} /> Delete category
+              </Btn>
+            )}
+          </div>
           <Input label="Product *" value={addModal.product} onChange={(e) => setAddModal({ ...addModal, product: e.target.value, category: "" })} data-testid="stock-product-input" />
           <div className="grid grid-cols-2 gap-3">
             <Input label="Size / measurement *" value={addModal.size} onChange={(e) => setAddModal({ ...addModal, size: e.target.value })} placeholder="910x100" data-testid="stock-size-input" />

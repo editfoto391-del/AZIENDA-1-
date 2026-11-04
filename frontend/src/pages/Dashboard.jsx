@@ -25,15 +25,26 @@ const QUICK = [
   { label: "Record Expense", icon: Banknote, to: "/expenses" },
 ];
 
+const MANUFACTURING_COMPANY_ID = "iqfoam-manufactoring";
 const WORKER_SECTION_OPTIONS = [
   ["customers", "Customers"], ["suppliers", "Suppliers"], ["buyings", "Buyings"],
-  ["invoices", "Invoice"], ["orders", "Orders"], ["stock", "Stock"],
-  ["production", "Production"], ["attendance", "Attendance"],
-  ["deliveries", "Deliveries"], ["fleet", "Fleet"], ["expenses", "Expenses"],
-  ["costs", "Costs report"], ["grv", "GRV"],
-  ["daily-report", "Daily Report"], ["client-payments", "Clients payment and balances"],
+  ["invoices", "Invoice"], ["express-invoices", "Express Website Invoices"],
+  ["orders", "Orders"], ["intercompany", "Intercompany"],
+  ["stock", "Stock"], ["company-inventory", "Company Inventory"],
+  ["production", "Production", ["superiqfoam"]],
+  ["chemicals-quantity", "Chemicals Quantity", ["superiqfoam"]],
+  ["chemical-usage-log", "Chemical Usage Log", ["superiqfoam"]],
+  ["warehouse-a", "Warehouse A", [MANUFACTURING_COMPANY_ID]],
+  ["warehouse-b", "Warehouse B", [MANUFACTURING_COMPANY_ID]],
+  ["warehouse-c", "Warehouse C", [MANUFACTURING_COMPANY_ID]],
+  ["warehouse-chemical", "Chemical", [MANUFACTURING_COMPANY_ID]],
+  ["warehouse-chemical-inventory", "Chemical Inventory", [MANUFACTURING_COMPANY_ID]],
+  ["attendance", "Attendance"], ["deliveries", "Deliveries"],
+  ["fleet", "Fleet"], ["expenses", "Expenses"], ["costs", "Costs report"],
+  ["grv", "GRV"], ["daily-report", "Daily Report"],
+  ["client-payments", "Clients payment and balances"],
+  ["express-client-payments", "Express Website Payments and Balances"],
   ["settings", "Settings"],
-  ["warehouses", "Warehouses, Chemical Inventory & Usage Log"],
 ];
 const SUPERVISOR_ACTION_SECTIONS = {
   invoice_edit: ["invoices"],
@@ -41,17 +52,27 @@ const SUPERVISOR_ACTION_SECTIONS = {
   price_delete: ["settings"],
   customer_delete: ["customers"],
   stock_delete: ["stock"],
-  production_block_record: ["production", "warehouses"],
-  balance_payment_delete: ["customers", "client-payments"],
+  production_block_record: ["production"],
+  balance_payment_delete: ["customers", "client-payments", "express-client-payments"],
 };
 const WORKER_SECTION_OPERATIONS = {
   customers: [["create", "Add customer"], ["update", "Edit customer"], ["delete", "Delete customer"]],
   suppliers: [["create", "Add supplier"], ["update", "Edit supplier"], ["delete", "Delete supplier"]],
   buyings: [["create", "Record purchase"], ["update", "Edit purchase"], ["delete", "Delete purchase"]],
   invoices: [["create", "Create invoice"], ["update", "Edit / void invoice"], ["delete", "Delete invoice"]],
+  "express-invoices": [["create", "Create invoice"], ["update", "Edit / void invoice"], ["delete", "Delete invoice"]],
   orders: [["create", "Create order"], ["update", "Edit order"], ["delete", "Delete order"]],
+  intercompany: [["create", "Create request"], ["update", "Manage request"], ["delete", "Cancel request"]],
   stock: [["create", "Add stock"], ["update", "Adjust stock"], ["delete", "Delete stock item"]],
+  "company-inventory": [["create", "Add product"], ["update", "Edit product"], ["delete", "Delete product"]],
   production: [["create", "Record production"], ["update", "Edit production"], ["delete", "Delete production record"]],
+  "chemicals-quantity": [["create", "Record quantity"], ["update", "Update quantity"], ["delete", "Delete quantity record"]],
+  "chemical-usage-log": [["create", "Record usage"], ["update", "Edit usage"], ["delete", "Delete usage record"]],
+  "warehouse-a": [["create", "Create report"], ["update", "Edit report"], ["delete", "Delete report"]],
+  "warehouse-b": [["create", "Create report"], ["update", "Edit report"], ["delete", "Delete report"]],
+  "warehouse-c": [["create", "Create report"], ["update", "Edit report"], ["delete", "Delete report"]],
+  "warehouse-chemical": [["create", "Record usage"], ["update", "Edit usage"], ["delete", "Delete usage record"]],
+  "warehouse-chemical-inventory": [["create", "Record quantity"], ["update", "Update quantity"], ["delete", "Delete quantity record"]],
   attendance: [["create", "Record attendance"], ["update", "Edit attendance"], ["delete", "Delete attendance record"]],
   deliveries: [["create", "Schedule delivery"], ["update", "Edit delivery"], ["delete", "Delete delivery"]],
   fleet: [["create", "Add fleet record"], ["update", "Edit fleet record"], ["delete", "Delete fleet record"]],
@@ -60,6 +81,7 @@ const WORKER_SECTION_OPERATIONS = {
   grv: [["create", "Create GRV"], ["update", "Edit GRV"], ["delete", "Delete GRV"]],
   "daily-report": [["update", "Edit daily report"]],
   "client-payments": [["create", "Record payment"], ["update", "Reverse payment"], ["delete", "Delete payment"]],
+  "express-client-payments": [["create", "Record payment"], ["update", "Reverse payment"], ["delete", "Delete payment"]],
   settings: [["create", "Add price / setting"], ["update", "Change price / setting"], ["delete", "Delete price / setting"]],
   warehouses: [["create", "Add warehouse record"], ["update", "Edit warehouse record"], ["delete", "Delete warehouse record"]],
 };
@@ -93,8 +115,6 @@ const defaultWorkerWritePermissions = (sections, current = {}, legacyActions = [
         : legacyRequiresPassword ? "supervisor" : "allow"];
     }),
   )]));
-const MANUFACTURING_COMPANY_ID = "iqfoam-manufactoring";
-
 const currentMonth = today().slice(0, 7);
 const previousMonth = (month) => {
   const [year, value] = month.split("-").map(Number);
@@ -219,7 +239,7 @@ export default function Dashboard() {
   const [companyInventoryError, setCompanyInventoryError] = useState("");
   const [companyInventoryReload, setCompanyInventoryReload] = useState(0);
   useEffect(() => {
-    if (user?.is_worker && !user.allowed_sections?.includes("stock")) return;
+    if (user?.is_worker && !user.allowed_sections?.includes("company-inventory")) return;
     setCompanyInventory(null);
     setCompanyInventoryError("");
     api.getUncached("/company-inventory")
@@ -358,10 +378,16 @@ export default function Dashboard() {
     const writePermissions = { ...current.write_permissions };
     if (removingSection) delete writePermissions[section];
     else writePermissions[section] = defaultWorkerWritePermissions([section])[section];
+    const warehouseId = section.match(/^warehouse-([abc])$/)?.[1]?.toUpperCase();
+    const warehouseIds = warehouseId
+      ? removingSection
+        ? current.warehouse_ids.filter((id) => id !== warehouseId)
+        : [...new Set([...current.warehouse_ids, warehouseId])]
+      : current.warehouse_ids;
     return {
       ...current,
       allowed_sections: nextSections,
-      warehouse_ids: nextSections.includes("warehouses") ? current.warehouse_ids : [],
+      warehouse_ids: warehouseIds,
       supervisor_password_actions: current.supervisor_password_actions.filter((item) =>
         SUPERVISOR_ACTION_SECTIONS[item].some((required) => nextSections.includes(required))),
       write_permissions: writePermissions,
@@ -369,20 +395,49 @@ export default function Dashboard() {
   });
   const activeCompanyName = companies.find((company) => company.id === workerDraft.company_id)?.name || workerDraft.company_id;
   const changeWorkerCompany = async (companyId) => {
+    const availableSections = WORKER_SECTION_OPTIONS
+      .filter(([, , companyIds]) => !companyIds || companyIds.includes(companyId))
+      .map(([section]) => section);
     setWorkerDraft((current) => ({
       ...current,
       company_id: companyId,
-      warehouse_ids: [],
+      warehouse_ids: current.warehouse_ids.filter((id) => availableSections.includes(`warehouse-${id.toLowerCase()}`)),
       supervisor_password_actions: [],
       write_permissions: Object.fromEntries(Object.entries(current.write_permissions)
-        .filter(([section]) => (companyId === MANUFACTURING_COMPANY_ID || section !== "warehouses")
-          && current.allowed_sections.includes(section))),
-      allowed_sections: companyId === MANUFACTURING_COMPANY_ID
-        ? current.allowed_sections
-        : current.allowed_sections.filter((section) => section !== "warehouses"),
+        .filter(([section]) => availableSections.includes(section) && current.allowed_sections.includes(section))),
+      allowed_sections: current.allowed_sections.filter((section) => availableSections.includes(section)),
     }));
   };
   const editWorker = (worker) => {
+    const legacySections = new Set(worker.allowed_sections || []);
+    const expandedSections = new Set(legacySections);
+    if (legacySections.has("invoices")) expandedSections.add("express-invoices");
+    if (legacySections.has("client-payments")) expandedSections.add("express-client-payments");
+    if (legacySections.has("orders")) expandedSections.add("intercompany");
+    if (legacySections.has("stock") && !worker.stock_only) expandedSections.add("company-inventory");
+    const workerWarehouseIds = worker.warehouse_ids || [];
+    if (legacySections.has("warehouses")) {
+      workerWarehouseIds.forEach((id) => expandedSections.add(`warehouse-${id.toLowerCase()}`));
+      expandedSections.add(worker.company_id === "superiqfoam" ? "chemical-usage-log" : "warehouse-chemical");
+      expandedSections.add(worker.company_id === "superiqfoam" ? "chemicals-quantity" : "warehouse-chemical-inventory");
+    }
+    const expandedSectionList = [...expandedSections].filter((section) => WORKER_SECTION_OPTIONS
+      .some(([option, , companyIds]) => option === section && (!companyIds || companyIds.includes(worker.company_id))));
+    const expandedWritePermissions = { ...(worker.write_permissions || {}) };
+    const permissionAliases = {
+      invoices: ["express-invoices"],
+      orders: ["intercompany"],
+      "client-payments": ["express-client-payments"],
+    };
+    if (!worker.stock_only) permissionAliases.stock = ["company-inventory"];
+    Object.entries(permissionAliases).forEach(([legacySection, newSections]) => {
+      newSections.forEach((section) => {
+        if (expandedSectionList.includes(section) && !expandedWritePermissions[section]) {
+          expandedWritePermissions[section] = worker.write_permissions?.[legacySection]
+            || defaultWorkerWritePermissions([section])[section];
+        }
+      });
+    });
     setWorkerDraft({
       id: worker.id,
       name: worker.name,
@@ -391,14 +446,16 @@ export default function Dashboard() {
       worker_role: worker.worker_role,
       password: "",
       company_id: worker.company_id,
-      allowed_sections: [...new Set(worker.allowed_sections || [])],
+      allowed_sections: expandedSectionList,
       stock_only: worker.stock_only === true,
       is_supervisor: worker.is_supervisor === true,
-      warehouse_ids: worker.warehouse_ids || [],
-      supervisor_password_actions: worker.supervisor_password_actions || [],
+      warehouse_ids: workerWarehouseIds,
+      supervisor_password_actions: (worker.supervisor_password_actions || []).filter((action) =>
+        !SUPERVISOR_ACTION_SECTIONS[action]
+        || SUPERVISOR_ACTION_SECTIONS[action].some((section) => expandedSectionList.includes(section))),
       write_permissions: defaultWorkerWritePermissions(
-        [...new Set(worker.allowed_sections || [])],
-        worker.write_permissions || {},
+        expandedSectionList,
+        expandedWritePermissions,
         worker.supervisor_password_actions || [],
       ),
     });
@@ -572,8 +629,8 @@ export default function Dashboard() {
       </div>
 
       <Section title="Company Inventory" icon={Boxes} action={<button onClick={() => nav("/company-inventory")} className="text-xs font-semibold text-primary flex items-center gap-1" data-testid="dashboard-company-inventory-link">View <ArrowRight size={12} /></button>}>
-        {user?.is_worker && !user.allowed_sections?.includes("stock") ? (
-          <p className="text-sm text-slate-500">Company Inventory requires Stock access. Ask your administrator to update your permissions.</p>
+        {user?.is_worker && !user.allowed_sections?.includes("company-inventory") ? (
+          <p className="text-sm text-slate-500">Company Inventory requires Company Inventory access. Ask your administrator to update your permissions.</p>
         ) : companyInventoryError ? (
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-sm text-red-700" role="alert">{companyInventoryError}</p>
@@ -650,28 +707,6 @@ export default function Dashboard() {
             </>}
 
           </div>
-          {workerDraft.company_id === MANUFACTURING_COMPANY_ID && workerDraft.allowed_sections.includes("warehouses") && <fieldset className="space-y-2 rounded-md border border-border p-3" data-testid="worker-warehouses">
-            <legend className="px-1 text-sm font-semibold text-slate-700">Warehouses this worker can see</legend>
-            <p className="text-xs text-slate-500">Choose one, two or all three warehouses. The Chemical section is available with the Warehouses permission.</p>
-            <div className="flex flex-wrap gap-2">
-              {["A", "B", "C"].map((warehouse) => (
-                <label key={warehouse} className="flex items-center gap-2 rounded-md border border-border bg-white px-3 py-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={workerDraft.warehouse_ids.includes(warehouse)}
-                    onChange={() => setWorkerDraft((current) => ({
-                      ...current,
-                      warehouse_ids: current.warehouse_ids.includes(warehouse)
-                        ? current.warehouse_ids.filter((item) => item !== warehouse)
-                        : [...current.warehouse_ids, warehouse],
-                    }))}
-                    data-testid={`worker-warehouse-${warehouse}`}
-                  />
-                  Warehouse {warehouse}
-                </label>
-              ))}
-            </div>
-          </fieldset>}
           <label className="flex items-start gap-2 rounded-md border border-violet-200 bg-violet-50/50 px-3 py-2 text-sm text-slate-700">
             <input
               type="checkbox"
@@ -707,8 +742,8 @@ export default function Dashboard() {
           <fieldset className="space-y-2">
             <legend className="mb-2 text-sm font-semibold text-slate-700">Sections this worker can access</legend>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {WORKER_SECTION_OPTIONS.filter(([section]) =>
-                (section !== "warehouses" || workerDraft.company_id === MANUFACTURING_COMPANY_ID)
+              {WORKER_SECTION_OPTIONS.filter(([section, , companyIds]) =>
+                (!companyIds || companyIds.includes(workerDraft.company_id))
                 && (!workerDraft.stock_only || section === "stock")
               ).map(([section, label]) => (
                 <label key={section} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-slate-700">
@@ -717,6 +752,7 @@ export default function Dashboard() {
                 </label>
               ))}
             </div>
+            <p className="text-xs text-slate-500">Each page has its own permission. Warehouse A, B and C also assign access to the matching warehouse.</p>
           </fieldset>
           <fieldset className="space-y-3 rounded-md border border-border p-3" data-testid="worker-write-permissions">
             <legend className="px-1 text-sm font-semibold text-slate-700">Section actions and password rules</legend>
