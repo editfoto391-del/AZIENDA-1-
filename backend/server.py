@@ -4692,7 +4692,8 @@ class InvoiceIn(BaseModel):
     intercompany_request_id: Optional[str] = ""
     tax_enabled: bool = False
     tax_rate: float = 0
-    status: str = "draft"
+    # New invoices are issued by default; only an explicit user draft action may create a draft.
+    status: str = "issued"
     invoice_type: Literal["standard", "express"] = "standard"
     previous_invoices_pending: List[PreviousInvoiceBalanceIn] = Field(default_factory=list)
     edit_reason: Optional[str] = ""
