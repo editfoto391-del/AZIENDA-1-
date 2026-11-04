@@ -227,7 +227,7 @@ def test_order_reference_unique_after_delete(client):
 def test_core_invoice_payment_dispatch(client):
     c = client.post(f"{BASE_URL}/api/customers", json={"name": "TEST_Customer"}).json()
     inv = client.post(f"{BASE_URL}/api/invoices", json={
-        "customer_id": c["id"], "made_by": "QA Test",
+        "customer_id": c["id"], "made_by": "QA Test", "status": "draft",
         "items": [{"qty": 2, "description": "foam", "unit_price": 100}],
     }).json()
     assert inv["status"] == "draft" and inv["total"] == 200
