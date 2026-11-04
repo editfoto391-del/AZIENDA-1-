@@ -519,3 +519,14 @@ html.dark .luxury-card {
   input, select, textarea { border: none !important; background: transparent !important; appearance: none; -webkit-appearance: none; }
   .shadow-sm, .shadow, .shadow-md { box-shadow: none !important; }
 }
+
+/* Invoice size input: preserve the previous emerald interaction highlight in dark mode. */
+html.dark input[data-testid^="item-size-"]:hover {
+  border-color: rgb(16 185 129 / 0.72) !important;
+}
+
+html.dark input[data-testid^="item-size-"]:focus {
+  outline: none;
+  border-color: #10b981 !important;
+  box-shadow: 0 0 0 3px rgb(16 185 129 / 0.28);
+}
