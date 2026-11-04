@@ -337,6 +337,51 @@ html.dark .liquid-glass-dark {
   border-right-color: #34332f;
   box-shadow: none;
 }
+html.dark .erp-sidebar {
+  background-color: #171716;
+  border-color: #34332f;
+  box-shadow: none;
+}
+html.dark .erp-sidebar-brand {
+  border-color: #34332f;
+}
+html.dark .erp-sidebar-brand-icon {
+  background-color: #24231f;
+  border-color: #494337;
+}
+html.dark .erp-sidebar-brand-mark {
+  color: #d7c39b;
+}
+html.dark .erp-sidebar-brand > div:last-child > div:first-child {
+  color: #f0ede6 !important;
+}
+html.dark .erp-sidebar .erp-sidebar-subtitle {
+  color: #aaa394 !important;
+}
+html.dark .erp-sidebar-nav > div > p,
+html.dark .erp-sidebar-nav > div > button {
+  color: #b7a982 !important;
+}
+html.dark .erp-sidebar-nav > div > button:hover {
+  color: #e2d3b1 !important;
+}
+html.dark .erp-sidebar-nav a:not([aria-current="page"]) {
+  color: #c6c1b6 !important;
+}
+html.dark .erp-sidebar-nav a:not([aria-current="page"]):hover {
+  color: #f0ede6 !important;
+  background-color: #24231f;
+}
+html.dark .erp-sidebar-nav a[aria-current="page"] {
+  color: #f0ede6 !important;
+}
+html.dark .erp-sidebar-nav a[aria-current="page"] > span:first-child {
+  background-color: #302c24;
+  box-shadow: inset 2px 0 0 #b7a276;
+}
+html.dark .erp-sidebar-nav [aria-disabled="true"] {
+  color: #77746c !important;
+}
 html.dark .premium-card::before {
   display: none;
 }
