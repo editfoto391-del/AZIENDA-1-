@@ -39,18 +39,23 @@ test("numeric dimension formats match while other size labels remain literal", (
   assert.equal(canonicalInvoiceSize("910/100"), "910/100");
 });
 
-test("category and size lists include canonical aliases without crossing zones", () => {
+test("unified price lists always read zone 1 even when the invoice selects zone 2", () => {
   const prices = [
     { ...unifiedPrices[1], category: "Black fabric" },
-    { ...unifiedPrices[0], zone: 2, size: "910x100" },
+    { ...unifiedPrices[0], size: "910x100" },
+    { ...unifiedPrices[0], zone: 2, size: "wrong-zone-price" },
   ];
-  const categories = invoiceCategoriesFor(1, true, prices, [
+  const categories = invoiceCategoriesFor(2, true, prices, [
     { product: "Ribbon Balck", size: "910x100" },
   ]);
   assert.equal(categories.filter((category) => category === "Ribbon Black").length, 1);
   assert.ok(!categories.includes("Black fabric"));
-  assert.deepEqual(invoiceSizesFor(1, "Ribbon Black", true, prices, []), ["760x100"]);
-  assert.deepEqual(invoiceSizesFor(2, "Simple/Mix color", true, prices, []), ["910x100"]);
+  assert.deepEqual(invoiceSizesFor(2, "Ribbon Black", true, prices, []), ["760x100"]);
+  assert.deepEqual(invoiceSizesFor(2, "Simple/Mix color", true, prices, []), ["760x50", "910x100"]);
+  assert.deepEqual(lookupInvoicePrice(2, "Black fabric", "760x100", true, prices), {
+    price: 217,
+    needsConfig: false,
+  });
 });
 
 test("price lookup prioritizes canonical rows and resolves shared legacy aliases", () => {
