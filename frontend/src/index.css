@@ -294,26 +294,26 @@ main table:not(.border-slate-300):not(.border-slate-800) tbody tr:hover {
 
 html.dark {
   color-scheme: dark;
-  /* Luxury Graphite: matte charcoal, soft stone and restrained champagne. */
-  --background: 220 12% 8%;
-  --foreground: 40 12% 91%;
-  --card: 220 10% 11%;
-  --card-foreground: 40 12% 91%;
-  --popover: 220 10% 12%;
-  --popover-foreground: 40 12% 91%;
-  --primary: 38 30% 64%;
-  --primary-foreground: 220 14% 10%;
-  --secondary: 220 9% 16%;
-  --secondary-foreground: 40 10% 88%;
-  --muted: 220 8% 15%;
-  --muted-foreground: 220 6% 64%;
-  --accent: 36 16% 19%;
-  --accent-foreground: 38 25% 82%;
+  /* Midnight Navy & Champagne: deep blue surfaces, soft cool text and restrained warm accents. */
+  --background: 220 42% 11%;
+  --foreground: 216 33% 93%;
+  --card: 217 37% 16%;
+  --card-foreground: 216 33% 93%;
+  --popover: 217 35% 17%;
+  --popover-foreground: 216 33% 93%;
+  --primary: 39 48% 69%;
+  --primary-foreground: 220 42% 11%;
+  --secondary: 214 32% 22%;
+  --secondary-foreground: 216 30% 91%;
+  --muted: 216 28% 19%;
+  --muted-foreground: 215 17% 70%;
+  --accent: 215 30% 25%;
+  --accent-foreground: 39 42% 82%;
   --destructive: 0 48% 54%;
   --destructive-foreground: 0 0% 100%;
-  --border: 220 7% 23%;
-  --input: 220 7% 25%;
-  --ring: 38 30% 58%;
+  --border: 215 23% 29%;
+  --input: 215 23% 31%;
+  --ring: 39 48% 69%;
 }
 
 html.dark body {
@@ -321,66 +321,66 @@ html.dark body {
   background-image: none;
 }
 
-html.dark ::selection { background: rgb(176 145 94 / 0.32); color: #f4f0e8; }
-html.dark * { scrollbar-color: #49463f transparent; }
+html.dark ::selection { background: rgb(214 185 135 / 0.32); color: #f4f0e8; }
+html.dark * { scrollbar-color: #52647b transparent; }
 html.dark ::-webkit-scrollbar { width: 10px; height: 10px; }
-html.dark ::-webkit-scrollbar-thumb { background: #49463f; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
-html.dark ::-webkit-scrollbar-thumb:hover { background: #625b4e; background-clip: content-box; }
+html.dark ::-webkit-scrollbar-thumb { background: #52647b; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+html.dark ::-webkit-scrollbar-thumb:hover { background: #71839a; background-clip: content-box; }
 
 html.dark .liquid-glass-surface {
-  background: #1b1b1a;
-  border-color: #34332f;
+  background: #192438;
+  border-color: #304158;
   box-shadow: none;
 }
 html.dark .liquid-glass-dark {
-  background: #171716;
-  border-right-color: #34332f;
+  background: #141f31;
+  border-right-color: #304158;
   box-shadow: none;
 }
 html.dark .erp-sidebar {
-  background-color: #171716;
-  border-color: #34332f;
+  background-color: #141f31;
+  border-color: #304158;
   box-shadow: none;
 }
 html.dark .erp-sidebar-brand {
-  border-color: #34332f;
+  border-color: #304158;
 }
 html.dark .erp-sidebar-brand-icon {
-  background-color: #24231f;
-  border-color: #494337;
+  background-color: #26354a;
+  border-color: #40536d;
 }
 html.dark .erp-sidebar-brand-mark {
-  color: #d7c39b;
+  color: #d6b987;
 }
 html.dark .erp-sidebar-brand > div:last-child > div:first-child {
-  color: #f0ede6 !important;
+  color: #e8edf4 !important;
 }
 html.dark .erp-sidebar .erp-sidebar-subtitle {
-  color: #aaa394 !important;
+  color: #aebbd0 !important;
 }
 html.dark .erp-sidebar-nav > div > p,
 html.dark .erp-sidebar-nav > div > button {
-  color: #b7a982 !important;
+  color: #d6b987 !important;
 }
 html.dark .erp-sidebar-nav > div > button:hover {
-  color: #e2d3b1 !important;
+  color: #ead5ad !important;
 }
 html.dark .erp-sidebar-nav a:not([aria-current="page"]) {
-  color: #c6c1b6 !important;
+  color: #c4cfde !important;
 }
 html.dark .erp-sidebar-nav a:not([aria-current="page"]):hover {
-  color: #f0ede6 !important;
-  background-color: #24231f;
+  color: #e8edf4 !important;
+  background-color: #26354a;
 }
 html.dark .erp-sidebar-nav a[aria-current="page"] {
-  color: #f0ede6 !important;
+  color: #e8edf4 !important;
 }
 html.dark .erp-sidebar-nav a[aria-current="page"] > span:first-child {
   background-color: #302c24;
   box-shadow: inset 2px 0 0 #b7a276;
 }
 html.dark .erp-sidebar-nav [aria-disabled="true"] {
-  color: #77746c !important;
+  color: #8292a8 !important;
 }
 html.dark .premium-card::before {
   display: none;
@@ -391,11 +391,11 @@ html.dark select:focus-visible,
 html.dark textarea:focus-visible,
 html.dark button:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgb(176 145 94 / 0.24);
+  box-shadow: 0 0 0 2px rgb(214 185 135 / 0.24);
 }
 
 html.dark input::placeholder,
-html.dark textarea::placeholder { color: #89857c; }
+html.dark textarea::placeholder { color: #8e9db2; }
 
 html.dark [class~="bg-white"],
 html.dark [class~="bg-white/70"],
@@ -413,21 +413,21 @@ html.dark [class~="bg-slate-50/70"],
 html.dark [class~="bg-gray-50"],
 html.dark [class~="bg-neutral-50"],
 html.dark [class~="bg-stone-50"] {
-  background-color: #191918 !important;
+  background-color: #162235 !important;
 }
 
 html.dark [class~="bg-slate-100"],
 html.dark [class~="bg-gray-100"],
 html.dark [class~="bg-neutral-100"],
 html.dark [class~="bg-stone-100"] {
-  background-color: #222220 !important;
+  background-color: #202f43 !important;
 }
 
 html.dark [class~="bg-slate-200"],
 html.dark [class~="bg-gray-200"],
 html.dark [class~="bg-neutral-200"],
 html.dark [class~="bg-stone-200"] {
-  background-color: #2c2b28 !important;
+  background-color: #2a3a50 !important;
 }
 
 html.dark [class*="bg-blue-50"],
@@ -561,7 +561,7 @@ html.dark textarea {
 
 html.dark .luxury-card {
   box-shadow: none;
-  border-color: #34332f;
+  border-color: #304158;
 }
 
 @media print {
