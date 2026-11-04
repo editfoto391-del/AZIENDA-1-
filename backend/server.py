@@ -5609,6 +5609,7 @@ async def set_payment_daily_report_inclusion(
 class StockIn(BaseModel):
     product: str
     size: str
+    category: Optional[str] = Field(default=None, max_length=120)
     opening: float = 0
     threshold: float = 5
     unit_cost: Optional[float] = None
@@ -6538,6 +6539,9 @@ async def add_stock(body: StockIn, user=Depends(get_current_user)):
     data = body.model_dump()
     selling_price = data.pop("selling_price", None)
     zone = data.pop("zone", 1)
+    category = (data.pop("category", None) or "").strip()
+    if category:
+        data["product"] = category
     data["product"] = data["product"].strip()
     data["size"] = data["size"].strip()
     if not data["product"] or not data["size"]:
@@ -6614,6 +6618,7 @@ async def edit_stock(sid: str, body: StockIn, user=Depends(get_current_user)):
     if not before:
         raise HTTPException(404, "Stock item not found")
     d = body.model_dump()
+    d.pop("category", None)
     d["product"] = d["product"].strip()
     d["size"] = d["size"].strip()
     if not d["product"] or not d["size"]:

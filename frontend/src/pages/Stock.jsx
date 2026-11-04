@@ -59,6 +59,10 @@ export default function Stock() {
     (!category || (STOCK_CATEGORY[category] || [category]).includes(item.product))
     && (!stockSearch.trim() || `${item.product} ${item.size}`.toLowerCase().includes(stockSearch.trim().toLowerCase()))
   );
+  const stockCategories = [...new Set([
+    ...CATEGORIES,
+    ...(list || []).map((item) => item.product).filter(Boolean),
+  ])];
 
   const run = async (fn, ok) => {
     if (busy) return; setBusy(true);
@@ -200,7 +204,7 @@ export default function Stock() {
         </Btn>
         <Btn variant="outline" onClick={() => setShowProductIds(true)} data-testid="product-identification-btn"><Boxes size={16} /> Product IDs & Labels</Btn>
         <Btn variant="outline" onClick={() => setShowHist(true)} data-testid="stock-history-btn"><History size={16} /> Ledger</Btn>
-        <Btn onClick={() => setAddModal({ product: "", size: "", opening: 0, threshold: 5, selling_price: "", zone: 1 })} data-testid="add-stock-btn"><Plus size={16} /> Add Product</Btn>
+        <Btn onClick={() => setAddModal({ product: "", category: "", size: "", opening: 0, threshold: 5, selling_price: "", zone: 1 })} data-testid="add-stock-btn"><Plus size={16} /> Add Product</Btn>
       </PageHeader>
 
       <div className="mb-4 grid max-w-2xl gap-3 sm:grid-cols-2">
@@ -217,7 +221,7 @@ export default function Stock() {
         )}
         <Select label="Filter by category" value={category} onChange={(event) => setCategory(event.target.value)} data-testid="stock-category-filter">
           <option value="">All categories</option>
-          {CATEGORIES.map((item) => <option key={item} value={item}>{item}</option>)}
+          {stockCategories.map((item) => <option key={item} value={item}>{item}</option>)}
         </Select>
       </div>
 
@@ -227,7 +231,7 @@ export default function Stock() {
           <p className="text-sm text-slate-400">Loading...</p>
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-            {CATEGORIES.map((cat) => {
+            {stockCategories.map((cat) => {
               const total = getTotalsByCategory()[cat] || 0;
               return total > 0 ? (
                 <div key={cat} className="bg-white rounded-md p-3 border border-slate-200">
@@ -307,9 +311,21 @@ export default function Stock() {
 
       <Modal open={!!addModal} onClose={() => setAddModal(null)} title="Add Stock Product">
         {addModal && <div className="space-y-4">
-          <Input label="Product *" value={addModal.product} onChange={(e) => setAddModal({ ...addModal, product: e.target.value })} data-testid="stock-product-input" />
+          <Select
+            label="Category (optional)"
+            value={addModal.category || ""}
+            onChange={(event) => {
+              const selectedCategory = event.target.value;
+              setAddModal({ ...addModal, category: selectedCategory, product: selectedCategory || addModal.product });
+            }}
+            data-testid="stock-category-input"
+          >
+            <option value="">No category — enter a product manually</option>
+            {stockCategories.map((item) => <option key={item} value={item}>{item}</option>)}
+          </Select>
+          <Input label="Product *" value={addModal.product} onChange={(e) => setAddModal({ ...addModal, product: e.target.value, category: "" })} data-testid="stock-product-input" />
           <div className="grid grid-cols-2 gap-3">
-            <Input label="Size *" value={addModal.size} onChange={(e) => setAddModal({ ...addModal, size: e.target.value })} placeholder="910x100" data-testid="stock-size-input" />
+            <Input label="Size / measurement *" value={addModal.size} onChange={(e) => setAddModal({ ...addModal, size: e.target.value })} placeholder="910x100" data-testid="stock-size-input" />
             <Input label="Opening Balance" type="number" value={addModal.opening} onChange={(e) => setAddModal({ ...addModal, opening: Number(e.target.value) })} data-testid="stock-opening-input" />
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -368,7 +384,7 @@ export default function Stock() {
           onProductUpdated={load}
           onCreateProduct={() => {
             setShowProductIds(false);
-            setAddModal({ product: "", size: "", opening: 0, threshold: 5, selling_price: "", zone: 1 });
+            setAddModal({ product: "", category: "", size: "", opening: 0, threshold: 5, selling_price: "", zone: 1 });
           }}
           onClose={() => setShowProductIds(false)}
           onStockMovement={(product) => setMoveModal({

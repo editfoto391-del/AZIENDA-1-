@@ -54,6 +54,22 @@ def test_add_stock_saves_product_and_price(env):
     assert price["confirmed"] and price["active"]
 
 
+def test_add_stock_assigns_size_to_selected_category(env):
+    body = server.StockIn(
+        product="Manually entered product",
+        category="Ribbon Black",
+        size="910/100",
+        opening=3,
+        selling_price=250,
+    )
+    asyncio.run(server.add_stock(body, {"is_worker": False}))
+
+    stock = env["stock"].docs[0]
+    price = env["prices"].docs[0]
+    assert (stock["product"], stock["size"]) == ("Ribbon Black", "910/100")
+    assert (price["category"], price["size"], price["price"]) == ("Ribbon Black", "910/100", 250)
+
+
 def test_add_stock_rejects_duplicates(env):
     body = server.StockIn(product="Simple", size="910x100", selling_price=10)
     asyncio.run(server.add_stock(body, {"is_worker": False}))
