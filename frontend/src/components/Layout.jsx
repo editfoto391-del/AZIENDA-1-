@@ -1,11 +1,12 @@
 import { NavLink, useNavigate, Outlet, useLocation } from "react-router-dom";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { useTheme } from "next-themes";
 import {
   LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
   Truck, Menu, X, LogOut, Search, Bell, Layers,
   ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart, ChevronDown, Building2, Handshake, Settings as Cog, ClipboardCheck, LockKeyhole,
-  Warehouse, FlaskConical, Boxes,
+  Warehouse, FlaskConical, Boxes, Sun, Moon,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -78,6 +79,7 @@ function WhatsAppFloatingButton() {
 
 function SidebarContent({ onNav, companyName, companyId, user }) {
   const reduceMotion = useReducedMotion();
+  const { resolvedTheme, setTheme } = useTheme();
   const [openGroups, setOpenGroups] = useState({});
   const navigationId = (label) => ({
     WAREHOUSES: "warehouses-navigation",
@@ -322,6 +324,16 @@ export default function Layout() {
               </AnimatePresence>
             </div>
           )}
+          <motion.button
+            type="button"
+            onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+            aria-label={resolvedTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            title={resolvedTheme === "dark" ? "Light mode" : "Dark mode"}
+            data-testid="theme-toggle"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border/70 bg-white/70 text-slate-600 shadow-sm hover:bg-white hover:text-primary dark:bg-slate-800 dark:text-amber-200 dark:hover:bg-slate-700"
+          >
+            {resolvedTheme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+          </motion.button>
           <div className="relative">
             <motion.button
               type="button"
