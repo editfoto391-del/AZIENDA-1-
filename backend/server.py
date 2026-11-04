@@ -4718,6 +4718,13 @@ class InvoiceIn(BaseModel):
             raise ValueError("Enter a valid number")
         return value
 
+def invoice_status_for_update(body: InvoiceIn, current_status: Optional[str]) -> str:
+    """Keep an existing invoice's status unless the caller explicitly changes it."""
+    if "status" not in body.model_fields_set:
+        return current_status or "issued"
+    return body.status or current_status or "issued"
+
+
 class InvoiceEditAuthorizationIn(BaseModel):
     password: str
 
@@ -5353,6 +5360,7 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
         raise HTTPException(400, "A reason is required to edit an invoice")
     await consume_invoice_action_authorization(body.supervisor_authorization, iid, "edit", user)
     inv = await _prepare_invoice(body, user=user, existing=existing)
+    inv["status"] = invoice_status_for_update(body, existing.get("status"))
     if existing.get("idempotency_key"):
         inv["idempotency_key"] = existing["idempotency_key"]
     else:
