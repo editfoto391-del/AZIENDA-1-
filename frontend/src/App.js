@@ -374,7 +374,7 @@ function RouteLoading() {
 
 function App() {
   return (
-    <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false} storageKey="erp-theme" disableTransitionOnChange>
+    <ThemeProvider attribute="class" defaultTheme="light" forcedTheme="light" enableSystem={false} storageKey="erp-theme" disableTransitionOnChange>
       <AuthProvider>
         <Toaster position="top-right" richColors />
         <BrowserRouter>
