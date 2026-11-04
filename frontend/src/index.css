@@ -294,26 +294,26 @@ main table:not(.border-slate-300):not(.border-slate-800) tbody tr:hover {
 
 html.dark {
   color-scheme: dark;
-  /* Midnight Navy & Champagne: deep blue surfaces, soft cool text and restrained warm accents. */
+  /* Midnight Navy & Ice Silver: deep blue surfaces with clean, cool silver accents. */
   --background: 220 42% 11%;
   --foreground: 216 33% 93%;
   --card: 217 37% 16%;
   --card-foreground: 216 33% 93%;
   --popover: 217 35% 17%;
   --popover-foreground: 216 33% 93%;
-  --primary: 39 48% 69%;
+  --primary: 210 28% 76%;
   --primary-foreground: 220 42% 11%;
   --secondary: 214 32% 22%;
   --secondary-foreground: 216 30% 91%;
   --muted: 216 28% 19%;
   --muted-foreground: 215 17% 70%;
   --accent: 215 30% 25%;
-  --accent-foreground: 39 42% 82%;
+  --accent-foreground: 210 28% 88%;
   --destructive: 0 48% 54%;
   --destructive-foreground: 0 0% 100%;
   --border: 215 23% 29%;
   --input: 215 23% 31%;
-  --ring: 39 48% 69%;
+  --ring: 210 28% 76%;
 }
 
 html.dark body {
@@ -321,7 +321,7 @@ html.dark body {
   background-image: none;
 }
 
-html.dark ::selection { background: rgb(214 185 135 / 0.32); color: #f4f0e8; }
+html.dark ::selection { background: rgb(160 190 220 / 0.28); color: #f4f0e8; }
 html.dark * { scrollbar-color: #52647b transparent; }
 html.dark ::-webkit-scrollbar { width: 10px; height: 10px; }
 html.dark ::-webkit-scrollbar-thumb { background: #52647b; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
@@ -350,7 +350,7 @@ html.dark .erp-sidebar-brand-icon {
   border-color: #40536d;
 }
 html.dark .erp-sidebar-brand-mark {
-  color: #d6b987;
+  color: #c7d5e5;
 }
 html.dark .erp-sidebar-brand > div:last-child > div:first-child {
   color: #e8edf4 !important;
@@ -376,8 +376,8 @@ html.dark .erp-sidebar-nav a[aria-current="page"] {
   color: #e8edf4 !important;
 }
 html.dark .erp-sidebar-nav a[aria-current="page"] > span:first-child {
-  background-color: #302c24;
-  box-shadow: inset 2px 0 0 #b7a276;
+  background-color: #26354a;
+  box-shadow: inset 2px 0 0 #9eb6d1;
 }
 html.dark .erp-sidebar-nav [aria-disabled="true"] {
   color: #8292a8 !important;
@@ -391,7 +391,7 @@ html.dark select:focus-visible,
 html.dark textarea:focus-visible,
 html.dark button:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgb(214 185 135 / 0.24);
+  box-shadow: 0 0 0 2px rgb(160 190 220 / 0.24);
 }
 
 html.dark input::placeholder,
