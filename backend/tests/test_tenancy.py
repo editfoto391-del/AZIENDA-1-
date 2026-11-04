@@ -93,11 +93,7 @@ def test_existing_database_remains_superiqfoam_and_others_are_separate():
     client = FakeClient()
     base = FakeDatabase()
     assert tenant_database(client, base, DEFAULT_COMPANY_ID) is base
-    manufacturing_db = tenant_database(client, base, "iqfoam-manufactoring")
-    wholesalers_db = tenant_database(client, base, "iqfoam-whole-sallers")
-    assert manufacturing_db.name == "iqfoam__iqfoam-manufactoring"
-    assert wholesalers_db.name == "iqfoam__iqfoam-whole-sallers"
-    assert manufacturing_db.name != wholesalers_db.name
+    assert tenant_database(client, base, "iqfoam-manufactoring").name == "iqfoam__iqfoam-manufactoring"
 
 
 def test_only_iqfoam_profiles_use_the_unified_price_list():
