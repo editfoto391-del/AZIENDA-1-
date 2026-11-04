@@ -15,6 +15,7 @@ import BarcodeScanner from "@/components/BarcodeScanner";
 import {
   canonicalInvoiceCategory,
   canonicalInvoiceSize,
+  sameInvoicePriceCategory,
   invoiceCategoriesFor,
   invoicePriceCategory,
   invoiceSizesFor,
@@ -437,9 +438,9 @@ export default function InvoiceEditor({ express = false }) {
       const newProducts = [...new Map(invoiceItems
         .filter((item) => item.category?.trim() && item.size?.trim())
         .filter((item) => !prices.some((price) => price.zone === inv.zone &&
-          invoicePriceCategory(price.category, unifiedPriceList) === invoicePriceCategory(item.category, unifiedPriceList)
+          sameInvoicePriceCategory(price.category, item.category, unifiedPriceList)
           && canonicalInvoiceSize(price.size) === canonicalInvoiceSize(item.size)))
-        .map((item) => [`${invoicePriceCategory(item.category, unifiedPriceList)}|${canonicalInvoiceSize(item.size)}`, item])).values()];
+        .map((item) => [`${invoicePriceCategory(item.category, unifiedPriceList).toLowerCase()}|${canonicalInvoiceSize(item.size)}`, item])).values()];
       if (!knownCustomer || newProducts.length) {
         setPendingSave({ status, newCustomer: !knownCustomer, newProducts, downloadAfterSave, deductStock });
         return;
