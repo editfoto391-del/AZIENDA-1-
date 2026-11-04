@@ -321,11 +321,11 @@ html.dark body {
   background-image: none;
 }
 
-html.dark ::selection { background: rgb(160 190 220 / 0.28); color: #F0F2F4; }
+html.dark ::selection { background: rgb(168 180 192 / 0.26); color: #F0F2F4; }
 html.dark * { scrollbar-color: #606B76 transparent; }
 html.dark ::-webkit-scrollbar { width: 10px; height: 10px; }
-html.dark ::-webkit-scrollbar-thumb { background: #52647b; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
-html.dark ::-webkit-scrollbar-thumb:hover { background: #71839a; background-clip: content-box; }
+html.dark ::-webkit-scrollbar-thumb { background: #606B76; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+html.dark ::-webkit-scrollbar-thumb:hover { background: #89939D; background-clip: content-box; }
 
 html.dark .liquid-glass-surface {
   background: #1B1F23;
