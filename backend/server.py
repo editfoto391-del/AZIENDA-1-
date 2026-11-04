@@ -4483,28 +4483,101 @@ RIBBON_FAMILY = {"Ribbon", "Ribbon Black & Pink", "Ribbon Black", "Ribbon Pink",
 MANUAL_ONLY_SIZES = {"1370x150"}
 
 def price_category(zone, category):
-    if uses_unified_price_list(active_company_id.get()):
-        if category in ("Standard", "Simple", "Simple/Mix color"):
-            return "Simple"
-        if category == "Candy":
-            return "Ribbon Black"
-        return category
-    if category in ("Simple", "Simple/Mix color"):
-        return "Standard"
-    if category == "Candy":
+    normalized_category = str(category or "").strip()
+    category_key = normalized_category.casefold()
+    if category_key in {
+        "black",
+        "black fabric",
+        "fabric black",
+        "ribbon balck",
+        "ribbon black",
+        "ribbon black fabric",
+    }:
         return "Ribbon Black"
-    return category
+    if category_key in {"simple", "standard", "simple/mix color"}:
+        return "Simple" if uses_unified_price_list(active_company_id.get()) else "Standard"
+    if category_key == "candy":
+        return "Ribbon Black"
+    known_categories = {
+        "ribbon": "Ribbon Pink",
+        "ribbon black & pink": "Ribbon Black & Pink",
+        "ribbon pink": "Ribbon Pink",
+        "strong boy": "Strong Boy",
+        "uncovered": "Uncovered",
+        "uncovered blue 16 density": "Uncovered Blue 16 Density",
+    }
+    if category_key in known_categories:
+        return known_categories[category_key]
+    return normalized_category
+
+def canonical_price_size(size):
+    normalized_size = str(size or "").strip()
+    if re.fullmatch(
+        r"\d+(?:\.\d+)?(?:\s*[x×]\s*\d+(?:\.\d+)?){1,2}",
+        normalized_size,
+        re.IGNORECASE,
+    ):
+        return re.sub(r"\s+", "", normalized_size.replace("×", "x").lower())
+    return normalized_size
 
 def is_manual_only(category, size):
-    return not uses_unified_price_list(active_company_id.get()) and category in RIBBON_FAMILY and size in MANUAL_ONLY_SIZES
+    normalized_category = price_category(1, category)
+    return (
+        not uses_unified_price_list(active_company_id.get())
+        and normalized_category in RIBBON_FAMILY
+        and canonical_price_size(size) in MANUAL_ONLY_SIZES
+    )
+
+def price_category_aliases(category):
+    canonical_category = price_category(1, category)
+    if canonical_category == "Ribbon Black":
+        return ("Ribbon Black", "Black", "Black fabric", "Fabric Black", "Ribbon Balck", "Ribbon Black Fabric")
+    if canonical_category == "Ribbon Pink":
+        return ("Ribbon Pink", "Ribbon")
+    return (canonical_category,)
+
+def price_size_queries(size):
+    normalized_size = str(size or "").strip()
+    if not re.fullmatch(
+        r"\d+(?:\.\d+)?(?:\s*[x×]\s*\d+(?:\.\d+)?){1,2}",
+        normalized_size,
+        re.IGNORECASE,
+    ):
+        return ({"size": normalized_size},)
+
+    canonical_size = canonical_price_size(normalized_size)
+    dimensions = re.split(r"\s*[x×]\s*", normalized_size, flags=re.IGNORECASE)
+    pattern = r"^\s*" + r"\s*[x×]\s*".join(re.escape(part) for part in dimensions) + r"\s*$"
+    queries = [{"size": canonical_size}]
+    queries.append({"size": {"$regex": pattern, "$options": "i"}})
+    return tuple(queries)
+
+def price_category_queries(category):
+    return (
+        {"category": category},
+        {"category": {"$regex": f"^{re.escape(category)}$", "$options": "i"}},
+    )
 
 async def resolve_price(zone, category, size):
     if uses_unified_price_list(active_company_id.get()):
         zone = 1
     if is_manual_only(category, size):
         return {"found": True, "price": None, "needs_config": True, "reason": "Ribbon 1370x150 always requires manual price entry and administrator confirmation"}
-    p = await db.prices.find_one({"zone": int(zone), "category": price_category(zone, category), "size": size, "active": True}, {"_id": 0})
-    if not p:
+    p = None
+    for candidate in price_category_aliases(category):
+        for category_query in price_category_queries(candidate):
+            for size_query in price_size_queries(size):
+                p = await db.prices.find_one(
+                    {"zone": int(zone), **category_query, **size_query},
+                    {"_id": 0},
+                )
+                if p:
+                    break
+            if p:
+                break
+        if p:
+            break
+    if not p or not p.get("active"):
         return {"found": False, "price": None, "needs_config": True, "reason": "No matching price configured"}
     if p.get("price") is None or not p.get("confirmed"):
         return {"found": True, "price": None, "needs_config": True, "reason": "Requires administrator confirmation"}
@@ -4546,14 +4619,16 @@ async def validate_for_issue(inv):
         label = f"Line {n} ({it.get('category', '')} {it.get('size') or it.get('description', '')})".strip()
         if (it.get("qty") or 0) <= 0:
             raise HTTPException(400, f"{label}: quantity must be greater than 0")
-        if (it.get("unit_price") or 0) <= 0:
-            raise HTTPException(400, f"{label}: price missing. Requires administrator confirmation or manual price")
         if it.get("size") and not it.get("price_override"):
             r = await resolve_price(inv.get("zone", 1), it.get("category", ""), it["size"])
             if r.get("price") is None:
                 raise HTTPException(400, f"{label}: {r['reason']}. Enter a manual price to continue")
-            if r2(r["price"]) != r2(it.get("unit_price")):
+            if (it.get("unit_price") or 0) <= 0:
+                it["unit_price"] = r["price"]
+            elif r2(r["price"]) != r2(it.get("unit_price")):
                 it["price_override"] = True
+        if (it.get("unit_price") or 0) <= 0:
+            raise HTTPException(400, f"{label}: price missing. Requires administrator confirmation or manual price")
 
 def derive_status(inv):
     if inv.get("status") == "void":
@@ -6452,23 +6527,45 @@ def invoice_stock_product(item):
     category = (item.get("category") or "").strip()
     if category.casefold() in ("standard", "simple/mix color"):
         return "Simple"
-    return category
+    if category.casefold() == "candy":
+        return "Candy"
+    return price_category(1, category)
+
+def invoice_stock_product_aliases(item):
+    category = (item.get("category") or "").strip()
+    canonical = invoice_stock_product(item)
+    if canonical == "Ribbon Black":
+        return ("Ribbon Black", "Ribbon Balck", "Black", "Black fabric", "Fabric Black", "Ribbon Black Fabric")
+    if canonical == "Ribbon Pink":
+        return ("Ribbon Pink", "Ribbon")
+    return tuple(dict.fromkeys((canonical, category)))
 
 async def invoice_stock_deductions(invoice, allow_empty=False):
     stock_items = await listall("stock")
     stock_by_product_size = {
-        ((item.get("product") or "").strip().casefold(), (item.get("size") or "").strip().casefold()): item
+        (
+            (item.get("product") or "").strip().casefold(),
+            canonical_price_size(item.get("size")),
+        ): item
         for item in stock_items
     }
     quantities = {}
     for index, item in enumerate(invoice.get("items", []), 1):
-        product = invoice_stock_product(item)
+        products = invoice_stock_product_aliases(item)
         size = (item.get("size") or "").strip()
-        if not product or not size:
+        if not products[0] or not size:
             continue
-        stock = stock_by_product_size.get((product.casefold(), size.casefold()))
+        normalized_size = canonical_price_size(size)
+        stock = next(
+            (
+                stock_by_product_size.get((product.casefold(), normalized_size))
+                for product in products
+                if stock_by_product_size.get((product.casefold(), normalized_size))
+            ),
+            None,
+        )
         if not stock:
-            raise HTTPException(400, f"Stock item not found for invoice line {index}: {product} {size}")
+            raise HTTPException(400, f"Stock item not found for invoice line {index}: {products[0]} {size}")
         quantity = D(item.get("qty", 0))
         if quantity <= 0:
             raise HTTPException(400, f"Invoice line {index} quantity must be greater than 0")
@@ -9554,27 +9651,25 @@ async def dashboard(
     today = today_str()
     week, month = period_starts()
     incomplete_order_statuses = INCOMPLETE_ORDER_STATUSES
-    financial_periods = {}
-
-    async def period_financials(bounds):
-        key = tuple(bounds)
-        if key not in financial_periods:
-            financial_periods[key] = asyncio.create_task(
-                dashboard_financial_period(*key),
-            )
-        return await financial_periods[key]
-
     week_range = (week, today)
     month_range = (month, today)
-    financial_tasks = [
-        asyncio.create_task(period_financials(bounds))
-        for bounds in (
-            week_range,
-            month_range,
-            (period_start, period_end),
-            (previous_start, previous_end),
+    financial_ranges = (
+        week_range,
+        month_range,
+        (period_start, period_end),
+        (previous_start, previous_end),
+    )
+    if period == "custom":
+        financial_tasks = [
+            asyncio.create_task(dashboard_financial_period(*bounds))
+            for bounds in financial_ranges
+        ]
+        financial_batch_task = None
+    else:
+        financial_tasks = None
+        financial_batch_task = asyncio.create_task(
+            dashboard_financial_periods(financial_ranges),
         )
-    ]
     fleet_filters = vehicle_operational_filters()
     active_order_vehicle_filter = fleet_filters["orders"]
     active_delivery_vehicle_filter = fleet_filters["deliveries"]
@@ -9693,9 +9788,15 @@ async def dashboard(
     ][:10]
     licence_alerts["maintenance_required_count"] = len(maint_due) if fleet_alerts_visible else 0
 
-    week_profit, month_profit, selected_profit, previous_profit = await asyncio.gather(
-        *financial_tasks,
-    )
+    if financial_batch_task:
+        period_totals = await financial_batch_task
+        week_profit, month_profit, selected_profit, previous_profit = (
+            period_totals[bounds] for bounds in financial_ranges
+        )
+    else:
+        week_profit, month_profit, selected_profit, previous_profit = await asyncio.gather(
+            *financial_tasks,
+        )
     recent_invoice_balances = await dashboard_invoice_outstanding_by_id(
         recent_invoices,
     )
@@ -11795,6 +11896,16 @@ def _financial_transaction(record, category, amount, description=None, supplier=
 def build_financial_report(start, end, mode, *, invoices, payments, linked_payments,
                            expenses, vehicle_records, buyings, grvs, invoice_movements,
                            payment_invoices=None):
+    invoices = unique_financial_records(invoices)
+    payments = unique_financial_records(payments)
+    linked_payments = unique_financial_records(linked_payments)
+    expenses = unique_financial_records(expenses)
+    vehicle_records = unique_financial_records(vehicle_records)
+    buyings = unique_financial_records(buyings)
+    grvs = unique_financial_records(grvs)
+    invoice_movements = unique_financial_records(invoice_movements)
+    payment_invoices = unique_financial_records(payment_invoices or [])
+
     payments_by_invoice = {}
     for payment in linked_payments:
         if payment.get("reversed") or payment.get("archived"):
@@ -11807,6 +11918,7 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
     issued_invoices = [
         invoice for invoice in invoices
         if not invoice.get("archived")
+        and invoice.get("invoice_type") != "express"
         and invoice.get("status") not in ("draft", "void")
         and invoice.get("number")
     ]
@@ -12407,6 +12519,7 @@ def dashboard_financial_totals(start, end, *, invoices, payments, expenses, vehi
         invoice.get("total", 0)
         for invoice in valid_invoices
         if not invoice.get("archived")
+        and invoice.get("invoice_type") != "express"
         and invoice.get("status") not in ("draft", "void")
         and invoice.get("number")
         and not invoice.get("opening_balance")
@@ -12596,7 +12709,14 @@ async def dashboard_all_time_invoice_totals(today):
         {"$group": {
             "_id": None,
             "total_invoiced": {
-                "$sum": {"$cond": [{"$eq": ["$opening_balance", False]}, "$total", 0]},
+                "$sum": {"$cond": [
+                    {"$and": [
+                        {"$eq": ["$opening_balance", False]},
+                        {"$ne": [{"$ifNull": ["$invoice_type", "standard"]}, "express"]},
+                    ]},
+                    "$total",
+                    0,
+                ]},
             },
             "outstanding": {"$sum": "$outstanding"},
             "overdue": {"$sum": {
@@ -12611,9 +12731,19 @@ async def dashboard_all_time_invoice_totals(today):
             }},
         }},
     ]).to_list(1)
-    if not rows:
-        return {"total_invoiced": 0, "outstanding": 0, "overdue": 0}
-    return {key: r2(rows[0].get(key, 0)) for key in ("total_invoiced", "outstanding", "overdue")}
+    balance_rows = await db.customers.aggregate([
+        {"$group": {
+            "_id": None,
+            "total": {"$sum": {"$ifNull": ["$other_balance", 0]}},
+        }},
+    ]).to_list(1)
+    invoice_totals = rows[0] if rows else {}
+    other_balance = balance_rows[0].get("total", 0) if balance_rows else 0
+    return {
+        "total_invoiced": r2(invoice_totals.get("total_invoiced", 0)),
+        "outstanding": r2(D(invoice_totals.get("outstanding", 0)) + D(other_balance)),
+        "overdue": r2(invoice_totals.get("overdue", 0)),
+    }
 
 async def dashboard_payment_totals_by_invoice(invoice_ids):
     if not invoice_ids:
@@ -12655,6 +12785,55 @@ async def dashboard_invoice_outstanding_by_id(invoices):
         )
     return balances
 
+async def dashboard_financial_periods(periods):
+    unique_periods = {tuple(period) for period in periods}
+    starts = [date.fromisoformat(bounds[0]) for bounds in unique_periods]
+    ends = [date.fromisoformat(bounds[1]) for bounds in unique_periods]
+    start, end = min(starts), max(ends)
+    bounds = (start, end)
+    invoices, payments, expenses, vehicle_records, buyings = await asyncio.gather(
+        financial_period_records(
+            "invoices", *bounds,
+            conditions={
+                "archived": {"$ne": True},
+                "invoice_type": {"$ne": "express"},
+                "status": {"$nin": ["draft", "void"]},
+                "number": {"$exists": True, "$nin": [None, ""]},
+            },
+        ),
+        financial_period_records(
+            "payments", *bounds,
+            conditions={"reversed": {"$ne": True}, "archived": {"$ne": True}},
+        ),
+        financial_period_records(
+            "expenses", *bounds,
+            conditions={"voided": {"$ne": True}, "archived": {"$ne": True}},
+        ),
+        financial_period_records(
+            "vehicle_records", *bounds,
+            conditions={"status": {"$in": list(VEHICLE_COST_DONE)}, "amount": {"$gt": 0}},
+        ),
+        financial_period_records(
+            "buyings", *bounds,
+            conditions={"voided": {"$ne": True}, "archived": {"$ne": True}},
+        ),
+    )
+    records_by_type = {
+        "invoices": invoices,
+        "payments": payments,
+        "expenses": expenses,
+        "vehicle_records": vehicle_records,
+        "buyings": buyings,
+    }
+    return {
+        period: dashboard_financial_totals(
+            period[0],
+            period[1],
+            **records_by_type,
+        )
+        for period in unique_periods
+    }
+
 async def dashboard_completed_orders_in_period(start, end):
     records = await financial_period_records(
         "orders", date.fromisoformat(start), date.fromisoformat(end),
@@ -12670,6 +12849,7 @@ async def dashboard_financial_period(start, end):
             "invoices", *bounds,
             conditions={
                 "archived": {"$ne": True},
+                "invoice_type": {"$ne": "express"},
                 "status": {"$nin": ["draft", "void"]},
                 "number": {"$exists": True, "$nin": [None, ""]},
             },

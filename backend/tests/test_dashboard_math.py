@@ -1,4 +1,5 @@
 import asyncio
+from datetime import date
 
 import pytest
 
@@ -168,6 +169,27 @@ def test_dashboard_financial_totals_handle_empty_and_decimal_periods():
     assert totals["profit"] == 0.12
 
 
+def test_dashboard_financial_totals_counts_standard_invoices_and_all_payment_sections():
+    totals = dashboard_financial_totals(
+        "2026-10-01",
+        "2026-10-31",
+        invoices=[
+            {"id": "standard", "number": "100", "date": "2026-10-01", "total": 100},
+            {"id": "express", "number": "EW-100", "date": "2026-10-01", "total": 400, "invoice_type": "express"},
+        ],
+        payments=[
+            {"id": "standard-payment", "date": "2026-10-02", "amount": 10},
+            {"id": "express-payment", "date": "2026-10-02", "amount": 20},
+        ],
+        expenses=[],
+        vehicle_records=[],
+        buyings=[],
+    )
+
+    assert totals["total_invoiced"] == 100
+    assert totals["revenue"] == 30
+
+
 def test_dashboard_recent_invoice_balances_accept_invoice_records(monkeypatch):
     async def payment_totals(invoice_ids):
         assert invoice_ids == ["partial", "paid"]
@@ -204,6 +226,7 @@ def test_dashboard_outstanding_lookup_is_scoped_to_active_company(monkeypatch, c
 
     class Database:
         invoices = Collection()
+        customers = Collection()
 
     monkeypatch.setattr(server, "db", Database())
     token = server.active_company_id.set(company_id)
@@ -221,3 +244,68 @@ def test_dashboard_outstanding_lookup_is_scoped_to_active_company(monkeypatch, c
     assert overdue_condition["$lt"][0] == {
         "$ifNull": ["$due_date", "9999-12-31"],
     }
+    total_invoiced_condition = captured[0][3]["$group"]["total_invoiced"]["$sum"]["$cond"][0]["$and"]
+    assert total_invoiced_condition[1] == {
+        "$ne": [{"$ifNull": ["$invoice_type", "standard"]}, "express"],
+    }
+
+
+def test_dashboard_all_time_outstanding_includes_both_customer_balance_sections(monkeypatch):
+    class Cursor:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def to_list(self, limit):
+            return self.rows
+
+    class Collection:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def aggregate(self, pipeline):
+            return Cursor(self.rows)
+
+    class Database:
+        invoices = Collection([{"total_invoiced": 100, "outstanding": 200, "overdue": 50}])
+        customers = Collection([{"total": 200}])
+
+    monkeypatch.setattr(server, "db", Database())
+
+    result = asyncio.run(server.dashboard_all_time_invoice_totals("2026-11-01"))
+
+    assert result == {"total_invoiced": 100, "outstanding": 400, "overdue": 50}
+
+
+def test_dashboard_financial_periods_load_overlapping_periods_once(monkeypatch):
+    calls = []
+    records = {
+        "invoices": [
+            {"id": "invoice-1", "number": "100", "date": "2026-03-02", "total": 100},
+        ],
+        "payments": [{"id": "payment-1", "date": "2026-03-03", "amount": 40}],
+        "expenses": [],
+        "vehicle_records": [],
+        "buyings": [],
+    }
+
+    async def period_records(collection, start, end, date_field="date", conditions=None):
+        calls.append((collection, start, end, date_field, conditions))
+        return records[collection]
+
+    monkeypatch.setattr(server, "financial_period_records", period_records)
+    periods = [
+        ("2026-03-02", "2026-03-04"),
+        ("2026-03-01", "2026-03-04"),
+        ("2026-02-23", "2026-02-25"),
+        ("2026-02-01", "2026-02-04"),
+        ("2026-03-02", "2026-03-04"),
+    ]
+
+    result = asyncio.run(server.dashboard_financial_periods(periods))
+
+    assert len(calls) == 5
+    assert {(call[1], call[2]) for call in calls} == {
+        (date(2026, 2, 1), date(2026, 3, 4)),
+    }
+    assert result[("2026-03-02", "2026-03-04")]["total_invoiced"] == 100
+    assert result[("2026-02-23", "2026-02-25")]["total_invoiced"] == 0

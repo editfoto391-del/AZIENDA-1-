@@ -12,9 +12,8 @@ export function Card({ className = "", children, ...p }) {
 }
 
 export function Btn({ variant = "primary", className = "", children, ...p }) {
-  const reduceMotion = useReducedMotion();
   const base =
-    "inline-flex items-center justify-center gap-2 rounded-md text-sm font-semibold transition-all duration-200 px-4 py-2.5 disabled:opacity-50 disabled:pointer-events-none";
+    "inline-flex items-center justify-center gap-2 rounded-md text-sm font-semibold transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out hover:-translate-y-px active:translate-y-0 active:scale-[0.985] px-4 py-2.5 disabled:opacity-50 disabled:pointer-events-none";
   const v = {
     primary: "bg-primary text-primary-foreground shadow-sm hover:brightness-110 hover:shadow-md",
     ghost: "bg-transparent text-slate-600 hover:bg-secondary",
@@ -24,15 +23,12 @@ export function Btn({ variant = "primary", className = "", children, ...p }) {
     subtle: "bg-accent text-accent-foreground hover:brightness-95",
   }[variant];
   return (
-    <motion.button
-      whileHover={reduceMotion ? undefined : { y: -1, scale: 1.015 }}
-      whileTap={reduceMotion ? undefined : { y: 0, scale: 0.975 }}
-      transition={{ type: "spring", stiffness: 520, damping: 32, mass: 0.4 }}
+    <button
       className={`${base} ${v} ${className}`}
       {...p}
     >
       {children}
-    </motion.button>
+    </button>
   );
 }
 

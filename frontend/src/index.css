@@ -10,9 +10,15 @@
   --font-display: 'DM Serif Display', Georgia, serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 
-  --radius-lg: var(--radius);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-sm: calc(var(--radius) - 4px);
+  --radius-step: 0.25rem;
+  --radius-xs: 0;
+  --radius-sm: calc(var(--radius) - var(--radius-step));
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius-md) + var(--radius-step));
+  --radius-xl: calc(var(--radius-lg) + var(--radius-step));
+  --radius-2xl: calc(var(--radius-xl) + var(--radius-step));
+  --radius-3xl: calc(var(--radius-2xl) + var(--radius-step));
+  --radius-4xl: calc(var(--radius-3xl) + var(--radius-step));
 
   --color-background: hsl(var(--background));
   --color-foreground: hsl(var(--foreground));
@@ -107,25 +113,19 @@
 .dashboard-loading > :nth-child(n+3) { animation-delay: 70ms; }
 
 .dashboard-skeleton-bar {
-  background: linear-gradient(100deg, #e8e9ed 20%, #f3f4f6 38%, #e8e9ed 56%);
-  background-size: 220% 100%;
-  animation: skeleton-shimmer 1.25s ease-in-out infinite;
+  background: #eceef1;
 }
 
 .liquid-glass-surface {
-  background: rgba(255, 255, 255, 0.7);
-  border-color: rgba(255, 255, 255, 0.8);
-  -webkit-backdrop-filter: blur(20px) saturate(165%);
-  backdrop-filter: blur(20px) saturate(165%);
-  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.97);
+  border-color: rgba(226, 232, 240, 0.9);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .liquid-glass-dark {
-  background: rgba(15, 23, 42, 0.8);
+  background: rgba(15, 23, 42, 0.98);
   border-right: 1px solid rgba(255, 255, 255, 0.16);
-  -webkit-backdrop-filter: blur(22px) saturate(140%);
-  backdrop-filter: blur(22px) saturate(140%);
-  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.08), 18px 0 42px rgba(15, 23, 42, 0.18);
+  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.08), 12px 0 28px rgba(15, 23, 42, 0.14);
 }
 
 .premium-card {
@@ -143,12 +143,41 @@
 
 .premium-button {
   transform-origin: center;
-  backface-visibility: hidden;
-  will-change: transform;
+  transition: transform 150ms ease-out, border-color 150ms ease-out, background-color 150ms ease-out;
 }
 
 .premium-button:active {
   transform: scale(0.985);
+}
+
+main table:not(.border-slate-300):not(.border-slate-800) {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+main table:not(.border-slate-300):not(.border-slate-800) thead {
+  background: hsl(var(--muted) / 0.55);
+}
+
+main table:not(.border-slate-300):not(.border-slate-800) thead th {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+main table:not(.border-slate-300):not(.border-slate-800) tbody td {
+  border-bottom: 1px solid hsl(var(--border) / 0.65);
+}
+
+main table:not(.border-slate-300):not(.border-slate-800) tbody tr:last-child td {
+  border-bottom-color: transparent;
+}
+
+main table:not(.border-slate-300):not(.border-slate-800) tbody tr:hover {
+  background-color: hsl(var(--muted) / 0.32);
 }
 
 @keyframes route-enter {
@@ -299,10 +328,9 @@ html.dark ::-webkit-scrollbar-thumb { background: #2b3448; border-radius: 8px; b
 html.dark ::-webkit-scrollbar-thumb:hover { background: #3a4660; background-clip: content-box; }
 
 html.dark .liquid-glass-surface {
-  background: linear-gradient(180deg, rgb(24 30 46 / 0.92), rgb(17 22 35 / 0.92));
+  background: rgb(24 30 46 / 0.98);
   border-color: rgb(148 163 184 / 0.14);
   box-shadow: 0 12px 30px rgb(0 0 0 / 0.35), inset 0 1px 0 rgb(255 255 255 / 0.05);
-  backdrop-filter: blur(14px);
 }
 
 html.dark input:focus-visible,
@@ -321,6 +349,10 @@ html.dark [class~="bg-white/70"],
 html.dark [class~="bg-white/85"],
 html.dark [class~="bg-white/90"] {
   background-color: #171d2d !important;
+}
+
+html.dark main table:not(.border-slate-300):not(.border-slate-800) tbody td {
+  border-bottom-color: rgb(148 163 184 / 0.12);
 }
 
 html.dark [class~="bg-slate-50"],

@@ -12,18 +12,17 @@ import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal } from "@/components/common";
 import { Copy, Download, Save, Send, CreditCard, Plus, Trash2, ArrowLeft, Ban, Printer, AlertTriangle, Pencil, X, History, Eye, EyeOff, Archive } from "lucide-react";
 import BarcodeScanner from "@/components/BarcodeScanner";
+import {
+  canonicalInvoiceCategory,
+  canonicalInvoiceSize,
+  invoiceCategoriesFor,
+  invoicePriceCategory,
+  invoiceSizesFor,
+  isManualInvoicePrice,
+  lookupInvoicePrice,
+  resolveInvoiceLineForIssue,
+} from "@/lib/invoicePricing.mjs";
 
-const CATS = {
-  1: ["Simple/Mix color", "Ribbon Black", "Ribbon Pink", "Candy", "Strong Boy", "Uncovered"],
-  2: ["Simple/Mix color", "Ribbon Black", "Ribbon Pink", "Candy", "Strong Boy", "Uncovered Blue 16 Density"],
-};
-const UNIFIED_CATS = ["Simple/Mix color", "Ribbon Black", "Ribbon Pink"];
-const RIBBON = ["Ribbon Black", "Ribbon Pink", "Candy"];
-const priceCat = (zone, cat, unifiedPriceList) => {
-  if (cat === "Simple/Mix color") return unifiedPriceList ? "Simple" : "Standard";
-  return cat === "Candy" ? "Ribbon Black" : cat;
-};
-const manualOnly = (cat, size) => RIBBON.includes(cat) && size === "1370x150";
 const isOpeningBalancePlaceholder = (item) => !item.category && !item.size && item.description?.trim().toLowerCase() === "opening balance";
 
 const emptyItem = (category = "Simple/Mix color") => ({ qty: 1, category, size: "", description: "", unit_price: 0, price_override: false, tax: false, _needsConfig: false });
@@ -245,33 +244,15 @@ export default function InvoiceEditor({ express = false }) {
   };
 
   const categoriesFor = (zone) => {
-    const defaults = unifiedPriceList ? UNIFIED_CATS : CATS[zone];
-    const configured = prices
-      .filter((p) => p.zone === zone && p.active && p.category)
-      .map((p) => ["Standard", "Simple"].includes(p.category) ? "Simple/Mix color" : p.category);
-    const stocked = stockItems
-      .map((item) => ["Standard", "Simple"].includes(item.product) ? "Simple/Mix color" : item.product)
-      .filter(Boolean);
-    return [...new Set([...defaults, ...configured, ...stocked])];
+    return invoiceCategoriesFor(zone, unifiedPriceList, prices, stockItems);
   };
 
   const sizesFor = (zone, cat) => {
-    const category = priceCat(zone, cat, unifiedPriceList);
-    const priced = prices
-      .filter((p) => p.zone === zone && p.category === category && p.active)
-      .map((p) => p.size);
-    const stocked = stockItems
-      .filter((item) => priceCat(zone, item.product, unifiedPriceList) === category)
-      .map((item) => item.size);
-    return [...new Set([...priced, ...stocked])];
+    return invoiceSizesFor(zone, cat, unifiedPriceList, prices, stockItems);
   };
 
   const lookupPrice = (zone, cat, size) => {
-    if (!unifiedPriceList && manualOnly(cat, size)) return { price: null, needsConfig: true };
-    const p = prices.find((x) => x.zone === zone && x.category === priceCat(zone, cat, unifiedPriceList) && x.size === size && x.active);
-    if (!p) return { price: null, needsConfig: false, missing: true };
-    if (p.price == null || !p.confirmed) return { price: null, needsConfig: true };
-    return { price: p.price, needsConfig: false };
+    return lookupInvoicePrice(zone, cat, size, unifiedPriceList, prices);
   };
 
   const updateItem = (idx, patch) => {
@@ -301,13 +282,11 @@ export default function InvoiceEditor({ express = false }) {
       });
       const aliases = {
         simple: "Simple/Mix color",
-        "ribbon balck": "Ribbon Black",
-        "ribbon black": "Ribbon Black",
-        "ribbon pink": "Ribbon Pink",
       };
-      const categoryKey = product.product.trim().toLowerCase();
-      const category = categoriesFor(inv.zone).find((item) => item.toLowerCase() === categoryKey)
-        || categoriesFor(inv.zone).find((item) => item === aliases[categoryKey]);
+      const categoryKey = canonicalInvoiceCategory(product.product);
+      const category = categoriesFor(inv.zone).find((item) =>
+        canonicalInvoiceCategory(item) === (aliases[product.product.trim().toLowerCase()] || categoryKey)
+      );
       if (!category) {
         toast.error(`${product.product} is not available as an invoice product in this price list`);
         return;
@@ -345,7 +324,7 @@ export default function InvoiceEditor({ express = false }) {
   const repriceItems = (items, zone) => items.map((it) => {
     if (it.price_override) return it;
     const cats = categoriesFor(zone);
-    const cat = cats.includes(it.category) ? it.category : cats[0];
+    const cat = cats.find((item) => canonicalInvoiceCategory(item) === canonicalInvoiceCategory(it.category)) || cats[0];
     const r = lookupPrice(zone, cat, it.size);
     return { ...it, category: cat, unit_price: r.price ?? 0, _needsConfig: !!it.size && (r.needsConfig || r.missing) };
   });
@@ -402,7 +381,9 @@ export default function InvoiceEditor({ express = false }) {
   const invoiceItems = (inv.items || []).filter((item) => !isOpeningBalancePlaceholder(item));
   const openingBalanceOnly = !!inv.opening_balance && invoiceItems.length === 0;
 
-  const hasConfigIssue = inv.items.some((it) => it._needsConfig && it.size && !(it.price_override && Number(it.unit_price) > 0));
+  const hasConfigIssue = inv.items.some((item) =>
+    resolveInvoiceLineForIssue(item, inv.zone, unifiedPriceList, prices).needsConfig
+  );
   const [busy, setBusy] = useState(false);
 
   const buildPayload = (status) => ({
@@ -418,10 +399,13 @@ export default function InvoiceEditor({ express = false }) {
     reference: inv.reference, notes: inv.notes, destination: inv.destination || "",
     cod_amount_due: isCod && inv.cod_amount_due !== "" && inv.cod_amount_due != null ? Number(inv.cod_amount_due) : null,
     cod_amount_collected: isCod && inv.cod_amount_collected !== "" && inv.cod_amount_collected != null ? Number(inv.cod_amount_collected) : null,
-    items: inv.items.filter((it) => it.size || it.description).map((it) => ({
-      qty: Number(it.qty) || 0, category: it.category, size: it.size, description: it.description,
-      unit_price: Number(it.unit_price) || 0, price_override: it.price_override, tax: it.tax,
-    })),
+    items: inv.items.filter((it) => it.size || it.description).map((it) => {
+      const { unitPrice } = resolveInvoiceLineForIssue(it, inv.zone, unifiedPriceList, prices);
+      return {
+        qty: Number(it.qty) || 0, category: it.category, size: it.size, description: it.description,
+        unit_price: unitPrice, price_override: it.price_override, tax: it.tax,
+      };
+    }),
     opening_balance: !!inv.opening_balance,
     discount: Number(inv.discount) || 0, extra_charges: Number(inv.extra_charges) || 0,
     delivery_fee: Number(inv.delivery_fee) || 0, made_by: inv.made_by || "",
@@ -453,8 +437,9 @@ export default function InvoiceEditor({ express = false }) {
       const newProducts = [...new Map(invoiceItems
         .filter((item) => item.category?.trim() && item.size?.trim())
         .filter((item) => !prices.some((price) => price.zone === inv.zone &&
-          price.category === priceCat(inv.zone, item.category, unifiedPriceList) && price.size === item.size))
-        .map((item) => [`${priceCat(inv.zone, item.category, unifiedPriceList)}|${item.size}`, item])).values()];
+          invoicePriceCategory(price.category, unifiedPriceList) === invoicePriceCategory(item.category, unifiedPriceList)
+          && canonicalInvoiceSize(price.size) === canonicalInvoiceSize(item.size)))
+        .map((item) => [`${invoicePriceCategory(item.category, unifiedPriceList)}|${canonicalInvoiceSize(item.size)}`, item])).values()];
       if (!knownCustomer || newProducts.length) {
         setPendingSave({ status, newCustomer: !knownCustomer, newProducts, downloadAfterSave, deductStock });
         return;
@@ -484,7 +469,7 @@ export default function InvoiceEditor({ express = false }) {
           const price = Number(item.unit_price);
           return api.post("/prices", {
             zone: unifiedPriceList ? 1 : inv.zone,
-            category: priceCat(inv.zone, item.category, unifiedPriceList),
+            category: invoicePriceCategory(item.category, unifiedPriceList),
             size: item.size.trim(),
             price: price > 0 ? price : null,
             active: true,
@@ -496,8 +481,9 @@ export default function InvoiceEditor({ express = false }) {
       setPendingSave(null);
       const payload = { ...buildPayload(status), customer_id: customerId, customer_name: inv.customer_name.trim(), deduct_stock: !!deductStock, allow_negative_stock: allowNegativeStock };
       const res = id ? await api.put(`/invoices/${id}`, { ...payload, supervisor_authorization: editAuthorization }) : await api.post("/invoices", payload);
-      if (downloadAfterSave && (status !== "draft" && (res.status === "draft" || !res.number))) {
-        toast.error("Invoice was not issued; no issued invoice PDF was downloaded");
+      if (status !== "draft" && (res.status === "draft" || !res.number)) {
+        toast.error("Invoice was not issued. It remains a draft; review the invoice and try again.");
+        if (res.id) nav(`${invoicesPath}/${res.id}`);
         return;
       }
       const submitted = !id && status !== "draft";
@@ -516,38 +502,43 @@ export default function InvoiceEditor({ express = false }) {
     } finally { saveLockRef.current = false; setBusy(false); }
   };
 
-  const saveEdit = async () => {
-    if (!validate(inv.status === "draft" ? "draft" : "issued") || busy || saveLockRef.current) return;
+  const saveEdit = async (targetStatus = inv.status === "draft" ? "draft" : "issued") => {
+    if (!validate(targetStatus) || busy || saveLockRef.current) return;
     const reason = window.prompt("Reason for this change (required):", "");
     if (reason === null) return;
     if (!reason.trim()) return toast.error("A reason is required to edit an invoice");
-    if (inv.status !== "draft") {
-      setPendingStockSubmit({ action: "edit", reason });
+    if (targetStatus !== "draft") {
+      setPendingStockSubmit({ action: "edit", reason, status: targetStatus });
       return;
     }
-    await submitEdit(false, reason);
+    await submitEdit(false, reason, false, targetStatus);
   };
 
-  const submitEdit = async (deductStock, reason, allowNegativeStock = false) => {
+  const submitEdit = async (deductStock, reason, allowNegativeStock = false, targetStatus = inv.status === "draft" ? "draft" : "issued") => {
     if (busy || saveLockRef.current) return;
     saveLockRef.current = true;
     setBusy(true);
     try {
       const res = await api.put(`/invoices/${id}`, {
-        ...buildPayload(inv.status === "draft" ? "draft" : "issued"),
+        ...buildPayload(targetStatus),
         edit_reason: reason,
         deduct_stock: deductStock,
         allow_negative_stock: allowNegativeStock,
         supervisor_authorization: editAuthorization,
       });
+      if (targetStatus !== "draft" && (res.status === "draft" || !res.number)) {
+        toast.error("Invoice was not issued. It remains a draft; review the invoice and try again.");
+        await reloadInv();
+        return;
+      }
       setInv(res); setPayRecords(res.payment_records || []); setEditing(false); setEditAuthorization("");
-      toast.success("Invoice updated");
+      toast.success(targetStatus === "draft" ? "Invoice updated" : "Invoice issued");
     } catch (e) {
       const detail = e.response?.data?.detail;
       if (detail?.code === "INSUFFICIENT_STOCK") {
         setPendingNegativeStock({
           items: detail.items || [],
-          retry: () => submitEdit(deductStock, reason, true),
+          retry: () => submitEdit(deductStock, reason, true, targetStatus),
         });
       } else toast.error(apiError(e));
     } finally { saveLockRef.current = false; setBusy(false); }
@@ -563,12 +554,13 @@ export default function InvoiceEditor({ express = false }) {
         deduct_stock: deductStock,
         allow_negative_stock: allowNegativeStock,
       });
+      if (res.status === "draft" || !res.number) {
+        toast.error("Invoice was not issued. It remains a draft; review the invoice and try again.");
+        await reloadInv();
+        return;
+      }
       setInv(res);
       if (action === "download") {
-        if (res.status === "draft" || !res.number) {
-          toast.error("Invoice could not be issued, so no issued invoice PDF was downloaded");
-          return;
-        }
         setDownloadIssuedDraft(true);
         toast.success("Invoice issued");
       } else {
@@ -595,7 +587,7 @@ export default function InvoiceEditor({ express = false }) {
       return;
     }
     if (pending.action === "edit") {
-      submitEdit(deductStock, pending.reason);
+      submitEdit(deductStock, pending.reason, false, pending.status);
       return;
     }
     await issueWithStock(deductStock, pending.action);
@@ -843,6 +835,7 @@ export default function InvoiceEditor({ express = false }) {
           <div className="flex gap-2">
             <Btn variant="outline" onClick={cancelEdit} data-testid="cancel-edit-btn"><X size={15} /> Cancel</Btn>
             <Btn disabled={busy} onClick={saveEdit} data-testid="save-edit-btn"><Save size={15} /> {busy ? "Saving..." : "Save changes"}</Btn>
+            {inv.status === "draft" && <Btn disabled={busy} onClick={() => saveEdit("issued")} data-testid="save-and-issue-draft-btn"><Send size={15} /> {busy ? "Issuing..." : "Save & Issue"}</Btn>}
           </div>
         </div>
       )}
@@ -939,7 +932,7 @@ export default function InvoiceEditor({ express = false }) {
                             className={`w-24 rounded border px-2 py-1.5 text-sm font-mono ${it._needsConfig && it.size && !(it.price_override && Number(it.unit_price) > 0) ? "border-red-400 bg-red-50" : it.price_override ? "border-amber-400 bg-amber-50" : "border-input"}`} />
                           {it.price_override && <span title="Manual override" className="text-[10px] font-bold text-amber-600">M</span>}
                         </div>
-                        {it._needsConfig && it.size && <span className="text-[10px] text-red-600 flex items-center gap-0.5 mt-0.5" data-testid={`item-needs-config-${idx}`}><AlertTriangle size={10} /> {manualOnly(it.category, it.size) ? "Manual price required" : "Requires administrator confirmation"}</span>}
+                        {it._needsConfig && it.size && <span className="text-[10px] text-red-600 flex items-center gap-0.5 mt-0.5" data-testid={`item-needs-config-${idx}`}><AlertTriangle size={10} /> {isManualInvoicePrice(it.category, it.size, unifiedPriceList) ? "Manual price required" : "Requires administrator confirmation"}</span>}
                       </td>
                       <td className="text-right font-mono text-slate-700">{fmtMoney((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
                       <td className="text-right">
@@ -958,6 +951,7 @@ export default function InvoiceEditor({ express = false }) {
               <h3 className="font-bold text-slate-800 mb-3 font-display">4. Payment Information</h3>
               {inv.status === "void" ? <p className="text-sm text-slate-400" data-testid="void-reason">This invoice is voided.{inv.void_reason ? ` Reason: ${inv.void_reason}` : ""}</p> : (
                 <div className="grid grid-cols-2 gap-2">
+                  {id && inv.status === "draft" && !editing && <p className="col-span-2 text-sm text-amber-700" data-testid="draft-payment-guidance">Draft invoices cannot accept payments. Issue this invoice first.</p>}
                   {!id && <Btn variant="outline" disabled={busy} onClick={() => save("draft")} data-testid="save-draft-btn"><Save size={15} /> {busy ? "Saving…" : "Draft"}</Btn>}
                   {!id && <Btn disabled={busy} onClick={() => save("issued")} data-testid="issue-invoice-btn"><Send size={15} /> {busy ? "Saving…" : "Issue"}</Btn>}
                   <Btn variant="outline" onClick={copyInvoice} data-testid="copy-btn-2"><Copy size={15} /> Copy</Btn>

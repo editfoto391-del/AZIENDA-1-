@@ -20,9 +20,17 @@ database connection and private credentials. Never commit the populated `.env` f
 - `yarn build` — production bundle into `build/`
 - `yarn preview` — serve the production bundle locally
 
-Hot reload is always enabled via Vite HMR and polling so file changes are reflected in the
-Emergent preview. Restart the `frontend` supervisor program only after changing `.env` or
-`vite.config.mjs`, or after installing dependencies (`yarn add`, never npm).
+Hot reload is enabled via Vite HMR and polling, so edits made in the current Emergent workspace
+are reflected in its preview. HMR does not fetch commits from GitHub: pushing a commit, changing
+branches, or opening the preview in a new browser tab does not synchronize the workspace checkout.
+Before testing a GitHub change in Emergent, use its repository/source-control sync to select
+`editfoto391-del/AZIENDA-1-` on `feature/multicompany-erp`, then verify the checked-out commit
+matches the commit on GitHub. A browser refresh reloads the current workspace only. Restart the
+`frontend` supervisor program after syncing if the preview did not pick up the changed files, and
+always after changing `.env` or `vite.config.mjs`, or after installing dependencies (`yarn add`,
+never npm). The Vite development server sends `Cache-Control: no-store`; if the workspace commit
+matches but the page still looks old, reload the browser without cache before investigating the
+preview runtime.
 
 Visual edits: the packaged `@emergentbase/visual-edits` plugin tags `.jsx`/`.tsx`; because this
 template keeps JSX in `.js`, `vite.config.mjs` stamps the same `x-*` metadata on `src/**/*.js`

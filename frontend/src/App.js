@@ -197,8 +197,8 @@ function OwnerWelcome({ children, user }) {
       {stage === "done" ? (
         <motion.div
           key="business"
-          initial={reduceMotion ? false : { opacity: 0, y: 12, scale: 0.995, filter: "blur(5px)" }}
-          animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
+          initial={reduceMotion ? false : { opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
           transition={{ duration: reduceMotion ? 0 : 0.65, ease: [0.22, 1, 0.36, 1] }}
         >
           {children}
@@ -208,39 +208,19 @@ function OwnerWelcome({ children, user }) {
           key="welcome"
           initial={reduceMotion ? false : { opacity: 0 }}
           animate={{ opacity: 1 }}
-          exit={reduceMotion ? undefined : { opacity: 0, scale: 1.025, filter: "blur(8px)" }}
+          exit={reduceMotion ? undefined : { opacity: 0, scale: 1.015 }}
           transition={{ duration: reduceMotion ? 0 : 0.55, ease: [0.22, 1, 0.36, 1] }}
           className="fixed inset-0 z-[100] flex min-h-screen items-center justify-center overflow-hidden bg-[#091b17] px-5 py-10 text-white"
         >
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_18%_18%,rgba(52,125,99,0.3),transparent_42%),radial-gradient(ellipse_at_82%_78%,rgba(180,151,81,0.18),transparent_40%)]" />
-          {!reduceMotion && <>
-            <motion.div
-              aria-hidden="true"
-              className="pointer-events-none absolute -left-24 top-1/4 h-72 w-72 rounded-full border border-emerald-100/10"
-              animate={{ x: [0, 38, 0], y: [0, 24, 0], scale: [1, 1.14, 1], opacity: [0.2, 0.55, 0.2] }}
-              transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
-            />
-            <motion.div
-              aria-hidden="true"
-              className="pointer-events-none absolute -bottom-40 -right-20 h-[28rem] w-[28rem] rounded-full bg-emerald-300/[0.07] blur-3xl"
-              animate={{ x: [0, -45, 0], y: [0, -30, 0], scale: [1, 1.12, 1] }}
-              transition={{ duration: 11, repeat: Infinity, ease: "easeInOut" }}
-            />
-            <motion.div
-              aria-hidden="true"
-              className="pointer-events-none absolute right-[14%] top-[12%] h-40 w-40 rounded-full bg-amber-200/[0.06] blur-3xl"
-              animate={{ x: [0, -24, 0], y: [0, 35, 0], opacity: [0.35, 0.8, 0.35] }}
-              transition={{ duration: 8, repeat: Infinity, ease: "easeInOut" }}
-            />
-          </>}
           <div className="relative w-full max-w-3xl">
             <AnimatePresence mode="wait" initial={false}>
               {stage === "choose" ? (
             <motion.section
               key="choose"
-              initial={reduceMotion ? false : { opacity: 0, y: 26, scale: 0.97, filter: "blur(7px)" }}
-              animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
-              exit={reduceMotion ? undefined : { opacity: 0, y: -20, scale: 0.98, filter: "blur(5px)" }}
+              initial={reduceMotion ? false : { opacity: 0, y: 20, scale: 0.985 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reduceMotion ? undefined : { opacity: 0, y: -12, scale: 0.99 }}
               transition={{ duration: reduceMotion ? 0 : 0.7, ease: [0.22, 1, 0.36, 1] }}
               className="text-center"
               aria-labelledby="owner-welcome-title"
@@ -287,7 +267,7 @@ function OwnerWelcome({ children, user }) {
                         setSelectedName(name);
                         setStage("loading");
                       }}
-                      className="owner-welcome-card group flex min-h-24 w-full items-center justify-between rounded-2xl border border-white/10 bg-white/[0.045] px-5 text-left shadow-[0_14px_40px_rgba(0,0,0,0.12)] backdrop-blur-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
+                      className="owner-welcome-card group flex min-h-24 w-full items-center justify-between rounded-2xl border border-white/10 bg-white/[0.045] px-5 text-left shadow-[0_14px_40px_rgba(0,0,0,0.12)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200"
                       data-testid={`owner-welcome-${name.toLowerCase().replaceAll(" ", "-")}`}
                     >
                       <span>
@@ -306,16 +286,14 @@ function OwnerWelcome({ children, user }) {
               key="loading"
               role="status"
               aria-live="polite"
-              initial={reduceMotion ? false : { opacity: 0, y: 18, scale: 0.96, filter: "blur(6px)" }}
-              animate={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }}
-              exit={reduceMotion ? undefined : { opacity: 0, y: -8, scale: 1.02, filter: "blur(4px)" }}
+              initial={reduceMotion ? false : { opacity: 0, y: 14, scale: 0.985 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={reduceMotion ? undefined : { opacity: 0, y: -6, scale: 1.01 }}
               transition={{ duration: reduceMotion ? 0 : 0.55, ease: [0.22, 1, 0.36, 1] }}
               className="mx-auto flex max-w-lg flex-col items-center text-center"
             >
               <motion.div
-                className="mb-7 flex h-20 w-20 items-center justify-center rounded-full border border-emerald-100/20 bg-white/[0.06] shadow-[0_0_50px_rgba(167,243,208,0.09)]"
-                animate={reduceMotion ? undefined : { boxShadow: ["0 0 28px rgba(167,243,208,0.05)", "0 0 58px rgba(167,243,208,0.2)", "0 0 28px rgba(167,243,208,0.05)"] }}
-                transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
+                className="mb-7 flex h-20 w-20 items-center justify-center rounded-full border border-emerald-100/20 bg-white/[0.06]"
               >
                 <motion.span
                   className="h-7 w-7 rounded-full border-2 border-emerald-100/25 border-t-emerald-100"
@@ -323,7 +301,7 @@ function OwnerWelcome({ children, user }) {
                   transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
                 />
               </motion.div>
-              <motion.p animate={reduceMotion ? undefined : { opacity: [0.55, 1, 0.55] }} transition={{ duration: 2.2, repeat: Infinity }} className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-100/65">SUPERIQFOAM</motion.p>
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-100/65">SUPERIQFOAM</p>
               <h2 className="mt-3 font-display text-3xl font-normal sm:text-4xl">Loading your business profile</h2>
               <p className="mt-3 text-sm font-medium tracking-[0.18em] text-emerald-100/75">(BOSS) ...</p>
               {selectedName && <motion.p initial={reduceMotion ? false : { opacity: 0, y: 7 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: reduceMotion ? 0 : 0.18 }} className="mt-5 text-sm text-white/50">Welcome, {selectedName}.</motion.p>}

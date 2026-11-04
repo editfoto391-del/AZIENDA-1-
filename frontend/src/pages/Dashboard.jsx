@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { motion, useReducedMotion } from "framer-motion";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, today, STATUS_META } from "@/lib/format";
@@ -124,9 +123,8 @@ const previousMonth = (month) => {
 const monthLabel = (value) => new Date(`${value}-01T00:00:00`).toLocaleDateString("en", { month: "long", year: "numeric", timeZone: "UTC" });
 
 function KPI({ title, value, icon: Icon, tint, onClick, comparison }) {
-  const reduceMotion = useReducedMotion();
   return (
-    <motion.div whileHover={reduceMotion ? undefined : { y: -2, scale: 1.01 }} whileTap={reduceMotion ? undefined : { scale: 0.995 }} transition={{ type: "spring", stiffness: 460, damping: 24, mass: 0.6 }}>
+    <div className="transition-transform duration-150 ease-out hover:-translate-y-0.5 active:scale-[0.995]">
       <Card className="premium-card group p-5 cursor-pointer border-l-2 border-l-transparent hover:border-l-primary hover:shadow-md transition-all" onClick={onClick} data-testid={`kpi-${title.toLowerCase().replace(/\s/g, "-")}`}>
         <div className="flex items-start justify-between">
           <div>
@@ -139,13 +137,13 @@ function KPI({ title, value, icon: Icon, tint, onClick, comparison }) {
           </div>
         </div>
       </Card>
-    </motion.div>
+    </div>
   );
 }
 
 function Section({ title, icon: Icon, children, action }) {
   return (
-    <motion.div whileHover={{ y: -1 }} transition={{ type: "spring", stiffness: 420, damping: 26, mass: 0.55 }}>
+    <div>
       <Card className="premium-card p-5">
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-semibold text-slate-800 flex items-center gap-2 font-display text-lg">
@@ -155,7 +153,7 @@ function Section({ title, icon: Icon, children, action }) {
         </div>
         {children}
       </Card>
-    </motion.div>
+    </div>
   );
 }
 
@@ -934,9 +932,9 @@ export default function Dashboard() {
           {[[`Done ${periodLabel}`, d.completed_today, "/orders"],
             [`Orders to Send · ${periodLabel}`, d.orders_open_count, "/orders"], [`Urgent Orders · ${periodLabel}`, d.urgent_orders, "/orders"], ["Vehicles Free", `${d.vehicles_available}/${d.vehicles_total}`, "/fleet"],
             ["Maintenance Due", d.maintenance_due, "/fleet"]].map(([l, v, to]) => (
-            <motion.button key={l} whileHover={{ y: -2, scale: 1.01 }} whileTap={{ scale: 0.99 }} transition={{ type: "spring", stiffness: 420, damping: 24, mass: 0.5 }} onClick={() => nav(to)} className="premium-button rounded-lg border border-border bg-white/85 p-3 text-left hover:border-primary/50 hover:bg-white transition-colors" data-testid={`op-kpi-${l.toLowerCase().replace(/\s/g, "-")}`}>
+            <button key={l} onClick={() => nav(to)} className="premium-button rounded-lg border border-border bg-white/85 p-3 text-left hover:border-primary/50 hover:bg-white transition-colors" data-testid={`op-kpi-${l.toLowerCase().replace(/\s/g, "-")}`}>
               <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-slate-500">{l}</p><p className="text-xl font-semibold font-mono tabular-nums text-slate-800 mt-1">{v}</p>
-            </motion.button>))}
+            </button>))}
         </div>
       </section>
 
@@ -945,11 +943,11 @@ export default function Dashboard() {
         <h3 className="font-bold text-slate-800 mb-4 font-display">Quick Actions</h3>
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
           {QUICK.filter((q) => !(user?.company_id === MANUFACTURING_COMPANY_ID && q.to === "/production?add=1")).map((q) => (
-            <motion.button key={q.label} whileHover={{ y: -2, scale: 1.01 }} whileTap={{ scale: 0.985 }} transition={{ type: "spring", stiffness: 430, damping: 24, mass: 0.5 }} onClick={() => nav(q.to)} data-testid={`quick-${q.label.toLowerCase().replace(/\s/g, "-")}`}
+            <button key={q.label} onClick={() => nav(q.to)} data-testid={`quick-${q.label.toLowerCase().replace(/\s/g, "-")}`}
               className="premium-button flex flex-col items-center gap-2 rounded-lg border border-border bg-white/70 p-4 hover:border-primary/50 hover:bg-accent/35 transition-colors">
               <q.icon size={19} strokeWidth={1.8} className="text-primary" />
               <span className="text-xs font-semibold text-slate-700 text-center">{q.label}</span>
-            </motion.button>
+            </button>
           ))}
         </div>
       </Card>

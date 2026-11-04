@@ -465,7 +465,15 @@ export default function DailyReport() {
     let active = true;
     let firstLoad = true;
     let latestRequest = 0;
+    let requestInFlight = false;
+    let refreshQueued = false;
     const loadReport = async () => {
+      if (!active) return;
+      if (requestInFlight) {
+        refreshQueued = true;
+        return;
+      }
+      requestInFlight = true;
       const requestId = ++latestRequest;
       if (firstLoad && active) {
         setLoading(true);
@@ -473,7 +481,7 @@ export default function DailyReport() {
         setError("");
       }
       try {
-        const data = await api.get("/daily-report", { report_date: reportDate, refresh: Date.now() });
+        const data = await api.getUncached("/daily-report", { report_date: reportDate });
         if (!active || requestId !== latestRequest) return;
         setReport(data);
         setError("");
@@ -482,6 +490,11 @@ export default function DailyReport() {
       } finally {
         if (active && firstLoad) setLoading(false);
         firstLoad = false;
+        requestInFlight = false;
+        if (active && refreshQueued && document.visibilityState === "visible") {
+          refreshQueued = false;
+          void loadReport();
+        }
       }
     };
 
@@ -491,6 +504,7 @@ export default function DailyReport() {
     };
     loadReport();
     const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       if (followToday.current && reportDate !== today()) {
         setReportDate(today());
         return;
@@ -511,16 +525,24 @@ export default function DailyReport() {
   useEffect(() => {
     if (viewMode === "daily") return undefined;
     let active = true;
+    let requestInFlight = false;
+    let refreshQueued = false;
     const loadFinancialReport = async (clearReport = false) => {
+      if (!active) return;
+      if (requestInFlight) {
+        refreshQueued = true;
+        return;
+      }
+      requestInFlight = true;
       setFinancialLoading(true);
       if (clearReport) {
         setFinancialReport(null);
         setError("");
       }
       try {
-        const data = await api.get("/reports/financial", {
+        const data = await api.getUncached("/reports/financial", {
           period: viewMode, value: financialValue, mode: accountingMode,
-          company_id: reportCompany, refresh: Date.now(),
+          company_id: reportCompany,
         });
         if (active) {
           setFinancialReport(data);
@@ -530,6 +552,11 @@ export default function DailyReport() {
         if (active) setError(apiError(requestError));
       } finally {
         if (active) setFinancialLoading(false);
+        requestInFlight = false;
+        if (active && refreshQueued && document.visibilityState === "visible") {
+          refreshQueued = false;
+          void loadFinancialReport();
+        }
       }
     };
     loadFinancialReport(true);
@@ -537,7 +564,9 @@ export default function DailyReport() {
     const refreshOnVisibility = () => {
       if (document.visibilityState === "visible") loadFinancialReport();
     };
-    const interval = window.setInterval(refresh, 20000);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, 20000);
     window.addEventListener("erp:data-changed", refresh);
     document.addEventListener("visibilitychange", refreshOnVisibility);
     return () => {

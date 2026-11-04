@@ -118,7 +118,7 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
                 <LockKeyhole size={13} />
               </div>
               : <NavLink key={n.to} to={n.to} end={n.end} onClick={onNav} onMouseEnter={() => preloadPage(n.to)} onFocus={() => preloadPage(n.to)} onPointerDown={() => preloadPage(n.to)} data-testid={`nav-${n.label.toLowerCase()}`}
-                className={({ isActive }) => `relative isolate flex min-h-9 items-center gap-2.5 px-2.5 py-1.5 rounded-md text-xs leading-tight font-medium transition-colors ${isActive ? "text-white" : "text-emerald-50/65 hover:bg-white/5 hover:text-white"}`}>
+                className={({ isActive }) => `relative isolate flex min-h-10 items-center gap-3 px-3 py-2 rounded-lg text-[13px] leading-tight font-medium transition-[color,background-color] duration-150 ${isActive ? "text-white" : "text-emerald-50/65 hover:bg-white/5 hover:text-white"}`}>
                 {({ isActive }) => <>
                   {isActive && <motion.span layoutId={`active-nav-${onNav ? "mobile" : "desktop"}`} className="pointer-events-none absolute inset-0 z-0 rounded-md bg-white/10 shadow-[inset_2px_0_0_hsl(72_42%_65%)]" transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 480, damping: 38, mass: 0.5 }} />}
                   <n.icon className="relative z-10" size={18} />
@@ -141,7 +141,7 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
                 <ChevronDown size={13} className={`shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
               </button>
             ) : (
-              <p className="px-3 pt-3 pb-1 text-[9px] font-bold uppercase tracking-[0.14em] text-emerald-100/40">{group.label}</p>
+              <p className="px-3 pt-3 pb-1 text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-100/45">{group.label}</p>
             )}
             {group.collapsible ? (
               <AnimatePresence initial={false}>
@@ -238,7 +238,7 @@ export default function Layout() {
   return (
     <div className="min-h-screen bg-background">
       {/* Desktop sidebar */}
-      <aside className="no-print hidden lg:flex fixed inset-y-0 left-0 w-64 flex-col bg-[hsl(222_47%_11%)] z-30">
+      <aside className="no-print hidden lg:flex fixed inset-y-0 left-0 w-64 flex-col border-r border-white/10 bg-[hsl(222_47%_11%)] shadow-[4px_0_18px_rgba(15,23,42,0.08)] z-30">
         <SidebarContent companyName={activeBrandName} companyId={user?.company_id} user={user} />
       </aside>
 
@@ -246,7 +246,7 @@ export default function Layout() {
       <AnimatePresence initial={false}>
         {open && (
         <motion.div key="mobile-navigation" className="lg:hidden fixed inset-0 z-50 flex" initial={reduceMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={reduceMotion ? { duration: 0 } : { duration: 0.16 }}>
-          <motion.div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => setOpen(false)} />
+          <motion.div className="fixed inset-0 bg-slate-900/60" onClick={() => setOpen(false)} />
           <motion.aside className="mobile-nav-panel liquid-glass-dark relative flex w-[min(18rem,calc(100vw-2.5rem))] flex-col bg-[hsl(222_47%_11%)]" style={{ paddingTop: "env(safe-area-inset-top)", paddingBottom: "env(safe-area-inset-bottom)" }} initial={reduceMotion ? false : { x: -36, opacity: 0.85 }} animate={{ x: 0, opacity: 1 }} exit={{ x: -24, opacity: 0 }} transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 360, damping: 34, mass: 0.7 }}>
             <button className="absolute right-3 top-3 rounded-full p-2 text-slate-300 hover:bg-white/10" onClick={() => setOpen(false)} aria-label="Close navigation">
               <X size={22} />

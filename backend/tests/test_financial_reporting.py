@@ -282,6 +282,84 @@ def test_payment_report_links_payment_to_invoice_outside_period_and_shows_remain
     assert payment["invoice_items"] == [{"description": "Foam", "qty": 1}]
 
 
+def test_financial_report_deduplicates_payments_and_invoice_records_by_id():
+    invoice = {
+        "id": "invoice-1", "number": "100", "date": "2026-10-27",
+        "status": "issued", "total": 200, "customer_name": "Customer A",
+    }
+    payment = {
+        "id": "payment-1", "invoice_id": "invoice-1", "invoice_number": "100",
+        "date": "2026-10-29", "amount": 40, "customer_name": "Customer A",
+    }
+
+    report = server.build_financial_report(
+        date(2026, 10, 26),
+        date(2026, 11, 1),
+        "expenses_only",
+        invoices=[invoice, invoice.copy()],
+        payments=[payment, payment.copy()],
+        linked_payments=[payment, payment.copy()],
+        expenses=[],
+        vehicle_records=[],
+        buyings=[],
+        grvs=[],
+        invoice_movements=[],
+    )
+
+    assert report["summary"]["total_invoices"] == 200
+    assert report["summary"]["invoice_count"] == 1
+    assert report["summary"]["payments_received"] == 40
+    assert report["summary"]["payment_count"] == 1
+    assert len(report["transactions"]["payments"]) == 1
+    invoice_row = report["transactions"]["invoices"][0]
+    assert invoice_row["amount_paid"] == 40
+    assert invoice_row["outstanding"] == 160
+    payment_day = next(day for day in report["daily"] if day["date"] == "2026-10-29")
+    assert payment_day["payments_received"] == 40
+    assert payment_day["payment_count"] == 1
+
+
+def test_financial_report_only_counts_main_invoices_but_keeps_both_payment_sections():
+    standard_invoice = {
+        "id": "standard-invoice", "number": "100", "date": "2026-10-27",
+        "status": "issued", "total": 200, "customer_name": "Customer A",
+    }
+    express_invoice = {
+        "id": "express-invoice", "number": "EW-100", "date": "2026-10-27",
+        "status": "issued", "total": 300, "customer_name": "Customer B",
+        "invoice_type": "express",
+    }
+    standard_payment = {
+        "id": "standard-payment", "invoice_id": "standard-invoice",
+        "date": "2026-10-29", "amount": 25,
+    }
+    express_payment = {
+        "id": "express-payment", "invoice_id": "express-invoice",
+        "date": "2026-10-29", "amount": 35,
+    }
+
+    report = server.build_financial_report(
+        date(2026, 10, 26),
+        date(2026, 11, 1),
+        "expenses_only",
+        invoices=[standard_invoice, express_invoice],
+        payments=[standard_payment, express_payment],
+        linked_payments=[standard_payment, express_payment],
+        expenses=[],
+        vehicle_records=[],
+        buyings=[],
+        grvs=[],
+        invoice_movements=[],
+    )
+
+    assert report["summary"]["total_invoices"] == 200
+    assert [row["id"] for row in report["transactions"]["invoices"]] == ["standard-invoice"]
+    assert report["summary"]["payments_received"] == 60
+    assert {row["id"] for row in report["transactions"]["payments"]} == {
+        "standard-payment", "express-payment",
+    }
+
+
 def test_full_production_cost_never_fills_missing_cost_from_current_stock():
     report = report_data("full_production_cost")
     summary = report["summary"]
