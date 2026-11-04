@@ -744,6 +744,11 @@ async def get_current_user(request: Request):
     except jwt.InvalidTokenError:
         user = await user_from_session(token)
         if user:
+            user = await authorize_company(
+                user,
+                user.get("_active_company_id") or DEFAULT_COMPANY_ID,
+                user.get("_session_id"),
+            )
             if request.url.path.startswith("/api/workflow-builder"):
                 require_global_owner(user)
             enforce_worker_api_access(request, user)
@@ -5255,6 +5260,9 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
             rec = await update_doc("invoices", iid, inv)
             await post_invoice_stock_changes(rec, stock_changes, stocks, user)
             rec = await update_doc("invoices", iid, {"stock_deducted": True, "stock_restored": False})
+    if "opening_balance" in existing and body.opening_balance is False:
+        await db.invoices.update_one({"id": iid}, {"$unset": {"opening_balance": ""}})
+        rec.pop("opening_balance", None)
     if existing.get("number"):
         await log_audit("invoice", iid, "issued_invoice_edited", user,
                         before={"items": existing.get("items"), "total": existing.get("total")},
@@ -6639,8 +6647,8 @@ async def add_movement(sid: str, body: MovementIn, user=Depends(get_current_user
         raise HTTPException(404, "Stock item not found")
     if body.type not in ("adjustment_in", "adjustment_out", "return", "damage"):
         raise HTTPException(400, "Production receipts come from Production and dispatches from Deliveries")
-    if body.quantity <= 0:
-        raise HTTPException(400, "Quantity must be positive")
+    if body.quantity < 0:
+        raise HTTPException(400, "Quantity cannot be negative")
     async with StockLock([sid]):
         m = await post_movement(s, body.type, body.quantity, user, body.reason or "", body.reference, body.notes)
     await log_audit("stock_movement", m["id"], "posted", user, after=m, reason=body.reason or "")
@@ -13175,13 +13183,13 @@ async def assistant_delete(sid: str, user=Depends(get_current_user)):
 
 @api.post("/assistant/chat")
 async def assistant_chat(body: AssistantIn, user=Depends(get_current_user)):
-    from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone, ToolCallReady
     text = body.message.strip()
     if not text:
         raise HTTPException(400, "Message is empty")
     sid = body.session_id
     if sid and not await db.assistant_sessions.find_one({"id": sid, "user_id": user["id"]}):
         raise HTTPException(404, "Conversation not found")
+    from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone, ToolCallReady
     if not sid:
         sid = new_id()
         await db.assistant_sessions.insert_one({"id": sid, "user_id": user["id"], "title": text[:60], "created_at": now_iso(), "updated_at": now_iso()})
@@ -13301,6 +13309,8 @@ async def add_order(body: OrderIn, user=Depends(get_current_user)):
 async def edit_order(oid: str, body: OrderIn, user=Depends(get_current_user)):
     existing = await db.orders.find_one({"id": oid})
     if not existing:
+        raise HTTPException(404, "Order not found")
+    if existing.get("archived") or existing.get("status") == "Cancelled":
         raise HTTPException(404, "Order not found")
     d = body.model_dump()
     d["reference"] = existing.get("reference")

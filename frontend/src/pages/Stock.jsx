@@ -167,7 +167,9 @@ export default function Stock() {
   };
 
   const saveMove = async () => {
-    if (!(Number(moveModal.quantity) > 0)) return toast.error("Quantity must be positive");
+    if (!Number.isFinite(Number(moveModal.quantity)) || Number(moveModal.quantity) < 0) {
+      return toast.error("Quantity cannot be negative");
+    }
     if (await run(() => api.post(`/stock/${moveModal.stock_id}/movements`, moveModal), "Movement recorded")) setMoveModal(null);
   };
 
@@ -325,7 +327,7 @@ export default function Stock() {
           <Select label="Movement Type" value={moveModal.type} onChange={(e) => setMoveModal({ ...moveModal, type: e.target.value })} data-testid="move-type-select">
             {MOVE_TYPES.map((m) => <option key={m.v} value={m.v}>{m.l}</option>)}
           </Select>
-          <Input label="Quantity" type="number" value={moveModal.quantity} onChange={(e) => setMoveModal({ ...moveModal, quantity: Number(e.target.value) })} data-testid="move-qty-input" />
+          <Input label="Quantity" type="number" min="0" step="any" value={moveModal.quantity} onChange={(e) => setMoveModal({ ...moveModal, quantity: Number(e.target.value) })} data-testid="move-qty-input" />
           <Input label="Reason (optional)" value={moveModal.reason} onChange={(e) => setMoveModal({ ...moveModal, reason: e.target.value })} data-testid="move-reason-input" />
           <Input label="Reference (optional)" value={moveModal.reference} onChange={(e) => setMoveModal({ ...moveModal, reference: e.target.value })} />
           <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setMoveModal(null)}>Cancel</Btn><Btn disabled={busy} onClick={saveMove} data-testid="save-move-btn">Record</Btn></div>

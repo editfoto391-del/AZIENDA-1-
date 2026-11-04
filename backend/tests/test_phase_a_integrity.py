@@ -14,10 +14,7 @@ import requests
 def _load_base():
     url = os.environ.get("REACT_APP_BACKEND_URL")
     if not url:
-        with open("/app/frontend/.env") as f:
-            for line in f:
-                if line.startswith("REACT_APP_BACKEND_URL="):
-                    url = line.split("=", 1)[1].strip()
+        raise RuntimeError("Set REACT_APP_BACKEND_URL to the isolated test API before running this suite")
     return url.rstrip("/")
 
 
@@ -75,8 +72,11 @@ def cleanup_test_stock():
     """Owner's real stock must stay clean: delete every TEST_ stock item + its movements after the run."""
     yield
     from pymongo import MongoClient
-    env = dict(l.strip().split("=", 1) for l in open("/app/backend/.env") if "=" in l)
-    mdb = MongoClient(env["MONGO_URL"].strip('"'))[env["DB_NAME"].strip('"')]
+    mongo_url = os.environ.get("MONGO_URL")
+    db_name = os.environ.get("DB_NAME")
+    if not mongo_url or not db_name:
+        raise RuntimeError("Set MONGO_URL and DB_NAME to the isolated test database before running this suite")
+    mdb = MongoClient(mongo_url)[db_name]
     ids = [d["id"] for d in mdb.stock.find({"product": {"$regex": "^TEST_"}}, {"id": 1})]
     mdb.stock_movements.delete_many({"stock_id": {"$in": ids}})
     mdb.stock.delete_many({"id": {"$in": ids}})
@@ -103,7 +103,7 @@ def stock_current(s, sid):
 
 
 def issued_invoice(s, customer, items=None, **kw):
-    body = {"customer_id": customer["id"], "zone": 1, "status": "issued",
+    body = {"customer_id": customer["id"], "zone": 1, "status": "issued", "made_by": "QA Test",
             "items": items or [{"qty": 2, "description": "TEST_line", "unit_price": 100}], **kw}
     r = s.post(f"{API}/invoices", json=body)
     assert r.status_code == 200, r.text
@@ -156,7 +156,7 @@ class TestInvoiceStock:
         unchanged = issued_invoice(s, customer, items=[line], deduct_stock=False)
         assert stock_current(s, stock["id"]) == 6
         draft = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "zone": 1,
-                      "status": "draft", "items": [{**line, "qty": 2}]})
+                      "status": "draft", "made_by": "QA Test", "items": [{**line, "qty": 2}]})
         assert draft.status_code == 200, draft.text
         issued_draft = s.post(f"{API}/invoices/{draft.json()['id']}/issue", json={"deduct_stock": True})
         assert issued_draft.status_code == 200, issued_draft.text
@@ -175,7 +175,7 @@ class TestInvoiceStock:
         edited_line = {**line, "qty": 3}
         edited = s.put(f"{API}/invoices/{invoice['id']}", json={
             "customer_id": customer["id"], "zone": 1, "status": "issued",
-            "items": [edited_line], "deduct_stock": True,
+            "items": [edited_line], "deduct_stock": True, "edit_reason": "TEST quantity correction",
         })
         assert edited.status_code == 200, edited.text
         assert stock_current(s, stock["id"]) == 7
@@ -190,8 +190,8 @@ class TestInvoiceStock:
         line = {"qty": 3, "category": stock["product"], "size": stock["size"],
                 "unit_price": 100, "price_override": True}
         r = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "zone": 1,
-                      "status": "issued", "deduct_stock": True, "items": [line]})
-        assert r.status_code == 400 and "Insufficient stock" in r.text
+                      "status": "issued", "made_by": "QA Test", "deduct_stock": True, "items": [line]})
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "INSUFFICIENT_STOCK"
         assert stock_current(s, stock["id"]) == 2
 
 
@@ -213,12 +213,12 @@ class TestPriceLookup:
 # --- Missing price issue rules (test 6)
 class TestMissingPrice:
     def test_ribbon_1370_issue_rejected(self, s, customer):
-        r = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "zone": 1, "status": "issued",
+        r = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "zone": 1, "status": "issued", "made_by": "QA Test",
                    "items": [{"qty": 1, "category": "Ribbon", "size": "1370x150", "unit_price": 300}]})
         assert r.status_code == 400
 
     def test_zero_price_rejected(self, s, customer):
-        r = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "status": "issued",
+        r = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "status": "issued", "made_by": "QA Test",
                    "items": [{"qty": 1, "category": "Standard", "size": "910x100", "unit_price": 0}]})
         assert r.status_code == 400
 
@@ -227,7 +227,7 @@ class TestMissingPrice:
         assert inv["total"] == 600.0 and inv["number"]
 
     def test_draft_with_missing_price(self, s, customer):
-        r = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "status": "draft",
+        r = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "status": "draft", "made_by": "QA Test",
                    "items": [{"qty": 1, "category": "Ribbon", "size": "1370x150", "unit_price": 0}]})
         assert r.status_code == 200 and r.json()["number"] is None
         # issuing that draft is rejected
@@ -267,15 +267,13 @@ class TestPayments:
         pid = p2.json()["id"]
         assert s.post(f"{API}/payments/{pid}/reverse", json={"reason": ""}).status_code == 400
         reverse_body = {"reason": "TEST bounced"}
-        assert s.post(f"{API}/payments/{pid}/reverse", json=reverse_body).status_code == 403
-        reverse_body["supervisor_authorization"] = authorize_invoice_action(s, inv["id"], "reverse_payment", pid)
         assert s.post(f"{API}/payments/{pid}/reverse", json=reverse_body).status_code == 200
         g = s.get(f"{API}/invoices/{inv['id']}").json()
         assert g["amount_paid"] == 50 and g["outstanding"] == 150 and g["status"] == "partially_paid"
         assert s.post(f"{API}/payments/{pid}/reverse", json={"reason": "again"}).status_code == 400
 
     def test_pay_draft_400(self, s, customer):
-        d = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "status": "draft",
+        d = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "status": "draft", "made_by": "QA Test",
                    "items": [{"qty": 1, "description": "x", "unit_price": 10}]}).json()
         assert s.post(f"{API}/invoices/{d['id']}/payments", json={"amount": 5}).status_code == 400
         s.delete(f"{API}/invoices/{d['id']}")
@@ -311,19 +309,15 @@ class TestVoidDelete:
         p = s.post(f"{API}/invoices/{inv['id']}/payments", json={"amount": 10}).json()
         assert s.post(f"{API}/invoices/{inv['id']}/void", json={"reason": "TEST"}).status_code == 400
         reverse_body = {"reason": "TEST"}
-        assert s.post(f"{API}/payments/{p['id']}/reverse", json=reverse_body).status_code == 403
-        reverse_body["supervisor_authorization"] = authorize_invoice_action(s, inv["id"], "reverse_payment", p["id"])
         assert s.post(f"{API}/payments/{p['id']}/reverse", json=reverse_body).status_code == 200
         void_body = {"reason": "TEST void"}
-        assert s.post(f"{API}/invoices/{inv['id']}/void", json=void_body).status_code == 403
-        void_body["supervisor_authorization"] = authorize_invoice_action(s, inv["id"], "void")
         r = s.post(f"{API}/invoices/{inv['id']}/void", json=void_body)
         assert r.status_code == 200
         assert s.get(f"{API}/invoices/{inv['id']}").json()["status"] == "void"
         assert s.post(f"{API}/invoices/{inv['id']}/payments", json={"amount": 1}).status_code == 400
 
     def test_archive_restore_draft(self, s, customer):
-        d = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "status": "draft", "items": []}).json()
+        d = s.post(f"{API}/invoices", json={"customer_id": customer["id"], "status": "draft", "made_by": "QA Test", "items": []}).json()
         archived = s.delete(f"{API}/invoices/{d['id']}")
         assert archived.status_code == 200 and archived.json()["archived"] is True
         assert all(i["id"] != d["id"] for i in s.get(f"{API}/invoices").json())
@@ -331,7 +325,7 @@ class TestVoidDelete:
         assert next(i for i in retained if i["id"] == d["id"])["archived"] is True
         assert s.get(f"{API}/invoices/{d['id']}").json()["id"] == d["id"]
         assert s.post(f"{API}/invoices/{d['id']}/restore").status_code == 200
-        assert s.get(f"{API}/invoices/{d['id']}").status_code == 404
+        assert s.get(f"{API}/invoices/{d['id']}").status_code == 200
 
 
 # --- Stock ledger (tests 15,16)
@@ -347,7 +341,7 @@ class TestStockLedger:
         m = s.post(f"{API}/stock/{sid}/movements", json={"type": "adjustment_in", "quantity": 5, "reason": "TEST count"})
         assert m.status_code == 200
         assert stock_current(s, sid) == 20
-        assert s.post(f"{API}/stock/{sid}/movements", json={"type": "damage", "quantity": 16, "reason": "x"}).status_code == 400
+        assert s.post(f"{API}/stock/{sid}/movements", json={"type": "damage", "quantity": 21, "reason": "x"}).status_code == 400
         assert stock_current(s, sid) == 20
         assert s.post(f"{API}/stock/{sid}/movements", json={"type": "damage", "quantity": 2, "reason": "TEST"}).status_code == 200
         assert s.post(f"{API}/stock/{sid}/movements", json={"type": "return", "quantity": 1, "reason": "TEST"}).status_code == 200
@@ -358,7 +352,7 @@ class TestStockLedger:
         assert rv.status_code == 200
         assert stock_current(s, sid) == 13
         assert s.post(f"{API}/stock/movements/{mid}/reverse", json={"reason": "again"}).status_code == 400
-        assert stock_current(s, sid) == 8
+        assert stock_current(s, sid) == 13
         # opening locked
         r = s.put(f"{API}/stock/{sid}", json={"product": st["product"], "size": st["size"], "opening": 99, "threshold": 1})
         assert r.status_code == 400
@@ -440,8 +434,6 @@ class TestCosts:
         v = next(x for x in s.get(f"{API}/vehicles").json() if x["name"] == "Hino 300")
         before = self._week_exp(s)
         record_body = {"type": "repair", "description": "TEST_repair", "amount": 500, "status": "Done"}
-        assert s.post(f"{API}/vehicles/{v['id']}/records", json=record_body).status_code == 403
-        record_body["supervisor_authorization"] = authorize_fleet_action(s, "vehicle_record", "create", target_id=v["id"])
         r = s.post(f"{API}/vehicles/{v['id']}/records", json=record_body)
         assert r.status_code == 200
         assert round(self._week_exp(s) - before, 2) == 500
@@ -451,9 +443,7 @@ class TestCosts:
         # clean: cancel the done record
         cancel_body = {"reason": "TEST cleanup"}
         rid = r.json()["id"]
-        assert s.post(f"{API}/vehicles/records/{rid}/cancel", json=cancel_body).status_code == 403
-        cancel_body["supervisor_authorization"] = authorize_fleet_action(s, "vehicle_record", "cancel", resource_id=rid)
-        s.post(f"{API}/vehicles/records/{rid}/cancel", json=cancel_body)
+        assert s.post(f"{API}/vehicles/records/{rid}/cancel", json=cancel_body).status_code == 200
         assert round(self._week_exp(s) - before, 2) == 0
 
     def test_spare_part_once(self, s):
@@ -474,34 +464,37 @@ class TestCosts:
         exps = [e for e in s.get(f"{API}/expenses").json() if e.get("source_key") == f"sparepart:{p['id']}"]
         assert len(exps) == 1 and exps[0]["amount"] == 120 and exps[0]["category"] == "Vehicle"
         assert round(self._week_exp(s) - before, 2) == 120
-        # linked expense cannot be voided twice / edited directly
+        # Linked expenses cannot be edited outside Fleet; owners can void them with a reason.
+        edit_body = {
+            "description": "TEST linked edit", "amount": 120, "category": "Vehicle",
+            "edit_reason": "TEST direct edit",
+        }
+        assert s.put(f"{API}/expenses/{exps[0]['id']}", json=edit_body).status_code == 400
         void_body = {"reason": "TEST cleanup"}
-        assert s.post(f"{API}/expenses/{exps[0]['id']}/void", json=void_body).status_code == 403
-        void_body["supervisor_authorization"] = authorize_expense_action(s, exps[0]["id"], "void")
         assert s.post(f"{API}/expenses/{exps[0]['id']}/void", json=void_body).status_code == 200
+        assert s.post(f"{API}/expenses/{exps[0]['id']}/void", json=void_body).status_code == 400
 
     def test_expense_rules(self, s):
         assert s.post(f"{API}/expenses", json={"description": "TEST_bad", "amount": 0}).status_code == 400
         assert s.post(f"{API}/expenses", json={"description": "TEST_neg", "amount": -5}).status_code == 400
         before = self._week_exp(s)
         expense_body = {"description": "TEST_exp", "amount": 77.7}
-        assert s.post(f"{API}/expenses", json=expense_body).status_code == 403
-        expense_body["supervisor_authorization"] = authorize_expense_action(s, None, "create")
-        e = s.post(f"{API}/expenses", json=expense_body).json()
+        created = s.post(f"{API}/expenses", json=expense_body)
+        assert created.status_code == 200, created.text
+        e = created.json()
         assert round(self._week_exp(s) - before, 2) == 77.7
         assert s.delete(f"{API}/expenses/{e['id']}").status_code == 400
         assert s.post(f"{API}/expenses/{e['id']}/void", json={"reason": ""}).status_code == 400
         void_body = {"reason": "TEST"}
-        assert s.post(f"{API}/expenses/{e['id']}/void", json=void_body).status_code == 403
-        void_body["supervisor_authorization"] = authorize_expense_action(s, e["id"], "void")
         assert s.post(f"{API}/expenses/{e['id']}/void", json=void_body).status_code == 200
+        assert s.post(f"{API}/expenses/{e['id']}/void", json=void_body).status_code == 400
         assert round(self._week_exp(s) - before, 2) == 0
         assert all(x["id"] != e["id"] for x in s.get(f"{API}/expenses").json())
 
     def test_profit_shape(self, s):
         r = s.get(f"{API}/reports/profit").json()
         for k in ("today", "week", "month"):
-            assert r[k]["label"] == "Estimated cash result — incomplete cost data"
+            assert r[k]["label"] == "Estimated result — payments received minus recorded expenses and buyings"
         ws = datetime.fromisoformat(r["week_start"])
         assert ws.weekday() == 0
         assert r["week_start"] <= datetime.now(TZ).date().isoformat()

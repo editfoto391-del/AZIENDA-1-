@@ -9,8 +9,8 @@ API = f"{BASE_URL}/api"
 ADMIN_EMAIL = "2j2skp87z8@privaterelay.appleid.com"
 ADMIN_PW = "iqfoam2026"
 
-mc = MongoClient("mongodb://localhost:27017")
-mdb = mc["test_database"]
+mc = MongoClient(os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
+mdb = mc[os.environ.get("DB_NAME", "test_database")]
 
 
 @pytest.fixture(scope="module")
@@ -31,7 +31,10 @@ def google_session():
     tok = f"test_session_{uuid.uuid4().hex}"
     exp_tok = f"test_session_expired_{uuid.uuid4().hex}"
     email = f"test.user.{uuid.uuid4().hex[:6]}@example.com"
-    mdb.users.insert_one({"id": uid, "email": email, "name": "Test User", "role": "admin", "created_at": datetime.now(timezone.utc)})
+    mdb.users.insert_one({
+        "id": uid, "email": email, "name": "Test User", "role": "admin",
+        "company_roles": {"superiqfoam": "admin"}, "created_at": datetime.now(timezone.utc),
+    })
     mdb.user_sessions.insert_one({"user_id": uid, "session_token": tok, "expires_at": datetime.now(timezone.utc) + timedelta(days=7), "created_at": datetime.now(timezone.utc)})
     mdb.user_sessions.insert_one({"user_id": uid, "session_token": exp_tok, "expires_at": datetime.now(timezone.utc) - timedelta(hours=1), "created_at": datetime.now(timezone.utc)})
     yield {"uid": uid, "tok": tok, "exp": exp_tok, "email": email}
@@ -184,9 +187,9 @@ class TestRealStock:
         assert len(st) == 56
         assert sum(x["current"] for x in st) == 5155
         assert not [x for x in st if x["product"].startswith("TEST_")]
-        assert {x["product"] for x in st} == {"Simple", "Ribbon", "Strong Boy", "Uncovered", "Candy", "Black"}
+        assert {x["product"] for x in st} == {"Simple", "Ribbon Pink", "Ribbon Black", "Strong Boy", "Uncovered", "Candy"}
 
-    @pytest.mark.parametrize("prod,size,qty", [("Simple", "910x100", 660), ("Black", "1070x100", 135), ("Ribbon", "1070x120", 105),
+    @pytest.mark.parametrize("prod,size,qty", [("Simple", "910x100", 660), ("Ribbon Black", "1070x100", 135), ("Ribbon Pink", "1070x120", 105),
                                                ("Strong Boy", "1070x125", 10), ("Uncovered", "910x100", 30), ("Candy", "760x100", 10)])
     def test_stock_values(self, H, prod, size, qty):
         st = requests.get(f"{API}/stock", headers=H).json()

@@ -63,29 +63,19 @@ def test_expense_crud_and_profit(client):
     assert round(before["week"]["profit"] - after["week"]["profit"], 2) == 123.45
     assert round(after["total_expenses"] - before["total_expenses"], 2) == 123.45
     edit_payload = {"description": "TEST_diesel2", "amount": 200, "category": "Fuel", "date": e["date"],
-                    "edit_reason": "Correct fuel expense", "supervisor_authorization": ""}
-    assert client.put(f"{BASE_URL}/api/expenses/{e['id']}", json=edit_payload).status_code == 403
-    edit_approval = client.post(f"{BASE_URL}/api/expenses/{e['id']}/authorize-action", json={
-        "password": PASSWORD, "action": "edit",
-    })
-    assert edit_approval.status_code == 200
-    edit_payload["supervisor_authorization"] = edit_approval.json()["authorization_id"]
+                    "edit_reason": "Correct fuel expense"}
     u = client.put(f"{BASE_URL}/api/expenses/{e['id']}", json=edit_payload)
     assert u.status_code == 200 and u.json()["amount"] == 200
     lst = client.get(f"{BASE_URL}/api/expenses").json()
     assert any(x["id"] == e["id"] and x["description"] == "TEST_diesel2" for x in lst)
     assert client.delete(f"{BASE_URL}/api/expenses/{e['id']}").status_code == 400
-    void_approval = client.post(f"{BASE_URL}/api/expenses/{e['id']}/authorize-action", json={
-        "password": PASSWORD, "action": "void",
-    })
-    assert void_approval.status_code == 200
     void = client.post(f"{BASE_URL}/api/expenses/{e['id']}/void", json={
-        "reason": "TEST cleanup", "supervisor_authorization": void_approval.json()["authorization_id"],
+        "reason": "TEST cleanup",
     })
     assert void.status_code == 200
     assert not any(x["id"] == e["id"] for x in client.get(f"{BASE_URL}/api/expenses").json())
     final = client.get(f"{BASE_URL}/api/reports/profit").json()
-    assert final["week"]["expenses"] == before["week"]["expenses"]
+    assert round(final["week"]["expenses"] - before["week"]["expenses"], 2) == 0
 
 
 def test_expense_edit_nonexistent_404(client):
@@ -103,7 +93,7 @@ def test_expense_negative_amount_rejected(client):
 # --- Fleet
 def test_fleet_seeded(client):
     names = {v["name"] for v in client.get(f"{BASE_URL}/api/vehicles").json()}
-    for n in ("Bakkie", "Disk", "Truck"):
+    for n in ("Hino 300", "Hino 500", "Mighty Hyundai Truck", "Trailer (1)", "Trailer (2)", "Trailer (3)"):
         assert n in names
     assert len(names) >= 6
 
@@ -174,8 +164,6 @@ def test_vehicle_records_and_profit(client):
     ids = []
     for t, amt in (("expense", 100), ("repair", 50), ("maintenance", 25)):
         payload = {"type": t, "description": f"TEST_{t}", "amount": amt}
-        assert client.post(f"{BASE_URL}/api/vehicles/{v['id']}/records", json=payload).status_code == 403
-        payload["supervisor_authorization"] = fleet_authorization(client, "vehicle_record", "create", target_id=v["id"])
         r = client.post(f"{BASE_URL}/api/vehicles/{v['id']}/records", json=payload)
         assert r.status_code == 200 and r.json()["vehicle_name"] == v["name"]
         ids.append(r.json()["id"])
@@ -185,11 +173,12 @@ def test_vehicle_records_and_profit(client):
     assert round(after["week"]["expenses"] - before["week"]["expenses"], 2) == 175
     for i in ids:
         cancel = {"reason": "TEST cleanup"}
-        assert client.post(f"{BASE_URL}/api/vehicles/records/{i}/cancel", json=cancel).status_code == 403
-        cancel["supervisor_authorization"] = fleet_authorization(client, "vehicle_record", "cancel", resource_id=i)
         assert client.post(f"{BASE_URL}/api/vehicles/records/{i}/cancel", json=cancel).status_code == 200
-    all_ids = [x["id"] for x in client.get(f"{BASE_URL}/api/vehicles/records/all").json()]
-    assert not any(i in all_ids for i in ids)
+    all_records = client.get(f"{BASE_URL}/api/vehicles/records/all").json()
+    assert all(
+        next(x for x in all_records if x["id"] == record_id)["status"] == "Cancelled"
+        for record_id in ids
+    )
 
 
 # --- Spare parts
@@ -204,8 +193,8 @@ def test_spareparts_flow(client):
         payload["supervisor_authorization"] = fleet_authorization(client, "spare_part", "edit", resource_id=p["id"])
         u = client.put(f"{BASE_URL}/api/spareparts/{p['id']}", json=payload)
         assert u.json()["status"] == st
-    assert client.delete(f"{BASE_URL}/api/spareparts/{p['id']}").status_code == 200
-    assert not any(x["id"] == p["id"] for x in client.get(f"{BASE_URL}/api/spareparts").json())
+    assert client.delete(f"{BASE_URL}/api/spareparts/{p['id']}").status_code == 400
+    assert any(x["id"] == p["id"] for x in client.get(f"{BASE_URL}/api/spareparts").json())
 
 
 # --- Orders
@@ -237,7 +226,10 @@ def test_order_reference_unique_after_delete(client):
 # --- Core flow regression
 def test_core_invoice_payment_dispatch(client):
     c = client.post(f"{BASE_URL}/api/customers", json={"name": "TEST_Customer"}).json()
-    inv = client.post(f"{BASE_URL}/api/invoices", json={"customer_id": c["id"], "items": [{"qty": 2, "description": "foam", "unit_price": 100}]}).json()
+    inv = client.post(f"{BASE_URL}/api/invoices", json={
+        "customer_id": c["id"], "made_by": "QA Test",
+        "items": [{"qty": 2, "description": "foam", "unit_price": 100}],
+    }).json()
     assert inv["status"] == "draft" and inv["total"] == 200
     iss = client.post(f"{BASE_URL}/api/invoices/{inv['id']}/issue").json()
     assert iss["number"] and iss["status"] == "issued"
@@ -269,6 +261,8 @@ def test_core_invoice_payment_dispatch(client):
         "reason": "TEST cleanup", "supervisor_authorization": void_approval,
     })
     assert void.status_code == 200 and void.json()["status"] == "void"
+    assert client.delete(f"{BASE_URL}/api/invoices/{inv['id']}").status_code == 200
+    assert client.delete(f"{BASE_URL}/api/customers/{c['id']}").status_code == 200
 
 
 # --- Attendance summary

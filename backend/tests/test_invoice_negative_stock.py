@@ -36,6 +36,13 @@ class FakeDatabase:
     def __getitem__(self, collection):
         return getattr(self, collection)
 
+class NoopAsyncContext:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
 
 def test_invoice_negative_stock_requires_confirmation_and_is_scoped(monkeypatch):
     fake_db = FakeDatabase()
@@ -53,6 +60,7 @@ def test_invoice_negative_stock_requires_confirmation_and_is_scoped(monkeypatch)
 
     monkeypatch.setattr(server, "insert", insert)
     monkeypatch.setattr(server, "log_audit", no_audit)
+    monkeypatch.setattr(server, "StockLock", lambda _ids: NoopAsyncContext())
     stock = fake_db.stock.documents[0]
     deduction = [{
         "stock_id": "stock-1", "product": "Simple", "size": "1070x100",
@@ -95,6 +103,16 @@ def test_invoice_negative_stock_requires_confirmation_and_is_scoped(monkeypatch)
         with pytest.raises(HTTPException) as generic_movement:
             await server.post_movement(stock, "invoice", 1, user)
         assert generic_movement.value.status_code == 400
+
+        zero_movement = await server.add_movement(
+            "stock-1", server.MovementIn(type="adjustment_out", quantity=0), user,
+        )
+        assert zero_movement["quantity"] == 0
+        with pytest.raises(HTTPException) as negative_movement:
+            await server.add_movement(
+                "stock-1", server.MovementIn(type="adjustment_out", quantity=-1), user,
+            )
+        assert negative_movement.value.status_code == 400
 
     asyncio.run(scenario())
 

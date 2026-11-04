@@ -22,7 +22,10 @@ def H():
 @pytest.fixture(scope="module")
 def gsess():
     uid, tok = f"test-user-{uuid.uuid4().hex[:8]}", f"test_session_{uuid.uuid4().hex}"
-    mdb.users.insert_one({"id": uid, "email": f"test.user.{uid}@example.com", "name": "Test User", "role": "admin"})
+    mdb.users.insert_one({
+        "id": uid, "email": f"test.user.{uid}@example.com", "name": "Test User",
+        "role": "admin", "company_roles": {"superiqfoam": "admin"},
+    })
     mdb.user_sessions.insert_one({"user_id": uid, "session_token": tok, "expires_at": datetime.now(timezone.utc) + timedelta(days=7)})
     yield {"uid": uid, "tok": tok}
     mdb.users.delete_many({"id": uid}); mdb.user_sessions.delete_many({"user_id": uid})
@@ -63,6 +66,23 @@ class TestAuth:
         r = requests.get(f"{API}/auth/me", cookies={"session_token": gsess["tok"]})
         assert r.status_code == 200 and r.json()["id"] == gsess["uid"]
 
+    def test_session_tokens_require_company_membership(self):
+        uid, tok = f"test-user-{uuid.uuid4().hex[:8]}", f"test_session_{uuid.uuid4().hex}"
+        mdb.users.insert_one({
+            "id": uid, "email": f"test.user.{uid}@example.com", "name": "Unassigned User",
+            "role": "user",
+        })
+        mdb.user_sessions.insert_one({
+            "user_id": uid, "session_token": tok,
+            "expires_at": datetime.now(timezone.utc) + timedelta(days=1),
+        })
+        try:
+            assert requests.get(f"{API}/auth/me", headers={"Authorization": f"Bearer {tok}"}).status_code == 403
+            assert requests.get(f"{API}/auth/me", cookies={"session_token": tok}).status_code == 403
+        finally:
+            mdb.user_sessions.delete_many({"user_id": uid})
+            mdb.users.delete_many({"id": uid})
+
     def test_logout_clears_cookie(self):
         uid, tok = f"test-user-{uuid.uuid4().hex[:8]}", f"test_session_{uuid.uuid4().hex}"
         mdb.users.insert_one({"id": uid, "email": f"test.user.{uid}@example.com", "name": "T", "role": "admin"})
@@ -95,8 +115,8 @@ class TestData:
             it = next(x for x in st if x["product"] == p and x["size"] == s)
             return it.get("current", it.get("current_stock", it.get("on_hand")))
         assert cur("Simple", "910x100") == 660
-        assert cur("Black", "1070x100") == 135
-        assert cur("Ribbon", "1070x120") == 105
+        assert cur("Ribbon Black", "1070x100") == 135
+        assert cur("Ribbon Pink", "1070x120") == 105
 
     def test_customers(self, H):
         cs = requests.get(f"{API}/customers", headers=H).json()
@@ -113,8 +133,8 @@ class TestData:
         inv = [i for i in requests.get(f"{API}/invoices", headers=H).json() if not (i.get("reference") or "").startswith("TEST_")]
         assert len(inv) == 26 and all(i.get("opening_balance") for i in inv)
         nums = sorted(i["number"] for i in inv)
-        assert nums == [f"IQF-2026-{n:04d}" for n in range(1, 27)]
-        assert next(i for i in inv if i["number"] == "IQF-2026-0001")["customer_name"] == "AB WAKA WAKA"
+        assert nums == [f"{n:02d}" for n in range(1, 27)]
+        assert next(i for i in inv if i["number"] == "01")["customer_name"] == "AB WAKA WAKA"
 
     def test_ling_summary(self, H):
         c = next(c for c in requests.get(f"{API}/customers", headers=H).json() if c["name"] == "LING UMTHATHA")
@@ -171,7 +191,7 @@ def supervisor_authorization(H, iid, action="edit", target_id=None):
 class TestInvoiceEdit:
     def test_edit_flow(self, H):
         c = next(c for c in requests.get(f"{API}/customers", headers=H).json() if c["name"] == "ABBAS QUMBO")
-        base = {"customer_id": c["id"], "zone": 1, "reference": "TEST_backend_edit",
+        base = {"customer_id": c["id"], "zone": 1, "made_by": "QA Test", "reference": "TEST_backend_edit",
                 "items": [{"qty": 2, "category": "Standard", "size": "910x100", "unit_price": 171}], "status": "issued"}
         r = requests.post(f"{API}/invoices", json=base, headers=H)
         assert r.status_code == 200, r.text
@@ -180,8 +200,6 @@ class TestInvoiceEdit:
         # flag as opening balance temporarily to verify it is preserved
         mdb.invoices.update_one({"id": iid}, {"$set": {"opening_balance": True}})
         edit_body = {**base, "items": [{**base["items"][0], "qty": 3}], "edit_reason": "test qty"}
-        assert requests.put(f"{API}/invoices/{iid}", json=edit_body, headers=H).status_code == 403
-        edit_body["supervisor_authorization"] = supervisor_authorization(H, iid)
         r = requests.put(f"{API}/invoices/{iid}", json=edit_body, headers=H)
         assert r.status_code == 200, r.text
         e = r.json()
@@ -192,12 +210,13 @@ class TestInvoiceEdit:
         assert "items" in fields and "total" in fields and fields["total"]["old"] == 342 and fields["total"]["new"] == 513
         g = requests.get(f"{API}/invoices/{iid}", headers=H).json()
         assert g["total"] == 513 and g["number"] == num
-        edit_body = {**base, "opening_balance": False, "edit_reason": "convert balance",
+        edit_body = {**base, "items": [{**base["items"][0], "qty": 3}],
+                 "opening_balance": False, "edit_reason": "convert balance",
                  "supervisor_authorization": supervisor_authorization(H, iid)}
         r = requests.put(f"{API}/invoices/{iid}", json=edit_body, headers=H)
         assert r.status_code == 200, r.text
         assert not r.json().get("opening_balance")
-        mdb.invoices.update_one({"id": iid}, {"$unset": {"opening_balance": ""}})
+        assert not requests.get(f"{API}/invoices/{iid}", headers=H).json().get("opening_balance")
         # pay 400, then edit below paid
         p = requests.post(f"{API}/invoices/{iid}/payments", json={"amount": 400}, headers=H)
         assert p.status_code == 200, p.text
@@ -208,12 +227,8 @@ class TestInvoiceEdit:
         # reverse payment, void, edit voided
         pid = p.json()["id"]
         reverse_body = {"reason": "TEST cleanup"}
-        assert requests.post(f"{API}/payments/{pid}/reverse", json=reverse_body, headers=H).status_code == 403
-        reverse_body["supervisor_authorization"] = supervisor_authorization(H, iid, "reverse_payment", pid)
         assert requests.post(f"{API}/payments/{pid}/reverse", json=reverse_body, headers=H).status_code == 200
         void_body = {"reason": "TEST cleanup"}
-        assert requests.post(f"{API}/invoices/{iid}/void", json=void_body, headers=H).status_code == 403
-        void_body["supervisor_authorization"] = supervisor_authorization(H, iid, "void")
         assert requests.post(f"{API}/invoices/{iid}/void", json=void_body, headers=H).status_code == 200
         r = requests.put(f"{API}/invoices/{iid}", json={**base, "edit_reason": "x"}, headers=H)
         assert r.status_code == 400 and "void" in r.text.lower()

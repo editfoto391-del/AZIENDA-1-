@@ -908,7 +908,7 @@ export default function Dashboard() {
       <Card className="premium-card p-5">
         <h3 className="font-bold text-slate-800 mb-4 font-display">Quick Actions</h3>
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
-          {QUICK.map((q) => (
+          {QUICK.filter((q) => !(user?.company_id === MANUFACTURING_COMPANY_ID && q.to === "/production?add=1")).map((q) => (
             <motion.button key={q.label} whileHover={{ y: -2, scale: 1.01 }} whileTap={{ scale: 0.985 }} transition={{ type: "spring", stiffness: 430, damping: 24, mass: 0.5 }} onClick={() => nav(q.to)} data-testid={`quick-${q.label.toLowerCase().replace(/\s/g, "-")}`}
               className="premium-button flex flex-col items-center gap-2 rounded-lg border border-border bg-white/70 p-4 hover:border-primary/50 hover:bg-accent/35 transition-colors">
               <q.icon size={19} strokeWidth={1.8} className="text-primary" />

@@ -40,7 +40,7 @@ const NAV_GROUPS = [
   { label: "COMPANY INVENTORY", collapsible: true, items: [
     { to: "/company-inventory", label: "Company Inventory", icon: Boxes, section: "stock" },
   ] },
-  { label: "PRODUCTION", collapsible: true, companyIds: ["superiqfoam", "iqfoam-manufactoring"], items: [
+  { label: "PRODUCTION", collapsible: true, companyIds: ["superiqfoam"], items: [
     { to: "/production", label: "Production", icon: Factory, section: "production" },
     { to: "/warehouses/chemical-inventory", label: "Chemicals Quantity", icon: FlaskConical, section: "warehouses", companyId: "superiqfoam" },
     { to: "/warehouses/chemical", label: "Chemical Usage Log", icon: FlaskConical, section: "warehouses", companyId: "superiqfoam" },
