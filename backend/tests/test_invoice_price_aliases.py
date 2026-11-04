@@ -45,15 +45,40 @@ class InvoiceCollection:
         return dict(self.invoice)
 
 
-def resolve(monkeypatch, records, category, size="1000x1000", company="iqfoam-whole-sallers"):
+def resolve(monkeypatch, records, category, size="1000x1000", company="iqfoam-whole-sallers", zone=1):
     prices = PriceCollection(records)
     monkeypatch.setattr(server, "db", SimpleNamespace(prices=prices))
     token = server.active_company_id.set(company)
     try:
-        result = asyncio.run(server.resolve_price(1, category, size))
+        result = asyncio.run(server.resolve_price(zone, category, size))
     finally:
         server.active_company_id.reset(token)
     return result, prices.queries
+
+
+@pytest.mark.parametrize("company", ["iqfoam-whole-sallers", "iqfoam-manufactoring"])
+def test_unified_company_price_lookup_uses_its_own_zone_one_catalog(monkeypatch, company):
+    result, queries = resolve(
+        monkeypatch,
+        [{
+            "zone": 1,
+            "category": "Ribbon Black",
+            "size": "1000x1000",
+            "active": True,
+            "confirmed": True,
+            "price": 125,
+        }],
+        "Black fabric",
+        company=company,
+        zone=2,
+    )
+
+    assert result == {"found": True, "price": 125}
+    assert queries == [{
+        "zone": 1,
+        "category": "Ribbon Black",
+        "size": "1000x1000",
+    }]
 
 
 def queried_categories(queries):
