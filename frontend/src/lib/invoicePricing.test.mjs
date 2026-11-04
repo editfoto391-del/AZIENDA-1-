@@ -10,6 +10,7 @@ import {
   isManualInvoicePrice,
   lookupInvoicePrice,
   resolveInvoiceLineForIssue,
+  sameInvoicePriceCategory,
 } from "./invoicePricing.mjs";
 
 const unifiedPrices = [
@@ -136,4 +137,65 @@ test("manual-only ribbon dimensions stay manual outside unified company profiles
     assert.ok(isManualInvoicePrice(category, "1370 × 150", false));
     assert.ok(!isManualInvoicePrice(category, "1370x150", true));
   }
+});
+
+
+test("custom stock categories match catalog prices regardless of letter casing", () => {
+  const customPrice = {
+    zone: 1,
+    category: "Premium Foam",
+    size: "910x100",
+    price: 275,
+    active: true,
+    confirmed: true,
+  };
+
+  assert.equal(sameInvoicePriceCategory("PREMIUM FOAM", "premium foam", false), true);
+  assert.deepEqual(
+    lookupInvoicePrice(1, "PREMIUM FOAM", "910 × 100", false, [customPrice]),
+    { price: 275, needsConfig: false },
+  );
+  assert.deepEqual(
+    invoiceSizesFor(1, "PREMIUM FOAM", false, [customPrice], [
+      { product: "premium foam", size: "1070x100" },
+    ]),
+    ["910x100", "1070x100"],
+  );
+});
+
+test("case-only custom category variants appear once in invoice category selectors", () => {
+  const categories = invoiceCategoriesFor(1, false, [{
+    zone: 1,
+    category: "Premium Foam",
+    size: "910x100",
+    price: 275,
+    active: true,
+    confirmed: true,
+  }], [
+    { product: "PREMIUM FOAM", size: "1070x100" },
+  ]);
+
+  assert.equal(categories.filter((category) => category.toLowerCase() === "premium foam").length, 1);
+});
+
+test("a case-variant existing stock price does not block invoice issue", () => {
+  const item = {
+    category: "premium foam",
+    size: "910x100",
+    qty: 4,
+    unit_price: 0,
+    price_override: false,
+  };
+
+  assert.deepEqual(
+    resolveInvoiceLineForIssue(item, 1, false, [{
+      zone: 1,
+      category: "PREMIUM FOAM",
+      size: "910x100",
+      price: 275,
+      active: true,
+      confirmed: true,
+    }]),
+    { unitPrice: 275, needsConfig: false },
+  );
 });
