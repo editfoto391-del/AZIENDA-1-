@@ -55,6 +55,7 @@ export default function InvoiceEditor({ express = false }) {
   const [pendingSave, setPendingSave] = useState(null);
   const [pendingStockSubmit, setPendingStockSubmit] = useState(null);
   const [pendingNegativeStock, setPendingNegativeStock] = useState(null);
+  const [pendingUnmatchedStock, setPendingUnmatchedStock] = useState(null);
   const [downloadIssuedDraft, setDownloadIssuedDraft] = useState(false);
   const docRef = useRef(null);
   const saveLockRef = useRef(false);
@@ -382,6 +383,58 @@ export default function InvoiceEditor({ express = false }) {
   const invoiceItems = (inv.items || []).filter((item) => !isOpeningBalancePlaceholder(item));
   const openingBalanceOnly = !!inv.opening_balance && invoiceItems.length === 0;
 
+  const requestMissingStock = (detail, retry) => {
+    const lineNumber = Number(detail.match(/^Stock item not found for invoice line (\d+):/)?.[1]);
+    const invoiceLines = inv.items.filter((item) => item.size || item.description);
+    const item = Number.isInteger(lineNumber) ? invoiceLines[lineNumber - 1] : null;
+    if (!item?.category?.trim() || !item.size?.trim()) {
+      toast.error(detail);
+      return;
+    }
+    const product = item.category.trim().toLowerCase() === "candy"
+      ? "Candy"
+      : invoicePriceCategory(item.category, unifiedPriceList);
+    setPendingUnmatchedStock({
+      detail,
+      product,
+      size: item.size.trim(),
+      unitPrice: String(item.unit_price ?? ""),
+      confirmed: false,
+      retry,
+    });
+  };
+
+  const addMissingStockProduct = async () => {
+    if (!pendingUnmatchedStock || busy) return;
+    if (user?.is_worker) {
+      toast.error("An administrator must add the product and selling price to stock");
+      return;
+    }
+    const price = Number(pendingUnmatchedStock.unitPrice);
+    if (pendingUnmatchedStock.unitPrice.trim() === "" || !Number.isFinite(price) || price < 0) {
+      toast.error("Enter a valid non-negative unit price");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.post("/stock", {
+        product: pendingUnmatchedStock.product,
+        size: pendingUnmatchedStock.size,
+        opening: 0,
+        threshold: 5,
+        selling_price: price,
+        zone: unifiedPriceList ? 1 : inv.zone,
+      });
+      setPendingUnmatchedStock(null);
+      window.dispatchEvent(new Event("erp:data-changed"));
+      toast.success(`${pendingUnmatchedStock.product} · ${pendingUnmatchedStock.size} saved to stock with zero opening quantity. Enter the verified quantity before issuing, or confirm negative stock if appropriate.`);
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const hasConfigIssue = inv.items.some((item) =>
     resolveInvoiceLineForIssue(item, inv.zone, unifiedPriceList, prices).needsConfig
   );
@@ -499,6 +552,8 @@ export default function InvoiceEditor({ express = false }) {
           items: detail.items || [],
           retry: () => save(status, false, downloadAfterSave, deductStock, true, customerId),
         });
+      } else if (deductStock && typeof detail === "string" && detail.startsWith("Stock item not found for invoice line")) {
+        requestMissingStock(detail, () => save(status, false, downloadAfterSave, false, false, customerId));
       } else toast.error(apiError(e));
     } finally { saveLockRef.current = false; setBusy(false); }
   };
@@ -541,6 +596,8 @@ export default function InvoiceEditor({ express = false }) {
           items: detail.items || [],
           retry: () => submitEdit(deductStock, reason, true, targetStatus),
         });
+      } else if (deductStock && typeof detail === "string" && detail.startsWith("Stock item not found for invoice line")) {
+        requestMissingStock(detail, () => submitEdit(false, reason, false, targetStatus));
       } else toast.error(apiError(e));
     } finally { saveLockRef.current = false; setBusy(false); }
   };
@@ -575,6 +632,8 @@ export default function InvoiceEditor({ express = false }) {
           items: detail.items || [],
           retry: () => issueWithStock(deductStock, action, true),
         });
+      } else if (deductStock && typeof detail === "string" && detail.startsWith("Stock item not found for invoice line")) {
+        requestMissingStock(detail, () => issueWithStock(false, action));
       } else toast.error(apiError(e));
     } finally { setBusy(false); }
   };
@@ -1155,6 +1214,54 @@ export default function InvoiceEditor({ express = false }) {
               Yes, proceed
             </Btn>
           </div>
+        </div>}
+      </Modal>
+      <Modal open={!!pendingUnmatchedStock} onClose={() => setPendingUnmatchedStock(null)} title="Invoice item not linked to stock">
+        {pendingUnmatchedStock && <div className="space-y-4">
+          {!pendingUnmatchedStock.confirmed ? <>
+            <p className="text-sm text-slate-700">
+              This product is not registered in stock: <strong>{pendingUnmatchedStock.product} · {pendingUnmatchedStock.size}</strong>. Do you want to add it?
+            </p>
+            <p className="text-sm text-amber-800">
+              The new item will start with zero quantity. Enter the verified quantity in Stock before issuing, or confirm negative stock if appropriate.
+            </p>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Btn variant="outline" disabled={busy} onClick={() => setPendingUnmatchedStock(null)} data-testid="invoice-cancel-unmatched-stock">
+                Cancel
+              </Btn>
+              <Btn disabled={busy} onClick={() => setPendingUnmatchedStock((current) => ({ ...current, confirmed: true }))} data-testid="invoice-confirm-add-missing-stock">
+                Yes, add it
+              </Btn>
+              <Btn variant="outline" disabled={busy} onClick={() => {
+                const retry = pendingUnmatchedStock.retry;
+                setPendingUnmatchedStock(null);
+                retry();
+              }} data-testid="invoice-issue-without-stock">
+                Issue without changing stock
+              </Btn>
+            </div>
+          </> : <>
+            <p className="text-sm text-slate-700">
+              Enter the selling unit price for <strong>{pendingUnmatchedStock.product} · {pendingUnmatchedStock.size}</strong>.
+            </p>
+            <Input
+              label="Unit price"
+              type="number"
+              min="0"
+              step="0.01"
+              value={pendingUnmatchedStock.unitPrice}
+              onChange={(event) => setPendingUnmatchedStock((current) => ({ ...current, unitPrice: event.target.value }))}
+              data-testid="invoice-missing-stock-unit-price"
+            />
+            <div className="flex flex-wrap justify-end gap-2">
+              <Btn variant="outline" disabled={busy} onClick={() => setPendingUnmatchedStock((current) => ({ ...current, confirmed: false }))}>
+                Back
+              </Btn>
+              <Btn disabled={busy} onClick={addMissingStockProduct} data-testid="invoice-save-missing-stock">
+                {busy ? "Saving..." : "Save product to stock"}
+              </Btn>
+            </div>
+          </>}
         </div>}
       </Modal>
     </div>
