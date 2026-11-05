@@ -72,11 +72,14 @@ class Cursor:
         self.documents = [deepcopy(document) for document in documents]
         self.projection = projection
 
-    def sort(self, field, direction):
-        self.documents.sort(
-            key=lambda item: item.get(field) or "",
-            reverse=direction < 0,
-        )
+    def sort(self, fields, direction=None):
+        if isinstance(fields, str):
+            fields = [(fields, direction)]
+        for field, order in reversed(fields):
+            self.documents.sort(
+                key=lambda item: item.get(field) or "",
+                reverse=order < 0,
+            )
         return self
 
     def skip(self, count):
@@ -226,6 +229,24 @@ def test_customer_search_and_active_filter_apply_before_page_and_count(monkeypat
     assert active_filtered_result["total"] == 28
     assert len(active_filtered_result["items"]) == 28
     assert len(collection.queries) == 6
+
+
+def test_pagination_uses_a_stable_id_tiebreaker():
+    collection = Collection([
+        {"id": "c-3", "name": "Same"},
+        {"id": "c-1", "name": "Same"},
+        {"id": "c-2", "name": "Same"},
+    ])
+
+    first_page = asyncio.run(server.find_page(
+        collection, {}, ("name", 1), 1, 2, {"_id": 0, "id": 1, "name": 1},
+    ))
+    second_page = asyncio.run(server.find_page(
+        collection, {}, ("name", 1), 2, 2, {"_id": 0, "id": 1, "name": 1},
+    ))
+
+    assert [item["id"] for item in first_page["items"]] == ["c-1", "c-2"]
+    assert [item["id"] for item in second_page["items"]] == ["c-3"]
 
 
 @pytest.mark.parametrize(

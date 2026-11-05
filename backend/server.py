@@ -2714,7 +2714,7 @@ async def listall(coll, flt=None, sort=None, limit=5000, session=None):
 async def find_page(collection, query, sort, page, page_size, projection):
     cursor = (
         collection.find(query, projection)
-        .sort(sort[0], sort[1])
+        .sort([(sort[0], sort[1]), ("id", 1)])
         .skip((page - 1) * page_size)
         .limit(page_size)
     )
@@ -14743,11 +14743,14 @@ async def initialize_company_profile_users():
 
 async def ensure_performance_indexes(database):
     indexes = {
-        "customers": [[("name", 1)], [("active", 1), ("name", 1)]],
+        "customers": [
+            [("name", 1), ("id", 1)],
+            [("active", 1), ("name", 1), ("id", 1)],
+        ],
         "invoices": [
-            [("created_at", -1)],
+            [("created_at", -1), ("id", 1)],
             [("customer_id", 1), ("created_at", -1)],
-            [("invoice_type", 1), ("created_at", -1)],
+            [("invoice_type", 1), ("created_at", -1), ("id", 1)],
         ],
         "payments": [
             [("customer_id", 1), ("created_at", -1)],
