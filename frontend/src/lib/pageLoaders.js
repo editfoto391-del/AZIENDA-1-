@@ -33,15 +33,15 @@ export const pageLoaders = {
 
 const pageData = {
   "/": ["/dashboard"],
-  "/customers": ["/customers"],
+  "/customers": [],
   "/suppliers": ["/suppliers"],
   "/client-payments": ["/customers"],
   "/express-client-payments": ["/customers", "/invoices?express=true"],
   "/buyings": ["/buyings"],
   "/intercompany": ["/intercompany/requests"],
-  "/invoices": ["/invoices"],
+  "/invoices": [],
   "/invoices/new": ["/customers", "/prices", "/settings"],
-  "/express-invoices": ["/invoices?express=true"],
+  "/express-invoices": [],
   "/express-invoices/new": ["/customers", "/prices", "/settings"],
   "/orders": ["/orders", "/customers", "/vehicles", "/stock", "/settings"],
   "/stock": ["/stock", "/stock/movements"],

@@ -23,13 +23,17 @@ export default function InvoiceList({ express = false }) {
       && user?.write_permissions?.[express ? "express-invoices" : "invoices"]?.delete !== "deny");
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const [list, setList] = useState([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [sp] = useSearchParams();
   const [q, setQ] = useState(sp.get("q") || "");
+  const [debouncedQ, setDebouncedQ] = useState(sp.get("q") || "");
   const [status, setStatus] = useState("all");
   const [zone, setZone] = useState("all");
   const [invoiceDate, setInvoiceDate] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [page, setPage] = useState(1);
+  const [reload, setReload] = useState(0);
   const nav = useNavigate();
   const [sel, setSel] = useState([]);
   const [viewOpen, setViewOpen] = useState(false);
@@ -37,27 +41,58 @@ export default function InvoiceList({ express = false }) {
   const [viewInvoice, setViewInvoice] = useState(null);
   const [viewCustomer, setViewCustomer] = useState(null);
   const [whatsappDraft, setWhatsappDraft] = useState(null);
-  const customersRequest = useRef(null);
-  const loadCustomers = () => {
-    if (!customersRequest.current) {
-      customersRequest.current = api.get("/customers").catch((error) => {
-        customersRequest.current = null;
-        throw error;
-      });
-    }
-    return customersRequest.current;
-  };
+  const detailRequest = useRef(0);
   const listPath = express ? "/express-invoices" : "/invoices";
-  const load = () => api.get(`/invoices?express=${express}${showArchived ? "&include_archived=true" : ""}`)
-    .then((d) => { setList(d); setSel([]); })
-    .catch((e) => toast.error(apiError(e)))
-    .finally(() => setLoading(false));
   useEffect(() => {
-    load();
-    loadCustomers().catch((error) => toast.error(apiError(error)));
-  }, [showArchived, express]);
+    const timer = window.setTimeout(() => {
+      setDebouncedQ(q);
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [q]);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setSel([]);
+    api.get("/invoices", {
+      express,
+      include_archived: showArchived,
+      page,
+      page_size: 50,
+      q: debouncedQ,
+      status,
+      zone: zone === "all" ? undefined : zone,
+      invoice_date: invoiceDate || undefined,
+    }).then((result) => {
+      if (!active) return;
+      setList(result.items);
+      setTotal(result.total);
+      const lastPage = Math.max(1, Math.ceil(result.total / 50));
+      if (page > lastPage) setPage(lastPage);
+    }).catch((error) => {
+      if (active) toast.error(apiError(error));
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [express, showArchived, page, debouncedQ, status, zone, invoiceDate, user?.company_id, reload]);
+
+  useEffect(() => {
+    setList([]);
+    setTotal(0);
+    setPage(1);
+    setSel([]);
+    setViewOpen(false);
+    setViewInvoice(null);
+    setViewCustomer(null);
+    detailRequest.current += 1;
+  }, [user?.company_id]);
+
+  const load = () => setReload((current) => current + 1);
 
   const view = async (id) => {
+    const requestId = ++detailRequest.current;
     setViewOpen(true);
     setViewLoading(true);
     setViewInvoice(null);
@@ -65,15 +100,20 @@ export default function InvoiceList({ express = false }) {
     let invoiceLoaded = false;
     try {
       const invoice = await api.get(`/invoices/${id}`);
+      if (detailRequest.current !== requestId) return;
       setViewInvoice(invoice);
       invoiceLoaded = true;
-      const customers = await loadCustomers();
-      setViewCustomer(customers.find((customer) => customer.id === invoice.customer_id) || null);
+      const customer = invoice.customer_deleted
+        ? null
+        : await api.get(`/customers/${invoice.customer_id}`);
+      if (detailRequest.current !== requestId) return;
+      setViewCustomer(customer);
     } catch (error) {
+      if (detailRequest.current !== requestId) return;
       toast.error(invoiceLoaded ? `Invoice loaded, but customer details could not be loaded: ${apiError(error)}` : apiError(error));
       if (!invoiceLoaded) setViewOpen(false);
     } finally {
-      setViewLoading(false);
+      if (detailRequest.current === requestId) setViewLoading(false);
     }
   };
 
@@ -131,9 +171,10 @@ export default function InvoiceList({ express = false }) {
   };
   const sendInvoiceViaWhatsApp = async (event, invoice) => {
     event.stopPropagation();
+    const requestId = ++detailRequest.current;
     try {
-      const customers = await loadCustomers();
-      const customer = customers.find((item) => item.id === invoice.customer_id);
+      const customer = await api.get(`/customers/${invoice.customer_id}`);
+      if (detailRequest.current !== requestId) return;
       const phone = normalizeWhatsAppPhone(customer?.phone);
       if (!phone) throw new Error("This customer does not have a valid phone number.");
 
@@ -160,18 +201,13 @@ export default function InvoiceList({ express = false }) {
     }
   };
 
-  const filtered = list.filter((i) => {
-    if (showArchived && !i.archived) return false;
-    const text = `${i.number || ""} ${i.customer_name}`.toLowerCase();
-    return text.includes(q.toLowerCase()) &&
-      (status === "all" || i.status === status) &&
-      (!invoiceDate || i.date === invoiceDate) &&
-      (zone === "all" || String(i.zone) === zone);
-  });
+  const pageCount = Math.max(1, Math.ceil(total / 50));
+  const rangeStart = total === 0 ? 0 : (page - 1) * 50 + 1;
+  const rangeEnd = Math.min(page * 50, total);
 
   return (
     <div>
-      <PageHeader title={express ? "Express Website Invoices" : "Invoices"} subtitle={loading ? "Loading invoices..." : `${list.length} invoices`}>
+      <PageHeader title={express ? "Express Website Invoices" : "Invoices"} subtitle={loading ? "Loading invoices..." : `Showing ${rangeStart}–${rangeEnd} of ${total} invoices`}>
         <Btn onClick={() => nav(`${listPath}/new`)} data-testid="new-invoice-btn"><Plus size={16} /> Create Invoice</Btn>
       </PageHeader>
 
@@ -181,16 +217,16 @@ export default function InvoiceList({ express = false }) {
           <input data-testid="invoice-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search number or customer..."
             className="w-full rounded-lg border border-input pl-9 pr-3 py-2.5 text-sm outline-none focus:border-primary" />
         </div>
-        <select value={status} onChange={(e) => setStatus(e.target.value)} className="rounded-lg border border-input px-3 py-2.5 text-sm" data-testid="invoice-status-filter">
+        <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }} className="rounded-lg border border-input px-3 py-2.5 text-sm" data-testid="invoice-status-filter">
           <option value="all">All Statuses</option>
           {Object.keys(STATUS_META).map((s) => <option key={s} value={s}>{STATUS_META[s].label}</option>)}
         </select>
-        <Input label="Invoice date" type="date" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} data-testid="invoice-date-filter" />
-        {!unifiedPriceList && <select value={zone} onChange={(e) => setZone(e.target.value)} className="rounded-lg border border-input px-3 py-2.5 text-sm">
+        <Input label="Invoice date" type="date" value={invoiceDate} onChange={(e) => { setInvoiceDate(e.target.value); setPage(1); }} data-testid="invoice-date-filter" />
+        {!unifiedPriceList && <select value={zone} onChange={(e) => { setZone(e.target.value); setPage(1); }} className="rounded-lg border border-input px-3 py-2.5 text-sm">
           <option value="all">All Zones</option><option value="1">Zone 1</option><option value="2">Zone 2</option>
         </select>}
         {isInvoiceOwner && <label className="flex items-center gap-2 text-sm text-slate-600">
-            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+            <input type="checkbox" checked={showArchived} onChange={(e) => { setShowArchived(e.target.checked); setPage(1); }} />
             Show archived invoices
         </label>}
       </Card>
@@ -201,13 +237,13 @@ export default function InvoiceList({ express = false }) {
       </div>}
 
       <Card className="overflow-hidden">
-        {loading ? <p className="p-6 text-sm text-slate-400" role="status">Loading invoices...</p> : filtered.length === 0 ? <Empty icon={FileText} title="No invoices found" hint="Create your first invoice to get started." /> : (
+        {loading ? <p className="p-6 text-sm text-slate-400" role="status">Loading invoices...</p> : list.length === 0 ? <Empty icon={FileText} title="No invoices found" hint="Create your first invoice to get started." /> : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                {canManageInvoices && <th className="px-3 py-3 w-8"><input type="checkbox" checked={sel.length > 0 && sel.length === filtered.filter((i) => !i.archived && i.status === "draft").length} onChange={(e) => setSel(e.target.checked ? filtered.filter((i) => !i.archived && i.status === "draft").map((i) => i.id) : [])} data-testid="select-all-invoices" /></th>}<th className="px-4 py-3 font-semibold">Invoice</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">Date</th><th className="px-4 font-semibold">Due</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold text-right">Total</th><th className="px-4 font-semibold text-right">Paid</th><th className="px-4 font-semibold text-right">Balance</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
+                {canManageInvoices && <th className="px-3 py-3 w-8"><input type="checkbox" checked={sel.length > 0 && sel.length === list.filter((i) => !i.archived && i.status === "draft").length} onChange={(e) => setSel(e.target.checked ? list.filter((i) => !i.archived && i.status === "draft").map((i) => i.id) : [])} data-testid="select-all-invoices" /></th>}<th className="px-4 py-3 font-semibold">Invoice</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">Date</th><th className="px-4 font-semibold">Due</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold text-right">Total</th><th className="px-4 font-semibold text-right">Paid</th><th className="px-4 font-semibold text-right">Balance</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
-              <tbody>{filtered.map((i) => (
+              <tbody>{list.map((i) => (
                 <tr key={i.id} className="border-b border-border/60 hover:bg-slate-50 cursor-pointer" onClick={() => i.archived ? view(i.id) : nav(`${listPath}/${i.id}`)} data-testid={`invoice-row-${i.id}`}>
                   {canManageInvoices && <td className="px-3" onClick={(e) => e.stopPropagation()}>{!i.archived && i.status === "draft" && <input type="checkbox" checked={sel.includes(i.id)} onChange={() => toggle(i.id)} data-testid={`select-invoice-${i.id}`} />}</td>}
                   <td className="px-4 py-3 font-mono font-semibold text-slate-700">{i.number || "DRAFT"}{i.archived && <span className="ml-2 inline-block rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 font-sans">Archived</span>}{i.opening_balance && <span className="ml-2 inline-block rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700 font-sans" data-testid={`opening-badge-${i.id}`}>Opening Balance</span>}</td>
@@ -277,6 +313,16 @@ export default function InvoiceList({ express = false }) {
           </div>
         )}
       </Card>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3" data-testid="invoice-pagination">
+        <p className="text-sm text-slate-500">
+          Showing {rangeStart}–{rangeEnd} of {total.toLocaleString()} invoices
+        </p>
+        <div className="flex items-center gap-2">
+          <Btn variant="outline" disabled={loading || page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))} data-testid="invoice-previous-page">Previous</Btn>
+          <span className="min-w-24 text-center text-sm text-slate-600">Page {page} of {pageCount}</span>
+          <Btn variant="outline" disabled={loading || page >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))} data-testid="invoice-next-page">Next</Btn>
+        </div>
+      </div>
 
       <Modal open={viewOpen} onClose={() => setViewOpen(false)} title={`Invoice Details ${viewInvoice?.number || ""}`} wide>
         {viewLoading ? <p className="text-sm text-slate-500" role="status">Loading invoice details...</p> : viewInvoice && <div className="space-y-5 text-sm" data-testid={`invoice-details-${viewInvoice.id}`}>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
@@ -26,16 +26,59 @@ export default function Customers() {
   const { user } = useAuth();
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const [list, setList] = useState([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
   const [filter, setFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [reload, setReload] = useState(0);
   const [modal, setModal] = useState(null); // form data or null
   const [profile, setProfile] = useState(null);
   const [sp, setSp] = useSearchParams();
   const nav = useNavigate();
+  const profileRequest = useRef(0);
 
-  const load = () => api.get("/customers").then(setList).catch((e) => toast.error(apiError(e))).finally(() => setLoading(false));
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedQ(q);
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [q]);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    api.get("/customers", {
+      page,
+      page_size: 50,
+      q: debouncedQ,
+      active_filter: filter,
+    }).then((result) => {
+      if (!active) return;
+      setList(result.items);
+      setTotal(result.total);
+      const lastPage = Math.max(1, Math.ceil(result.total / 50));
+      if (page > lastPage) setPage(lastPage);
+    }).catch((error) => {
+      if (active) toast.error(apiError(error));
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [page, debouncedQ, filter, user?.company_id, reload]);
+
+  useEffect(() => {
+    setList([]);
+    setTotal(0);
+    setPage(1);
+    setProfile(null);
+    setModal(null);
+    profileRequest.current += 1;
+  }, [user?.company_id]);
+
+  const load = () => setReload((current) => current + 1);
   useEffect(() => { if (sp.get("add")) { setModal({ ...blank }); setSp({}); } }, [sp]);
 
   const save = async () => {
@@ -44,6 +87,7 @@ export default function Customers() {
       if (modal.id) await api.put(`/customers/${modal.id}`, modal);
       else await api.post("/customers", modal);
       toast.success("Customer saved");
+      if (!modal.id) setPage(1);
       setModal(null); load();
     } catch (e) { toast.error(apiError(e)); }
   };
@@ -57,11 +101,10 @@ export default function Customers() {
       await api.del(`/customers/${customer.id}`);
       if (user?.is_admin) {
         toast.success("Customer deleted; invoices and payments retained");
-        setList((current) => current.filter((item) => item.id !== customer.id));
       } else {
         toast.success("Customer deactivated");
-        setList((current) => current.map((item) => item.id === customer.id ? { ...item, active: false } : item));
       }
+      load();
     } catch (error) {
       toast.error(apiError(error));
     }
@@ -114,44 +157,50 @@ export default function Customers() {
   };
 
   const openProfile = async (c) => {
-    const s = await api.get(`/customers/${c.id}/summary`);
-    setOtherBalance(s.other_balance ? String(s.other_balance) : "");
-    setProfile({ c, ...s });
+    const requestId = ++profileRequest.current;
+    try {
+      const s = await api.get(`/customers/${c.id}/summary`);
+      if (profileRequest.current !== requestId) return;
+      setOtherBalance(s.other_balance ? String(s.other_balance) : "");
+      setProfile({ c, ...s });
+    } catch (error) {
+      if (profileRequest.current === requestId) toast.error(apiError(error));
+    }
   };
 
-  const filtered = list.filter((c) =>
-    c.name.toLowerCase().includes(q.toLowerCase()) &&
-    (filter === "all" || (filter === "active" ? c.active : !c.active)));
+  const pageCount = Math.max(1, Math.ceil(total / 50));
+  const rangeStart = total === 0 ? 0 : (page - 1) * 50 + 1;
+  const rangeEnd = Math.min(page * 50, total);
   const otherBalancePayments = profile?.other_balance_payments?.length
     ? profile.other_balance_payments
     : profile?.c?.other_balance_payments || [];
 
   return (
     <div>
-      <PageHeader title="Customers" subtitle={loading ? "Loading customers..." : `${list.length} customers`}>
+      <PageHeader title="Customers" subtitle={loading ? "Loading customers..." : `Showing ${rangeStart}–${rangeEnd} of ${total.toLocaleString()} customers`}>
         <Btn onClick={() => setModal({ ...blank })} data-testid="add-customer-btn"><Plus size={16} /> Add Customer</Btn>
       </PageHeader>
 
       <Card className="p-4 mb-4 flex flex-col sm:flex-row gap-3">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-          <input data-testid="customer-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search customers..."
+          <input data-testid="customer-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, phone, email..."
             className="w-full rounded-lg border border-input pl-9 pr-3 py-2.5 text-sm outline-none focus:border-primary" />
         </div>
-        <select value={filter} onChange={(e) => setFilter(e.target.value)} data-testid="customer-filter"
+        <select value={filter} onChange={(e) => { setFilter(e.target.value); setPage(1); }} data-testid="customer-filter"
           className="rounded-lg border border-input px-3 py-2.5 text-sm outline-none">
           <option value="all">All</option><option value="active">Active</option><option value="inactive">Inactive</option>
         </select>
       </Card>
 
       <Card className="overflow-hidden">
-        {loading ? <p className="p-6 text-sm text-slate-400" role="status">Loading customers...</p> : filtered.length === 0 ? <Empty icon={Users} title="No customers found" /> : (
+        {loading ? <p className="p-6 text-sm text-slate-400" role="status">Loading customers...</p> : list.length === 0 ? <Empty icon={Users} title="No customers found" /> : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
                 <th className="px-4 py-3 font-semibold">Name</th><th className="px-4 font-semibold">Client Number</th><th className="px-4 font-semibold">Phone</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold">Terms</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
-              <tbody>{filtered.map((c) => (
+              <tbody>{list.map((c) => (
                 <tr key={c.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`customer-row-${c.id}`}>
                   <td className="px-4 py-3 font-semibold text-slate-800">{c.name}</td>
                   <td className="px-4 text-slate-500">{c.client_number || "-"}</td>
@@ -169,6 +218,16 @@ export default function Customers() {
           </div>
         )}
       </Card>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3" data-testid="customer-pagination">
+        <p className="text-sm text-slate-500">
+          Showing {rangeStart}–{rangeEnd} of {total.toLocaleString()} customers
+        </p>
+        <div className="flex items-center gap-2">
+          <Btn variant="outline" disabled={loading || page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))} data-testid="customer-previous-page">Previous</Btn>
+          <span className="min-w-24 text-center text-sm text-slate-600">Page {page} of {pageCount}</span>
+          <Btn variant="outline" disabled={loading || page >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))} data-testid="customer-next-page">Next</Btn>
+        </div>
+      </div>
 
       <Modal open={!!modal} onClose={() => setModal(null)} title={modal?.id ? "Edit Customer" : "Add Customer"}>
         {modal && (

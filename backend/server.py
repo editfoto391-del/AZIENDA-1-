@@ -2710,6 +2710,21 @@ async def listall(coll, flt=None, sort=None, limit=5000, session=None):
         cur = cur.sort(sort[0], sort[1])
     return await cur.to_list(limit)
 
+
+async def find_page(collection, query, sort, page, page_size, projection):
+    cursor = (
+        collection.find(query, projection)
+        .sort(sort[0], sort[1])
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+    )
+    total, items = await asyncio.gather(
+        collection.count_documents(query),
+        cursor.to_list(length=page_size),
+    )
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
 # ---------------- Warehouse A reports ----------------
 class WarehouseReportLineIn(BaseModel):
     model_config = {"extra": "forbid"}
@@ -4426,8 +4441,63 @@ class CustomerIn(BaseModel):
         return value
 
 @api.get("/customers")
-async def get_customers(user=Depends(get_current_user)):
+async def get_customers(
+    page: Optional[int] = Query(None, ge=1),
+    page_size: int = Query(50, ge=1, le=50),
+    q: str = Query("", max_length=100),
+    active_filter: Literal["all", "active", "inactive"] = "all",
+    user=Depends(get_current_user),
+):
+    if page is not None:
+        query = {}
+        if active_filter == "active":
+            query["active"] = True
+        elif active_filter == "inactive":
+            query["$or"] = [
+                {"active": False},
+                {"active": {"$exists": False}},
+            ]
+        term = q.strip()
+        if term:
+            pattern = {"$regex": re.escape(term), "$options": "i"}
+            search_query = {"$or": [
+                {field: pattern}
+                for field in (
+                    "name", "first_name", "last_name", "phone", "email",
+                    "client_number", "city", "address",
+                )
+            ]}
+            if "$or" in query:
+                query = {"$and": [query, search_query]}
+            else:
+                query.update(search_query)
+        return await find_page(
+            db.customers,
+            query,
+            ("name", 1),
+            page,
+            page_size,
+            {
+                "_id": 0, "id": 1, "name": 1, "first_name": 1, "last_name": 1,
+                "client_number": 1, "phone": 1, "email": 1, "address": 1, "city": 1,
+                "default_zone": 1, "other_balance": 1, "other_balance_express": 1,
+                "payment_terms": 1, "active": 1, "notes": 1, "created_at": 1,
+            },
+        )
     return await listall("customers", sort=("name", 1))
+
+
+@api.get("/customers/{cid}")
+async def get_customer(cid: str, user=Depends(get_current_user)):
+    customer = await db.customers.find_one(
+        {"id": cid},
+        {"_id": 0, "id": 1, "name": 1, "client_number": 1, "phone": 1, "email": 1,
+         "address": 1, "city": 1, "default_zone": 1, "payment_terms": 1},
+    )
+    if not customer:
+        raise HTTPException(404, "Customer not found")
+    return customer
+
 
 @api.post("/customers")
 async def add_customer(body: CustomerIn, user=Depends(get_current_user)):
@@ -4987,6 +5057,45 @@ def invoice_list_query(express=False, include_archived=False):
     query["invoice_type"] = "express" if express else {"$ne": "express"}
     return query
 
+
+def invoice_status_list_query(status):
+    if status in ("draft", "void"):
+        return {"status": status}
+    if status not in ("issued", "partially_paid", "paid", "overdue"):
+        return {}
+
+    active_invoice = {"status": {"$nin": ["draft", "void"]}}
+    amount_paid = {"$ifNull": ["$amount_paid", 0]}
+    total = {"$ifNull": ["$total", 0]}
+    paid = {"$expr": {"$and": [{"$gt": [total, 0]}, {"$gte": [amount_paid, total]}]}}
+    overdue = {
+        "$and": [
+            {"outstanding": {"$gt": 0}},
+            {"due_date": {"$lt": today_str()}},
+        ],
+    }
+
+    if status == "paid":
+        condition = paid
+    elif status == "overdue":
+        condition = {"$and": [overdue, {"$nor": [paid]}]}
+    elif status == "partially_paid":
+        condition = {
+            "$and": [
+                {"$expr": {"$gt": [amount_paid, 0]}},
+                {"$nor": [paid, overdue]},
+            ],
+        }
+    else:
+        condition = {
+            "$and": [
+                {"$expr": {"$lte": [amount_paid, 0]}},
+                {"$nor": [paid, overdue]},
+            ],
+        }
+    return {"$and": [active_invoice, condition]}
+
+
 def previous_invoice_query(customer_id, invoice_type, invoice_date, exclude_id=None):
     query = {
         "customer_id": customer_id,
@@ -5020,10 +5129,54 @@ async def previous_invoice_balances(customer_id, invoice_type, invoice_date, exc
     return sorted(pending, key=lambda invoice: (invoice["date"], invoice.get("number") or ""))
 
 @api.get("/invoices")
-async def get_invoices(include_archived: bool = False, express: bool = False, user=Depends(get_current_user)):
+async def get_invoices(
+    include_archived: bool = False,
+    express: bool = False,
+    page: Optional[int] = Query(None, ge=1),
+    page_size: int = Query(50, ge=1, le=50),
+    q: str = Query("", max_length=100),
+    status: Literal["all", "draft", "issued", "partially_paid", "paid", "overdue", "void"] = "all",
+    zone: Optional[int] = None,
+    invoice_date: Optional[str] = None,
+    user=Depends(get_current_user),
+):
     if include_archived:
         require_profile_owner(user)
-    invs = await listall("invoices", invoice_list_query(express, include_archived), ("created_at", -1))
+    query = invoice_list_query(express, include_archived)
+    if page is not None:
+        clauses = [{"archived": True} if include_archived else query]
+        if status != "all":
+            clauses.append(invoice_status_list_query(status))
+        if zone is not None:
+            clauses.append({"zone": zone})
+        if invoice_date:
+            clauses.append({"date": invoice_date})
+        term = q.strip()
+        if term:
+            pattern = {"$regex": re.escape(term), "$options": "i"}
+            clauses.append({"$or": [
+                {"number": pattern},
+                {"customer_name": pattern},
+                {"deleted_customer_name": pattern},
+            ]})
+        query = {"$and": clauses}
+        page_result = await find_page(
+            db.invoices,
+            query,
+            ("created_at", -1),
+            page,
+            page_size,
+            {
+                "_id": 0, "id": 1, "number": 1, "customer_id": 1,
+                "customer_name": 1, "customer_deleted": 1, "deleted_customer_name": 1,
+                "date": 1, "due_date": 1, "zone": 1, "total": 1,
+                "amount_paid": 1, "outstanding": 1, "status": 1, "archived": 1,
+                "opening_balance": 1, "include_on_daily_report": 1, "created_at": 1,
+            },
+        )
+        invs = page_result["items"]
+    else:
+        invs = await listall("invoices", query, ("created_at", -1))
     invoice_ids = [invoice["id"] for invoice in invs]
     shared_links = await db.invoice_share_links.find(
         {"invoice_id": {"$in": invoice_ids}}, {"_id": 0, "invoice_id": 1},
@@ -5032,6 +5185,9 @@ async def get_invoices(include_archived: bool = False, express: bool = False, us
     for i in invs:
         i["status"] = derive_status(i)
         i["has_share_link"] = i["id"] in shared_invoice_ids
+    if page is not None:
+        page_result["items"] = invs
+        return page_result
     return invs
 
 @api.get("/invoices/{iid}")
@@ -14587,8 +14743,12 @@ async def initialize_company_profile_users():
 
 async def ensure_performance_indexes(database):
     indexes = {
-        "customers": [[("name", 1)]],
-        "invoices": [[("created_at", -1)], [("customer_id", 1), ("created_at", -1)]],
+        "customers": [[("name", 1)], [("active", 1), ("name", 1)]],
+        "invoices": [
+            [("created_at", -1)],
+            [("customer_id", 1), ("created_at", -1)],
+            [("invoice_type", 1), ("created_at", -1)],
+        ],
         "payments": [
             [("customer_id", 1), ("created_at", -1)],
             [("invoice_id", 1), ("created_at", -1)],
