@@ -97,7 +97,7 @@ export default function Stock() {
   const load = () => {
     api.get("/stock").then(setList).catch((e) => { toast.error(apiError(e)); setList([]); });
     api.get("/prices").then(setPrices).catch((e) => toast.error(apiError(e)));
-    void loadMovements();
+    if (showHist) void loadMovements();
   };
   useEffect(() => { load(); }, []);
 
@@ -330,7 +330,7 @@ export default function Stock() {
     </Btn>
   );
   const productIdsAction = <Btn variant="outline" onClick={() => setShowProductIds(true)} data-testid="product-identification-btn"><Boxes size={16} /> Product IDs & Labels</Btn>;
-  const ledgerAction = <Btn variant="outline" onClick={() => setShowHist(true)} data-testid="stock-history-btn"><History size={16} /> Ledger</Btn>;
+  const ledgerAction = <Btn variant="outline" onClick={() => { setShowHist(true); void loadMovements(); }} data-testid="stock-history-btn"><History size={16} /> Ledger</Btn>;
   const addProductAction = <Btn onClick={() => setAddModal({ product: "", category: "", size: "", opening: 0, threshold: 5, selling_price: "", zone: 1 })} data-testid="add-stock-btn"><Plus size={16} /> Add Product</Btn>;
 
   return (

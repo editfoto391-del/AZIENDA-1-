@@ -6542,6 +6542,22 @@ async def stock_current(s, session=None):
     movs = await listall("stock_movements", {"stock_id": s["id"]}, session=session)
     return apply_stock_movements(s, movs)
 
+
+async def stock_movements_for_stock_ids(stock_ids):
+    if not stock_ids:
+        return {}
+    cursor = db.stock_movements.find(
+        {"stock_id": {"$in": stock_ids}},
+        {"_id": 0, "stock_id": 1, "type": 1, "quantity": 1, "direction": 1, "created_at": 1},
+    )
+    grouped = {stock_id: [] for stock_id in stock_ids}
+    async for movement in cursor:
+        stock_id = movement.get("stock_id")
+        if stock_id in grouped and len(grouped[stock_id]) < 5000:
+            grouped[stock_id].append(movement)
+    return grouped
+
+
 def apply_stock_movements(stock, movements):
     s = stock
     movs = movements
@@ -6929,11 +6945,10 @@ async def post_invoice_stock_changes(invoice, changes, stocks, user):
 
 @api.get("/stock")
 async def get_stock(user=Depends(get_current_user)):
-    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
     items = await listall("stock", sort=("product", 1))
+    movements_by_stock = await stock_movements_for_stock_ids([item["id"] for item in items])
     for s in items:
-        await ensure_product_identification(s, company_id)
-        await stock_current(s)
+        apply_stock_movements(s, movements_by_stock.get(s["id"], []))
         stock_for_user(s, user)
     return items
 

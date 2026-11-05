@@ -7,6 +7,7 @@ const client = axios.create({ baseURL: BASE, withCredentials: true });
 const pendingGets = new Map();
 const cachedGets = new Map();
 let supervisorPromptQueue = Promise.resolve();
+let getCacheGeneration = 0;
 
 function activeToken() {
   return activeAuthToken(localStorage, sessionStorage);
@@ -84,11 +85,17 @@ function supervisorActionForRequest(config) {
   return SUPERVISOR_ROUTES.find(([m, pattern]) => m === method && pattern.test(path))?.[2];
 }
 
-export function invalidateGetCache() {
-  cachedGets.clear();
+export function dispatchDataRefresh() {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent("erp:data-changed"));
   }
+}
+
+export function invalidateGetCache() {
+  getCacheGeneration += 1;
+  cachedGets.clear();
+  pendingGets.clear();
+  dispatchDataRefresh();
 }
 
 client.interceptors.request.use((cfg) => {
@@ -153,11 +160,14 @@ export const api = {
     const pending = pendingGets.get(key);
     if (pending) return pending;
 
+    const requestGeneration = getCacheGeneration;
     let request;
     request = client.get(u, { params }).then((r) => {
-      const cachedAt = Date.now();
-      pruneExpiredCache(cachedGets, cachedAt);
-      cachedGets.set(key, { data: r.data, expiresAt: cachedAt + GET_CACHE_MS });
+      if (requestGeneration === getCacheGeneration) {
+        const cachedAt = Date.now();
+        pruneExpiredCache(cachedGets, cachedAt);
+        cachedGets.set(key, { data: r.data, expiresAt: cachedAt + GET_CACHE_MS });
+      }
       return r.data;
     }).finally(() => {
       if (pendingGets.get(key) === request) pendingGets.delete(key);

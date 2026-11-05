@@ -31,6 +31,120 @@ def test_stock_dashboard_summary_matches_stock_movement_rules():
     assert result["last_movement"] == "2026-10-29T12:00:00+00:00"
 
 
+def test_stock_movements_are_loaded_in_one_batched_query(monkeypatch):
+    class Cursor:
+        def __aiter__(self):
+            return self.movements()
+
+        async def movements(self):
+            yield {"stock_id": "stock-a", "type": "purchase", "quantity": 3, "created_at": "2026-10-28"}
+            yield {"stock_id": "stock-b", "type": "invoice", "quantity": 2, "created_at": "2026-10-29"}
+
+    class Collection:
+        def __init__(self):
+            self.queries = []
+
+        def find(self, query, projection):
+            self.queries.append((query, projection))
+            return Cursor()
+
+    movements = Collection()
+    monkeypatch.setattr(server, "db", type("Database", (), {"stock_movements": movements})())
+
+    result = asyncio.run(server.stock_movements_for_stock_ids(["stock-a", "stock-b"]))
+
+    assert len(movements.queries) == 1
+    assert movements.queries[0][0] == {"stock_id": {"$in": ["stock-a", "stock-b"]}}
+    assert result["stock-a"][0]["quantity"] == 3
+    assert result["stock-b"][0]["type"] == "invoice"
+
+
+def test_stock_batch_query_respects_each_active_company(monkeypatch):
+    class Cursor:
+        def __init__(self, documents):
+            self.documents = documents
+
+        def sort(self, field, direction):
+            self.documents.sort(key=lambda item: item.get(field), reverse=direction < 0)
+            return self
+
+        async def to_list(self, limit):
+            return self.documents[:limit]
+
+        def __aiter__(self):
+            async def documents():
+                for document in self.documents:
+                    yield document
+            return documents()
+
+    class Collection:
+        def __init__(self, documents):
+            self.documents = documents
+            self.queries = []
+
+        def find(self, query, projection):
+            self.queries.append(query)
+
+            def matches(document, condition):
+                if "$and" in condition:
+                    return all(matches(document, part) for part in condition["$and"])
+                return all(
+                    document.get(key) in value["$in"] if isinstance(value, dict) and "$in" in value
+                    else document.get(key) == value
+                    for key, value in condition.items()
+                )
+
+            return Cursor([document for document in self.documents if matches(document, query)])
+
+    class Database:
+        def __init__(self, name, company_id, amount):
+            self.name = name
+            self.stock = Collection([{
+                "id": f"stock-{company_id}", "company_id": company_id,
+                "product": company_id, "opening": 10,
+            }])
+            self.stock_movements = Collection([{
+                "stock_id": f"stock-{company_id}", "company_id": company_id,
+                "type": "purchase", "quantity": amount, "created_at": "2026-10-28",
+            }])
+
+        def __getitem__(self, name):
+            return getattr(self, name)
+
+    class Client:
+        def __init__(self, databases):
+            self.databases = databases
+
+        def __getitem__(self, name):
+            return self.databases[name]
+
+    company_amounts = {
+        "superiqfoam": 1,
+        "iqfoam-manufactoring": 2,
+        "iqfoam-whole-sallers": 3,
+    }
+    databases = {
+        "base": Database("base", "superiqfoam", company_amounts["superiqfoam"]),
+        **{
+            f"base__{company_id}": Database(f"base__{company_id}", company_id, amount)
+            for company_id, amount in company_amounts.items()
+            if company_id != "superiqfoam"
+        },
+    }
+    monkeypatch.setattr(server, "db", server.ScopedDatabase(Client(databases), databases["base"]))
+
+    for company_id, amount in company_amounts.items():
+        token = server.active_company_id.set(company_id)
+        try:
+            stocks = asyncio.run(server.get_stock({"_active_company_id": company_id}))
+        finally:
+            server.active_company_id.reset(token)
+
+        assert [(stock["id"], stock["current"]) for stock in stocks] == [
+            (f"stock-{company_id}", 10 + amount)
+        ]
+
+
 def test_dashboard_profit_uses_same_period_filters_and_excludes_reversed_payments():
     result = profit_from_records(
         "2026-10-01",

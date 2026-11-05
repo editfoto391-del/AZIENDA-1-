@@ -278,7 +278,7 @@ export default function Dashboard() {
     const params = period === "custom"
       ? { period, start_date: customStart, end_date: customEnd }
       : { period };
-    api.getUncached("/dashboard", params)
+    api.get("/dashboard", params)
       .then((data) => { if (active) setD(data); })
       .catch((error) => { if (active) setLoadingError(apiError(error)); });
     const refreshOnChange = () => setReload((value) => value + 1);

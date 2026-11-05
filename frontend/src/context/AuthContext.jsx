@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
-import { api, apiError, invalidateGetCache } from "@/lib/api";
+import { api, apiError, dispatchDataRefresh } from "@/lib/api";
 import { dedicatedCompanyDomain } from "@/lib/company";
 import { Btn, Input, Modal } from "@/components/common";
 
@@ -44,12 +44,18 @@ export function AuthProvider({ children }) {
   }, []);
 
   useEffect(() => {
+    let refreshTimer;
     const refreshVisibleData = () => {
-      if (document.visibilityState === "visible") invalidateGetCache();
+      if (document.visibilityState !== "visible" || refreshTimer) return;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = undefined;
+        if (document.visibilityState === "visible") dispatchDataRefresh();
+      }, 100);
     };
     window.addEventListener("focus", refreshVisibleData);
     document.addEventListener("visibilitychange", refreshVisibleData);
     return () => {
+      window.clearTimeout(refreshTimer);
       window.removeEventListener("focus", refreshVisibleData);
       document.removeEventListener("visibilitychange", refreshVisibleData);
     };
