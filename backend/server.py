@@ -5493,6 +5493,38 @@ async def permanently_delete_invoice(iid: str, user=Depends(get_current_user)):
     await db.invoices.delete_one({"id": iid, "archived": True})
     return {"ok": True, "deleted": True}
 
+class BulkPermanentDeleteIn(BaseModel):
+    ids: List[str] = Field(min_length=1, max_length=100)
+
+@api.post("/invoices/bulk-permanent-delete")
+async def bulk_permanently_delete_invoices(body: BulkPermanentDeleteIn, user=Depends(get_current_user)):
+    require_profile_owner(user)
+    invoice_ids = list(dict.fromkeys(body.ids))
+    invoices = []
+    for iid in invoice_ids:
+        invoice = await db.invoices.find_one({"id": iid}, {"_id": 0})
+        if not invoice:
+            raise HTTPException(404, "Invoice not found")
+        if not invoice.get("archived"):
+            raise HTTPException(409, "Archive every selected invoice before permanently deleting them")
+        invoices.append(invoice)
+
+    for invoice in invoices:
+        iid = invoice["id"]
+        await log_audit(
+            "invoice", iid, "permanently_deleted", user,
+            before={
+                "number": invoice.get("number"),
+                "customer_name": invoice.get("customer_name"),
+                "total": invoice.get("total"),
+                "status": derive_status(invoice),
+            },
+        )
+        await db.payments.delete_many({"invoice_id": iid})
+        await db.invoice_share_links.delete_one({"invoice_id": iid})
+        await db.invoices.delete_one({"id": iid, "archived": True})
+    return {"deleted": len(invoices)}
+
 @api.post("/invoices/{iid}/restore")
 async def restore_invoice(iid: str, user=Depends(get_current_user)):
     require_profile_owner(user)

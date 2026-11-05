@@ -169,6 +169,18 @@ export default function InvoiceList({ express = false }) {
       toast.error(apiError(error));
     }
   };
+  const permanentlyDeleteMany = async (ids) => {
+    if (!showArchived || ids.length === 0) return;
+    if (!window.confirm(`Permanently delete ${ids.length} archived invoice(s)? This cannot be undone and their payment records will also be deleted.`)) return;
+    try {
+      const result = await api.post("/invoices/bulk-permanent-delete", { ids });
+      setSel([]);
+      toast.success(`${result.deleted} archived invoice(s) permanently deleted`);
+      load();
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
   const sendInvoiceViaWhatsApp = async (event, invoice) => {
     event.stopPropagation();
     const requestId = ++detailRequest.current;
@@ -233,7 +245,9 @@ export default function InvoiceList({ express = false }) {
 
       {canManageInvoices && sel.length > 0 && <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2" data-testid="bulk-bar">
         <span className="text-sm font-semibold text-amber-800">{sel.length} selected</span>
-        <Btn variant="danger" onClick={() => removeMany(sel)} data-testid="bulk-delete-btn"><Trash2 size={15} /> Delete selected</Btn>
+        <Btn variant="danger" onClick={() => showArchived ? permanentlyDeleteMany(sel) : removeMany(sel)} data-testid="bulk-delete-btn">
+          <Trash2 size={15} /> {showArchived ? "Permanently delete selected" : "Delete selected"}
+        </Btn>
       </div>}
 
       <Card className="overflow-hidden">
@@ -241,11 +255,11 @@ export default function InvoiceList({ express = false }) {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                {canManageInvoices && <th className="px-3 py-3 w-8"><input type="checkbox" checked={sel.length > 0 && sel.length === list.filter((i) => !i.archived && i.status === "draft").length} onChange={(e) => setSel(e.target.checked ? list.filter((i) => !i.archived && i.status === "draft").map((i) => i.id) : [])} data-testid="select-all-invoices" /></th>}<th className="px-4 py-3 font-semibold">Invoice</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">Date</th><th className="px-4 font-semibold">Due</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold text-right">Total</th><th className="px-4 font-semibold text-right">Paid</th><th className="px-4 font-semibold text-right">Balance</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
+                {canManageInvoices && <th className="px-3 py-3 w-8"><input type="checkbox" checked={sel.length > 0 && sel.length === list.filter((i) => showArchived ? i.archived : !i.archived && i.status === "draft").length} onChange={(e) => setSel(e.target.checked ? list.filter((i) => showArchived ? i.archived : !i.archived && i.status === "draft").map((i) => i.id) : [])} data-testid="select-all-invoices" /></th>}<th className="px-4 py-3 font-semibold">Invoice</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">Date</th><th className="px-4 font-semibold">Due</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold text-right">Total</th><th className="px-4 font-semibold text-right">Paid</th><th className="px-4 font-semibold text-right">Balance</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{list.map((i) => (
                 <tr key={i.id} className="border-b border-border/60 hover:bg-slate-50 cursor-pointer" onClick={() => i.archived ? view(i.id) : nav(`${listPath}/${i.id}`)} data-testid={`invoice-row-${i.id}`}>
-                  {canManageInvoices && <td className="px-3" onClick={(e) => e.stopPropagation()}>{!i.archived && i.status === "draft" && <input type="checkbox" checked={sel.includes(i.id)} onChange={() => toggle(i.id)} data-testid={`select-invoice-${i.id}`} />}</td>}
+                  {canManageInvoices && <td className="px-3" onClick={(e) => e.stopPropagation()}>{(showArchived ? i.archived : !i.archived && i.status === "draft") && <input type="checkbox" checked={sel.includes(i.id)} onChange={() => toggle(i.id)} data-testid={`select-invoice-${i.id}`} />}</td>}
                   <td className="px-4 py-3 font-mono font-semibold text-slate-700">{i.number || "DRAFT"}{i.archived && <span className="ml-2 inline-block rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800 font-sans">Archived</span>}{i.opening_balance && <span className="ml-2 inline-block rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700 font-sans" data-testid={`opening-badge-${i.id}`}>Opening Balance</span>}</td>
                   <td className="px-4 text-slate-600">{i.customer_name}{i.customer_deleted && <Badge cls="ml-2 border-red-200 bg-red-50 text-red-700">Deleted customer</Badge>}</td>
                   <td className="px-4 text-slate-500">{fmtDate(i.date)}</td>

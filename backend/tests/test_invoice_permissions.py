@@ -117,6 +117,91 @@ def test_non_owner_cannot_open_an_archived_invoice(monkeypatch):
     assert error.value.status_code == 404
 
 
+def test_bulk_permanent_invoice_delete_requires_every_invoice_archived_and_deletes_related_data(monkeypatch):
+    class Collection:
+        def __init__(self, documents=()):
+            self.documents = list(documents)
+
+        async def find_one(self, query, _projection=None):
+            return next((item.copy() for item in self.documents if item["id"] == query["id"]), None)
+
+        async def delete_one(self, query):
+            self.documents = [
+                item for item in self.documents
+                if not all(item.get(key) == value for key, value in query.items())
+            ]
+
+        async def delete_many(self, query):
+            self.documents = [
+                item for item in self.documents
+                if not all(item.get(key) == value for key, value in query.items())
+            ]
+
+    invoices = Collection([
+        {"id": "archived-1", "archived": True, "number": "1"},
+        {"id": "archived-2", "archived": True, "number": "2"},
+    ])
+    payments = Collection([
+        {"id": "payment-1", "invoice_id": "archived-1"},
+        {"id": "payment-2", "invoice_id": "archived-2"},
+    ])
+    share_links = Collection([
+        {"id": "link-1", "invoice_id": "archived-1"},
+        {"id": "link-2", "invoice_id": "archived-2"},
+    ])
+    monkeypatch.setattr(server, "db", SimpleNamespace(
+        invoices=invoices, payments=payments, invoice_share_links=share_links,
+    ))
+    audits = []
+
+    async def log_audit(*args, **kwargs):
+        audits.append((args, kwargs))
+
+    monkeypatch.setattr(server, "log_audit", log_audit)
+    result = asyncio.run(server.bulk_permanently_delete_invoices(
+        server.BulkPermanentDeleteIn(ids=["archived-1", "archived-2", "archived-1"]),
+        {"_active_role": "owner"},
+    ))
+
+    assert result == {"deleted": 2}
+    assert invoices.documents == []
+    assert payments.documents == []
+    assert share_links.documents == []
+    assert len(audits) == 2
+
+
+def test_bulk_permanent_invoice_delete_validates_all_records_before_deleting(monkeypatch):
+    class Invoices:
+        def __init__(self):
+            self.documents = [
+                {"id": "archived-1", "archived": True},
+                {"id": "active-1", "archived": False},
+            ]
+
+        async def find_one(self, query, _projection=None):
+            return next((item.copy() for item in self.documents if item["id"] == query["id"]), None)
+
+    invoices = Invoices()
+    monkeypatch.setattr(server, "db", SimpleNamespace(invoices=invoices))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(server.bulk_permanently_delete_invoices(
+            server.BulkPermanentDeleteIn(ids=["archived-1", "active-1"]),
+            {"_active_role": "owner"},
+        ))
+
+    assert error.value.status_code == 409
+    assert len(invoices.documents) == 2
+
+
+def test_bulk_permanent_invoice_delete_is_owner_only():
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(server.bulk_permanently_delete_invoices(
+            server.BulkPermanentDeleteIn(ids=["invoice-1"]),
+            {"_active_role": "admin"},
+        ))
+    assert error.value.status_code == 403
+
+
 def test_admin_cannot_change_existing_invoice_item_price(monkeypatch):
     async def scenario():
         body = server.InvoiceIn(items=[{
