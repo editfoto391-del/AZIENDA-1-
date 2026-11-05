@@ -3,8 +3,9 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtDateTime, fmtMoney, documentFilename } from "@/lib/format";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal, PageHeader, Empty } from "@/components/common";
-import { ClipboardList, Plus, Trash2, Pencil, ArrowRight, Eye, FileText, Printer, Download } from "lucide-react";
+import { ClipboardList, Plus, Trash2, Pencil, ArrowRight, Eye, FileText, Printer, Download, Search } from "lucide-react";
 import { useRef } from "react";
+import { useAuth } from "@/context/AuthContext";
 import { DeliveryNote, orderLines } from "@/components/DeliveryNote";
 import { elementToPdf, printElement } from "@/lib/pdf";
 import BarcodeScanner from "@/components/BarcodeScanner";
@@ -20,8 +21,6 @@ const P_META = {
   Low: "bg-slate-100 text-slate-500 border-slate-200", Normal: "bg-blue-50 text-blue-700 border-blue-200",
   High: "bg-orange-50 text-orange-700 border-orange-200", Urgent: "bg-red-50 text-red-700 border-red-200",
 };
-const P_RANK = { Urgent: 0, High: 1, Normal: 2, Low: 3 };
-const OPEN = ["To Send", "Preparing", "Assigned"];
 const blank = () => ({ customer_id: "", customer_name: "", customer_address: "", customer_phone: "", customer_email: "", invoice_id: "", invoice_number: "", destination: "", products: "", items: [{ qty: "", category: "", size: "" }], priority: "Normal", status: "To Send", expected_ship_date: "", vehicle_id: "", notes: "" });
 const WIDTHS = ["760", "910", "1070", "1370"];
 const STANDARD_SIZES = WIDTHS.flatMap((width) => ["50", "75", "100", "120", "150"].map((height) => `${width}x${height}`));
@@ -66,13 +65,20 @@ function NoteModal({ order, vehicleName, settings, onClose }) {
 }
 
 export default function Orders() {
+  const { user } = useAuth();
   const [list, setList] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [statusCounts, setStatusCounts] = useState({});
   const [loading, setLoading] = useState(true);
   const [customers, setCustomers] = useState([]);
   const [invoices, setInvoices] = useState([]);
   const [vehicles, setVehicles] = useState([]);
   const [filter, setFilter] = useState("open");
   const [orderDate, setOrderDate] = useState("");
+  const [q, setQ] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
+  const [page, setPage] = useState(1);
+  const [reload, setReload] = useState(0);
   const [modal, setModal] = useState(null);
   const [note, setNote] = useState(null);
   const [viewOrder, setViewOrder] = useState(null);
@@ -80,6 +86,9 @@ export default function Orders() {
   const [stock, setStock] = useState([]);
   const [prices, setPrices] = useState([]);
   const [settings, setSettings] = useState({});
+  const [viewInvoice, setViewInvoice] = useState(null);
+  const [formDataLoading, setFormDataLoading] = useState(false);
+  const detailRequest = useRef(0);
   const products = [...new Set(stock.map((s) => s.product))];
   const sizesForProduct = (product) => {
     const normalized = String(product || "").trim().toLowerCase();
@@ -91,28 +100,73 @@ export default function Orders() {
       ...prices.filter((price) => price.active !== false && matchingPriceCategories.includes(String(price.category || "").trim().toLowerCase())).map((price) => price.size),
     ].filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   };
-  const viewInvoice = viewOrder && invoices.find((invoice) => invoice.id === viewOrder.invoice_id);
   const viewOrderLines = useMemo(() => viewOrder ? orderLines(viewOrder) : [], [viewOrder]);
   const viewInvoiceItems = Array.isArray(viewInvoice?.items) ? viewInvoice.items.filter((item) => item && typeof item === "object") : [];
 
-  const load = () => { api.get("/orders").then(setList).catch((e) => toast.error(apiError(e))).finally(() => setLoading(false)); };
   useEffect(() => {
-    load();
-    api.get("/customers").then(setCustomers).catch((e) => toast.error(apiError(e)));
-    api.get("/invoices").then(setInvoices).catch((e) => toast.error(apiError(e)));
+    const timer = window.setTimeout(() => {
+      setDebouncedQ(q);
+      setPage(1);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [q]);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    api.get("/orders", {
+      page,
+      page_size: 50,
+      status: filter,
+      order_date: orderDate || undefined,
+      q: debouncedQ,
+    }).then((result) => {
+      if (!active) return;
+      setList(result.items);
+      setTotal(result.total);
+      setStatusCounts(result.status_counts || {});
+      const lastPage = Math.max(1, Math.ceil(result.total / 50));
+      if (page > lastPage) setPage(lastPage);
+    }).catch((error) => {
+      if (active) toast.error(apiError(error));
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [page, filter, orderDate, debouncedQ, reload, user?.company_id]);
+
+  useEffect(() => {
     api.get("/vehicles").then(setVehicles).catch((e) => toast.error(apiError(e)));
-    api.get("/stock").then(setStock).catch((e) => toast.error(apiError(e)));
-    api.get("/prices").then(setPrices).catch((e) => toast.error(apiError(e)));
     api.get("/settings").then(setSettings).catch((e) => toast.error(apiError(e)));
-  }, []);
+  }, [user?.company_id]);
+
+  useEffect(() => {
+    if (!modal) return undefined;
+    let active = true;
+    setFormDataLoading(true);
+    Promise.all([
+      api.get("/customers"),
+      api.get("/invoices"),
+      api.get("/stock"),
+      api.get("/prices"),
+    ]).then(([customerData, invoiceData, stockData, priceData]) => {
+      if (!active) return;
+      setCustomers(customerData);
+      setInvoices(invoiceData);
+      setStock(stockData);
+      setPrices(priceData);
+    }).catch((error) => {
+      if (active) toast.error(apiError(error));
+    }).finally(() => {
+      if (active) setFormDataLoading(false);
+    });
+    return () => { active = false; };
+  }, [Boolean(modal), user?.company_id]);
 
   const vName = (id) => vehicles.find((v) => v.id === id)?.name;
-  const shown = useMemo(() => {
-    const f = filter === "open" ? list.filter((o) => OPEN.includes(o.status)) : filter === "all" ? list : list.filter((o) => o.status === filter);
-    const dated = orderDate ? f.filter((order) => order.created_at && new Date(order.created_at).toLocaleDateString("en-CA", { timeZone: "Africa/Johannesburg" }) === orderDate) : f;
-    return [...dated].sort((a, b) => (P_RANK[a.priority] ?? 9) - (P_RANK[b.priority] ?? 9) || (a.expected_ship_date || "9").localeCompare(b.expected_ship_date || "9"));
-  }, [list, filter, orderDate]);
-  const count = (s) => (s === "open" ? list.filter((o) => OPEN.includes(o.status)).length : s === "all" ? list.length : list.filter((o) => o.status === s).length);
+  const shown = list;
+  const count = (status) => statusCounts[status] || 0;
+  const load = () => setReload((current) => current + 1);
 
   const pickCustomer = (id) => {
     const c = customers.find((x) => x.id === id);
@@ -152,6 +206,18 @@ export default function Orders() {
       products: items.map((item) => `${item.qty} x ${[item.category, item.size, item.description].filter(Boolean).join(" ")}`).join("\n"),
     });
   };
+  const openOrder = async (order) => {
+    const requestId = ++detailRequest.current;
+    setViewOrder(order);
+    setViewInvoice(null);
+    if (!order.invoice_id) return;
+    try {
+      const invoice = await api.get(`/invoices/${order.invoice_id}`);
+      if (detailRequest.current === requestId) setViewInvoice(invoice);
+    } catch (error) {
+      if (detailRequest.current === requestId) toast.error(`Order loaded, but linked invoice details could not be loaded: ${apiError(error)}`);
+    }
+  };
 
   const save = async () => {
     if (!modal.customer_id && !modal.customer_name.trim()) return toast.error("Customer required");
@@ -161,7 +227,7 @@ export default function Orders() {
       const payload = { ...modal, items, products: items.map((i) => `${i.qty} x ${[i.category, i.size, i.description].filter(Boolean).join(" ")}`).join("\n") || modal.products };
       if (modal.id) await api.put(`/orders/${modal.id}`, payload);
       else await api.post("/orders", payload);
-      toast.success("Order saved"); setModal(null); load();
+      toast.success("Order saved"); setModal(null); setPage(1); load();
     } catch (e) { toast.error(apiError(e)); }
   };
 
@@ -222,14 +288,20 @@ export default function Orders() {
 
       <div className="flex flex-wrap gap-2">
         {tabs.map((t) => (
-          <button key={t} onClick={() => setFilter(t)} data-testid={`order-filter-${t.toLowerCase().replace(/\s/g, "-")}`}
+          <button key={t} onClick={() => { setFilter(t); setPage(1); }} data-testid={`order-filter-${t.toLowerCase().replace(/\s/g, "-")}`}
             className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${filter === t ? "bg-primary text-white border-primary" : "bg-white text-slate-600 border-border hover:border-primary"}`}>
             {t === "open" ? "Open" : t === "all" ? "All" : t} <span className="opacity-70 ml-1">{loading ? "..." : count(t)}</span>
           </button>
         ))}
-        <div className="ml-auto w-48"><Input label="Order date" type="date" value={orderDate} onChange={(event) => setOrderDate(event.target.value)} data-testid="order-date-filter" /></div>
+        <div className="ml-auto w-48"><Input label="Order date" type="date" value={orderDate} onChange={(event) => { setOrderDate(event.target.value); setPage(1); }} data-testid="order-date-filter" /></div>
       </div>
-
+      <Card className="p-4">
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+          <input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search reference, customer, invoice, destination, products..."
+            className="w-full rounded-lg border border-input pl-9 pr-3 py-2.5 text-sm outline-none focus:border-primary" data-testid="order-search" />
+        </div>
+      </Card>
       <Card className="overflow-hidden">
         {loading ? <p className="p-6 text-sm text-slate-400" role="status">Loading orders...</p> : shown.length === 0 ? <Empty icon={ClipboardList} title="No orders here" hint="Create an order to start tracking shipments." /> : (
           <div className="overflow-x-auto">
@@ -248,7 +320,7 @@ export default function Orders() {
                   <td className="px-4 py-3 text-slate-500 whitespace-nowrap">{o.expected_ship_date ? fmtDate(o.expected_ship_date) : "-"}</td>
                   <td className="px-4 py-3 text-slate-500">{vName(o.vehicle_id) || "-"}</td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
-                    <button onClick={() => { setVisibleInvoiceItems(50); setViewOrder(o); }} className="text-slate-400 hover:text-primary mr-3" title="View order" aria-label={`View order ${o.reference}`} data-testid={`view-order-${o.id}`}><Eye size={15} /></button>
+                    <button onClick={() => { setVisibleInvoiceItems(50); void openOrder(o); }} className="text-slate-400 hover:text-primary mr-3" title="View order" aria-label={`View order ${o.reference}`} data-testid={`view-order-${o.id}`}><Eye size={15} /></button>
                     {o.status !== "Delivered" && o.status !== "Cancelled" && (
                       <button onClick={() => advance(o)} className="inline-flex items-center gap-1 text-emerald-600 hover:underline text-xs font-semibold mr-3" data-testid={`advance-order-${o.id}`}>
                         {STATUSES[STATUSES.indexOf(o.status) + 1]} <ArrowRight size={12} />
@@ -263,6 +335,14 @@ export default function Orders() {
           </div>
         )}
       </Card>
+      <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-500">
+        <span>Showing {total === 0 ? 0 : (page - 1) * 50 + 1}–{Math.min(page * 50, total)} of {total} orders</span>
+        <div className="flex gap-2">
+          <Btn variant="outline" disabled={loading || page <= 1} onClick={() => setPage((current) => current - 1)} data-testid="orders-previous-page">Previous</Btn>
+          <span className="self-center">Page {page} of {Math.max(1, Math.ceil(total / 50))}</span>
+          <Btn variant="outline" disabled={loading || page >= Math.ceil(total / 50)} onClick={() => setPage((current) => current + 1)} data-testid="orders-next-page">Next</Btn>
+        </div>
+      </div>
 
       <Modal open={!!viewOrder} onClose={() => setViewOrder(null)} title={`Order Details ${viewOrder?.reference || ""}`} wide>
         {viewOrder && <div className="max-h-[calc(100vh-9rem)] space-y-5 overflow-y-auto p-1 text-sm" data-testid={`order-details-${viewOrder.id}`}>
@@ -326,8 +406,8 @@ export default function Orders() {
       <Modal open={!!modal} onClose={() => setModal(null)} title={modal?.id ? `Edit Order ${modal.reference}` : "New Order"} wide>
         {modal && <div className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <Select label="Customer *" value={modal.customer_id} onChange={(e) => pickCustomer(e.target.value)} data-testid="order-customer-select">
-              <option value="">Select customer...</option>{customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            <Select label="Customer *" value={modal.customer_id} onChange={(e) => pickCustomer(e.target.value)} disabled={formDataLoading} data-testid="order-customer-select">
+              <option value="">{formDataLoading ? "Loading customers..." : "Select customer..."}</option>{customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </Select>
             {!modal.id && <Select label="Invoice" value={modal.invoice_id || ""} onChange={(e) => pickInvoice(e.target.value)} disabled={!modal.customer_id} data-testid="order-invoice-select">
               <option value="">Select an invoice...</option>

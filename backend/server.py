@@ -3562,9 +3562,12 @@ async def record_block_production(body: BlockProductionIn, user=Depends(get_curr
 
 
 @api.get("/production/block-productions")
-async def get_block_productions(user=Depends(get_current_user)):
+async def get_block_productions(
+    limit: int = Query(500, ge=1, le=500),
+    user=Depends(get_current_user),
+):
     _require_block_production_access(user)
-    return await listall("production_block_records", sort=("date", -1), limit=500)
+    return await listall("production_block_records", sort=("date", -1), limit=limit)
 
 LOW_STOCK_ALERT_RATIO = 0.2
 CHEMICAL_LOW_STOCK_COVERAGE_DAYS = 3
@@ -7825,7 +7828,13 @@ class AttendanceIn(BaseModel):
     notes: Optional[str] = ""
 
 @api.get("/attendance")
-async def get_attendance(user=Depends(get_current_user)):
+async def get_attendance(date_filter: Optional[str] = Query(None, alias="date"), user=Depends(get_current_user)):
+    if date_filter:
+        try:
+            validate_iso_date(date_filter)
+        except ValueError as error:
+            raise HTTPException(422, "Attendance date must use YYYY-MM-DD format") from error
+        return await listall("attendance", {"date": date_filter}, sort=("date", -1))
     return await listall("attendance", sort=("date", -1))
 
 @api.post("/attendance")
@@ -14046,8 +14055,103 @@ class OrderIn(BaseModel):
         return value
 
 @api.get("/orders")
-async def get_orders(include_archived: bool = False, user=Depends(get_current_user)):
+async def get_orders(
+    include_archived: bool = False,
+    page: Optional[int] = Query(None, ge=1),
+    page_size: int = Query(50, ge=1, le=50),
+    status: Literal["all", "open", "To Send", "Preparing", "Assigned", "Dispatched",
+                    "Delivered", "Cancelled", "Partially Delivered"] = "all",
+    order_date: Optional[str] = None,
+    q: str = Query("", max_length=100),
+    user=Depends(get_current_user),
+):
     flt = {} if include_archived else {"archived": {"$ne": True}}
+    if page is not None:
+        clauses = [flt]
+        if status == "open":
+            clauses.append({"status": {"$in": ["To Send", "Preparing", "Assigned"]}})
+        elif status != "all":
+            clauses.append({"status": status})
+        if order_date:
+            try:
+                selected = date.fromisoformat(validate_iso_date(order_date))
+            except ValueError as error:
+                raise HTTPException(422, "Order date must use YYYY-MM-DD format") from error
+            start = datetime.combine(selected, datetime.min.time(), TZ).astimezone(timezone.utc)
+            end = datetime.combine(selected + timedelta(days=1), datetime.min.time(), TZ).astimezone(timezone.utc)
+            clauses.append({"$or": [
+                {"created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()}},
+                {"created_at": {"$gte": start, "$lt": end}},
+            ]})
+        term = q.strip()
+        search_query = None
+        if term:
+            pattern = {"$regex": re.escape(term), "$options": "i"}
+            search_query = {"$or": [
+                {"reference": pattern},
+                {"customer_name": pattern},
+                {"invoice_number": pattern},
+                {"destination": pattern},
+                {"products": pattern},
+                {"items.category": pattern},
+                {"items.size": pattern},
+                {"items.description": pattern},
+            ]}
+            clauses.append(search_query)
+        query = {"$and": clauses}
+        status_count_query = {"$and": [flt, *([search_query] if search_query else [])]}
+        projection = {
+            "_id": 0, "id": 1, "reference": 1, "invoice_id": 1, "invoice_number": 1,
+            "customer_id": 1, "customer_name": 1, "customer_address": 1, "customer_phone": 1,
+            "customer_email": 1, "destination": 1, "items": 1, "products": 1,
+            "priority": 1, "status": 1, "expected_ship_date": 1, "vehicle_id": 1,
+            "notes": 1, "created_at": 1, "archived": 1,
+        }
+        cursor = db.orders.aggregate([
+            {"$match": query},
+            {"$addFields": {
+                "_priority_rank": {"$switch": {
+                    "branches": [
+                        {"case": {"$eq": ["$priority", "Urgent"]}, "then": 0},
+                        {"case": {"$eq": ["$priority", "High"]}, "then": 1},
+                        {"case": {"$eq": ["$priority", "Normal"]}, "then": 2},
+                        {"case": {"$eq": ["$priority", "Low"]}, "then": 3},
+                    ],
+                    "default": 9,
+                }},
+                "_ship_date_sort": {"$cond": [
+                    {"$eq": [{"$ifNull": ["$expected_ship_date", ""]}, ""]},
+                    "9",
+                    "$expected_ship_date",
+                ]},
+            }},
+            {"$sort": {"_priority_rank": 1, "_ship_date_sort": 1, "id": 1}},
+            {"$skip": (page - 1) * page_size},
+            {"$limit": page_size},
+            {"$project": {
+                "_id": 0,
+                **{field: 1 for field, included in projection.items() if included and field != "_id"},
+            }},
+        ])
+        status_cursor = db.orders.aggregate([
+            {"$match": status_count_query},
+            {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+        ])
+        items, total, status_rows, all_status_total = await asyncio.gather(
+            cursor.to_list(length=page_size),
+            db.orders.count_documents(query),
+            status_cursor.to_list(length=16),
+            db.orders.count_documents(status_count_query),
+        )
+        status_counts = {row["_id"]: row["count"] for row in status_rows if row.get("_id")}
+        status_counts["all"] = all_status_total
+        status_counts["open"] = sum(
+            status_counts.get(value, 0) for value in ("To Send", "Preparing", "Assigned")
+        )
+        return {
+            "items": items, "total": total, "page": page, "page_size": page_size,
+            "status_counts": status_counts,
+        }
     return await listall("orders", flt, sort=("created_at", -1))
 
 @api.post("/orders")
@@ -14157,14 +14261,37 @@ def daily_production_blocks(record):
     ]
 
 @api.get("/production/daily")
-async def get_daily_prod(include_archived: bool = False, user=Depends(get_current_user)):
+async def get_daily_prod(
+    include_archived: bool = False,
+    page: Optional[int] = Query(None, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    user=Depends(get_current_user),
+):
     flt = {} if include_archived else {"archived": {"$ne": True}}
-    rows = await listall("production_daily", flt, sort=("date", -1))
-    active_rows = [r for r in rows if not r.get("archived")]
+    if page is None:
+        rows = await listall("production_daily", flt, sort=("date", -1))
+        total = len(rows)
+    else:
+        cursor = (
+            db.production_daily.find(flt, {"_id": 0})
+            .sort([("date", -1), ("id", 1)])
+            .skip((page - 1) * page_size)
+            .limit(page_size)
+        )
+        rows, total = await asyncio.gather(
+            cursor.to_list(length=page_size),
+            db.production_daily.count_documents(flt),
+        )
+    week, month = period_starts()
+    summary_start = min(week, month)
+    active_rows = await listall(
+        "production_daily",
+        {"archived": {"$ne": True}, "date": {"$gte": summary_start}},
+        sort=("date", -1),
+    )
     for row in rows:
         row["blocks"] = daily_production_blocks(row)
         row["total_blocks"] = sum(item["quantity"] for item in row["blocks"])
-    week, month = period_starts()
     def tot(since):
         totals = {}
         for record in active_rows:
@@ -14179,7 +14306,10 @@ async def get_daily_prod(include_archived: bool = False, user=Depends(get_curren
             "white_blocks": totals.get("White", 0),
             "blue_blocks": totals.get("Blue", 0),
         }
-    return {"rows": rows, "today": tot(today_str()), "week": tot(week), "month": tot(month)}
+    return {
+        "rows": rows, "today": tot(today_str()), "week": tot(week), "month": tot(month),
+        "total": total, "page": page, "page_size": page_size if page is not None else None,
+    }
 
 @api.post("/production/daily")
 async def save_daily_prod(body: DailyProdIn, user=Depends(get_current_user)):

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { today } from "@/lib/format";
@@ -204,14 +204,22 @@ export default function Attendance() {
   const [historyEmployee, setHistoryEmployee] = useState(null);
   const [historyClearing, setHistoryClearing] = useState(false);
   const [advanceModal, setAdvanceModal] = useState(null);
+  const loadRequest = useRef(0);
 
   const load = () => {
-    Promise.all([api.get("/employees"), api.get("/attendance"), api.get("/attendance/summary")])
-      .then(([employeeData, attendanceData, summaryData]) => { setEmployees(employeeData); setRecords(attendanceData); setSummary(summaryData); })
-      .catch((e) => toast.error(apiError(e)))
-      .finally(() => setLoading(false));
+    const requestId = ++loadRequest.current;
+    setLoading(true);
+    Promise.all([api.get("/employees"), api.get("/attendance", { date }), api.get("/attendance/summary")])
+      .then(([employeeData, attendanceData, summaryData]) => {
+        if (requestId !== loadRequest.current) return;
+        setEmployees(employeeData);
+        setRecords(attendanceData);
+        setSummary(summaryData);
+      })
+      .catch((e) => { if (requestId === loadRequest.current) toast.error(apiError(e)); })
+      .finally(() => { if (requestId === loadRequest.current) setLoading(false); });
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [date, user?.company_id]);
   useEffect(() => {
     let activeRequest = true;
     setPieceLoading(true);

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtDateTime, today } from "@/lib/format";
@@ -22,6 +22,7 @@ export default function Production() {
     && (!user?.is_worker || (user?.is_supervisor && user?.allowed_sections?.includes("production")));
   const canManageRecipes = !user?.is_worker && (user?.is_owner || user?.is_admin || user?.is_company_owner);
   const [data, setData] = useState(null);
+  const [productionPage, setProductionPage] = useState(1);
   const emptyForm = () => ({ date: today(), blocks: [{ block: "White", quantity: "" }], notes: "" });
   const [form, setForm] = useState(emptyForm);
   const [stock, setStock] = useState([]);
@@ -47,18 +48,25 @@ export default function Production() {
   const [recipeDraft, setRecipeDraft] = useState({ block_type: "", components: [], indicated_total_cost: "" });
   const [busy, setBusy] = useState(false);
   const [cutBusy, setCutBusy] = useState(false);
+  const dailyLoadRequest = useRef(0);
   const load = () => {
-    api.get("/production/daily").then(setData).catch((e) => toast.error(apiError(e)));
+    const requestId = ++dailyLoadRequest.current;
+    api.get("/production/daily", { page: productionPage, page_size: 50 }).then((result) => {
+      if (requestId !== dailyLoadRequest.current) return;
+      setData(result);
+      const lastPage = Math.max(1, Math.ceil(result.total / 50));
+      if (productionPage > lastPage) setProductionPage(lastPage);
+    }).catch((e) => { if (requestId === dailyLoadRequest.current) toast.error(apiError(e)); });
     api.get(showArchivedCuttings ? "/production/block-cutting?include_archived=true" : "/production/block-cutting")
       .then(setBlockCuttings).catch((e) => toast.error(apiError(e)));
     api.get("/stock").then(setStock).catch((e) => toast.error(apiError(e)));
     if (canRecordBlockProduction) {
       api.getUncached("/production/block-recipes").then(setBlockRecipes).catch((e) => toast.error(apiError(e)));
-      api.getUncached("/production/block-productions").then(setBlockProductions).catch((e) => toast.error(apiError(e)));
+      api.getUncached("/production/block-productions?limit=20").then(setBlockProductions).catch((e) => toast.error(apiError(e)));
       api.getUncached("/warehouses/chemical/inventory").then(setChemicalInventory).catch((e) => toast.error(apiError(e)));
     }
   };
-  useEffect(() => { load(); }, [showArchivedCuttings, canRecordBlockProduction]);
+  useEffect(() => { load(); }, [showArchivedCuttings, canRecordBlockProduction, productionPage, user?.company_id]);
 
   const availableSizes = [...new Set(stock.map((item) => item.size).filter(Boolean))].sort();
   const selectedRecipe = blockRecipes.find((recipe) => recipe.id === blockProduction.recipe_id);
@@ -264,7 +272,7 @@ export default function Production() {
     if (busy) return; setBusy(true);
     try {
       await api.post("/production/daily", { ...form, blocks });
-      toast.success("Production saved"); setForm(emptyForm()); load();
+      toast.success("Production saved"); setForm(emptyForm()); setProductionPage(1); load();
     } catch (e) { toast.error(apiError(e)); } finally { setBusy(false); }
   };
   const saveBlockCutting = async () => {
@@ -544,6 +552,14 @@ export default function Production() {
           </table>
           </div>)}
       </Card>
+      <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-500">
+        <span>Showing {data?.total ? (productionPage - 1) * 50 + 1 : 0}–{Math.min(productionPage * 50, data?.total || 0)} of {data?.total || 0} production records</span>
+        <div className="flex gap-2">
+          <Btn variant="outline" disabled={productionPage <= 1} onClick={() => setProductionPage((current) => current - 1)} data-testid="production-previous-page">Previous</Btn>
+          <span className="self-center">Page {productionPage} of {Math.max(1, Math.ceil((data?.total || 0) / 50))}</span>
+          <Btn variant="outline" disabled={productionPage >= Math.ceil((data?.total || 0) / 50)} onClick={() => setProductionPage((current) => current + 1)} data-testid="production-next-page">Next</Btn>
+        </div>
+      </div>
       <Modal open={cutOpen} onClose={() => setCutOpen(false)} title={cutForm.id ? "Edit Block Cutting" : "Add Block Cutted"}>
         <div className="space-y-4">
           <BarcodeScanner onScan={scanCutProduct} disabled={cutBusy} label="Scan a finished product to select its size" />
