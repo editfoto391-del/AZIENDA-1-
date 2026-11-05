@@ -151,10 +151,6 @@
     background: #fff;
 }
 
-.daily-report-section:first-child {
-    grid-column: 1 / -1;
-}
-
 .daily-report-section:nth-child(1) {
     --report-accent: #4389a5;
     --report-tint: #dcecf4;
@@ -315,13 +311,6 @@
 
 .financial-report-paper details summary {
     list-style-position: inside;
-}
-
-@media (max-width: 900px) {
-    .daily-report-grid {
-        grid-template-columns: minmax(0, 1fr);
-        gap: 11px;
-    }
 }
 
 @media (max-width: 560px) {

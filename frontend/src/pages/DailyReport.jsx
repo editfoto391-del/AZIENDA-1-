@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, CalendarDays, Download, Printer, RefreshCw } from "lucide-react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
@@ -473,7 +473,11 @@ export default function DailyReport() {
     } finally {
       if (requestId === reportRequestId.current) setLoading(false);
     }
-  };
+  }, [reportDate]);
+
+  useEffect(() => {
+    if (viewMode === "daily") void generateDailyReport();
+  }, [viewMode, generateDailyReport]);
 
   const financialValue = viewMode === "monthly" ? monthValue : weekDate;
   useEffect(() => {
