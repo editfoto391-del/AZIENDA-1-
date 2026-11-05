@@ -151,6 +151,10 @@
     background: #fff;
 }
 
+.daily-report-section:first-child {
+    grid-column: 1 / -1;
+}
+
 .daily-report-section:nth-child(1) {
     --report-accent: #4389a5;
     --report-tint: #dcecf4;
@@ -233,6 +237,51 @@
     font-weight: 800;
     letter-spacing: 0.015em;
     text-align: left;
+}
+
+.daily-report-invoices-table {
+    min-width: 0;
+    font-size: 12px;
+}
+
+.daily-report-invoices-table th,
+.daily-report-invoices-table td {
+    padding: 6px 10px;
+}
+
+.daily-report-invoices-table th {
+    height: 38px;
+    border-bottom: 2px solid #b9c9d1;
+    background: #f2f7f9;
+    color: #172f3d;
+    font-size: 12px;
+    letter-spacing: 0.035em;
+    white-space: nowrap;
+}
+
+.daily-report-invoices-table th:nth-child(1),
+.daily-report-invoices-table td:nth-child(1) {
+    width: 8%;
+    text-align: center;
+}
+
+.daily-report-invoices-table th:nth-child(2),
+.daily-report-invoices-table td:nth-child(2) {
+    width: 20%;
+}
+
+.daily-report-invoices-table th:nth-child(3),
+.daily-report-invoices-table td:nth-child(3) {
+    width: 48%;
+}
+
+.daily-report-invoices-table th:nth-child(4),
+.daily-report-invoices-table td:nth-child(4) {
+    width: 24%;
+}
+
+.daily-report-invoices-table td:nth-child(3) {
+    overflow-wrap: anywhere;
 }
 
 .daily-report-table tbody tr:nth-child(odd):not(.daily-report-total) {

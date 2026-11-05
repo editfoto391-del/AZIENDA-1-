@@ -27,7 +27,26 @@ const weekPeriod = (offset = 0) => {
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 };
 
-function SalaryEmployeeCard({ employee, weeklySalary, deduction, saving, onWeeklySalaryChange, onSaveSalary, onDeductionChange, onSaveCut, onAddAdvance, onViewHistory, onDelete }) {
+const monthPeriod = (offset = 0) => {
+  const start = new Date(`${today()}T00:00:00Z`);
+  start.setUTCDate(1);
+  start.setUTCMonth(start.getUTCMonth() + offset);
+  const end = new Date(start);
+  end.setUTCMonth(end.getUTCMonth() + 1);
+  end.setUTCDate(0);
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+};
+
+const isFullMonthPeriod = (start, end) => {
+  const date = new Date(`${start}T00:00:00Z`);
+  if (!Number.isFinite(date.getTime())) return false;
+  const expectedStart = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const expectedEnd = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).toISOString().slice(0, 10);
+  return expectedStart === start && expectedEnd === end;
+};
+
+function SalaryEmployeeCard({ employee, weeklySalary, monthlySalary, deduction, saving, onWeeklySalaryChange, onMonthlySalaryChange, onSaveSalary, onDeductionChange, onSaveCut, onAddAdvance, onViewHistory, onDelete, fullMonthPeriod }) {
+  const monthlyFixed = employee.pay_frequency === "monthly_fixed";
   const fixedWeeklySalary = Number(weeklySalary ?? employee.weekly_salary) || 0;
   const dailySalary = fixedWeeklySalary / 6;
   const remainingBalance = employee.available_balance - deduction;
@@ -44,6 +63,16 @@ function SalaryEmployeeCard({ employee, weeklySalary, deduction, saving, onWeekl
             <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Piece pay this week</p>
             <p className="mt-1.5 font-mono text-lg font-bold text-slate-800">{fmtMoney(employee.piece_pay)}</p>
             <p className="text-xs text-slate-500">{employee.total_pieces} pieces recorded this period</p>
+          </div> : monthlyFixed ? <div className="rounded-lg border border-border/70 p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Fixed monthly salary</p>
+            <div className="mt-1.5 flex items-center gap-2">
+              <span className="text-sm text-slate-500">R</span>
+              <input aria-label={`Fixed monthly salary for ${employee.name}`} type="number" min="0.01" step="0.01" disabled={saving} value={monthlySalary ?? employee.monthly_salary ?? ""}
+                onChange={(event) => onMonthlySalaryChange(event.target.value)}
+                className="min-w-0 flex-1 rounded border border-input px-2 py-1.5 font-mono text-sm" data-testid={`salary-monthly-rate-${employee.employee_id}`} />
+              <button disabled={saving} onClick={onSaveSalary} className="text-xs font-semibold text-primary hover:underline disabled:opacity-50" data-testid={`save-salary-rate-${employee.employee_id}`}>{saving ? "Saving…" : "Save"}</button>
+            </div>
+            <p className="mt-2 text-[11px] text-slate-500">Paid once per calendar month; attendance is still recorded daily.</p>
           </div> : <div className="rounded-lg border border-border/70 p-3">
             <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Fixed weekly salary</p>
             <div className="mt-1.5 flex items-center gap-2">
@@ -102,29 +131,36 @@ function SalaryEmployeeCard({ employee, weeklySalary, deduction, saving, onWeekl
                 ))}
               </div>
             </> : <>
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Pay earned this week</p>
-              <p className="mt-1.5 font-mono text-lg font-bold text-slate-800">{fmtMoney(employee.gross_salary)}</p>
-              <p className="text-xs text-slate-500">{employee.present_days} full + {employee.half_days} half · {employee.regular_hours + employee.overtime_hours} total hours</p>
-              <p className="mt-1 text-xs text-slate-500">{fmtMoney(employee.regular_pay)} regular · {fmtMoney(employee.overtime_pay)} overtime ({employee.overtime_hours}h × R20)</p>
+              {monthlyFixed ? <>
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Pay earned this month</p>
+                <p className="mt-1.5 font-mono text-lg font-bold text-slate-800">{!employee.monthly_salary ? "Set monthly salary" : fullMonthPeriod ? fmtMoney(employee.gross_salary) : "Select a full month"}</p>
+                <p className="text-xs text-slate-500">{employee.present_days} full + {employee.half_days} half days recorded</p>
+                {!fullMonthPeriod && <p className="mt-1 text-xs text-amber-700">Monthly pay is included only for a complete calendar month.</p>}
+              </> : <>
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Pay earned this week</p>
+                <p className="mt-1.5 font-mono text-lg font-bold text-slate-800">{fmtMoney(employee.gross_salary)}</p>
+                <p className="text-xs text-slate-500">{employee.present_days} full + {employee.half_days} half · {employee.regular_hours + employee.overtime_hours} total hours</p>
+                <p className="mt-1 text-xs text-slate-500">{fmtMoney(employee.regular_pay)} regular · {fmtMoney(employee.overtime_pay)} overtime ({employee.overtime_hours}h × R20)</p>
+              </>}
             </>}
           </div>
         </div>
         <section className="rounded-lg border border-amber-200 bg-amber-50/60 p-3">
           <h4 className="text-sm font-bold text-slate-800">Borrowed balance</h4>
           <div className="mt-2 grid grid-cols-2 gap-3">
-            <div><p className="text-xs text-slate-600">Owed at start of week</p><p className="mt-0.5 font-mono font-semibold">{fmtMoney(employee.balance_before_period)}</p></div>
-            <label className="block"><span className="block text-xs text-slate-600">Deduct this week</span><span className="mt-0.5 flex items-center gap-1 rounded border border-input bg-white px-2"><span className="text-xs text-slate-500">R</span><input aria-label={`Deduct from balance for ${employee.name}`} type="number" min="0" max={Math.min(employee.available_balance, employee.gross_salary)} step="0.01" value={deduction}
+            <div><p className="text-xs text-slate-600">Owed at start of {monthlyFixed ? "month" : "week"}</p><p className="mt-0.5 font-mono font-semibold">{fmtMoney(employee.balance_before_period)}</p></div>
+            <label className="block"><span className="block text-xs text-slate-600">Deduct this {monthlyFixed ? "month" : "week"}</span><span className="mt-0.5 flex items-center gap-1 rounded border border-input bg-white px-2"><span className="text-xs text-slate-500">R</span><input aria-label={`Deduct from balance for ${employee.name}`} type="number" min="0" max={Math.min(employee.available_balance, employee.gross_salary)} step="0.01" value={deduction}
               onChange={(event) => onDeductionChange(event.target.value)}
               className="min-w-0 w-full border-0 bg-transparent py-1.5 font-mono text-sm outline-none" data-testid={`salary-cut-${employee.employee_id}`} /></span></label>
           </div>
-          <p className="mt-2 border-t border-amber-200/70 pt-2 text-sm">Still owed after this week: <strong className="font-mono">{fmtMoney(remainingBalance)}</strong></p>
-          {employee.balance_before_period <= 0 && <p className="mt-1 text-xs text-slate-500">No borrowed balance was owed at the start of this week.</p>}
+          <p className="mt-2 border-t border-amber-200/70 pt-2 text-sm">Still owed after this {monthlyFixed ? "month" : "week"}: <strong className="font-mono">{fmtMoney(remainingBalance)}</strong></p>
+          {employee.balance_before_period <= 0 && <p className="mt-1 text-xs text-slate-500">No borrowed balance was owed at the start of this {monthlyFixed ? "month" : "week"}.</p>}
         </section>
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
           <div><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Take-home pay after deduction</p><p className="font-mono text-xl font-bold text-emerald-700">{fmtMoney(takeHome)}</p></div>
           <div className="flex flex-wrap gap-2">
             <Btn variant="outline" disabled={saving} onClick={onAddAdvance} data-testid={`salary-advance-${employee.employee_id}`}>+ Add borrowed balance</Btn>
-            <Btn disabled={saving} onClick={onSaveCut} data-testid={`save-salary-cut-${employee.employee_id}`}>{saving ? "Saving…" : "Save this week’s cut"}</Btn>
+            <Btn disabled={saving || (monthlyFixed && (!fullMonthPeriod || !employee.monthly_salary))} onClick={onSaveCut} data-testid={`save-salary-cut-${employee.employee_id}`}>{saving ? "Saving…" : `Save this ${monthlyFixed ? "month" : "week"}’s cut`}</Btn>
             {onDelete && <Btn variant="danger" disabled={saving} onClick={onDelete} data-testid={`delete-salary-employee-${employee.employee_id}`}><Trash2 size={15} /> Delete employee</Btn>}
           </div>
         </div>
@@ -155,14 +191,15 @@ export default function Attendance() {
   const [workTimeDraft, setWorkTimeDraft] = useState({});
   const [shiftModeDraft, setShiftModeDraft] = useState({});
   const [workTimeSaving, setWorkTimeSaving] = useState({});
-  const [salaryStart, setSalaryStart] = useState(() => weekPeriod().start);
-  const [salaryEnd, setSalaryEnd] = useState(() => weekPeriod().end);
+  const [salaryStart, setSalaryStart] = useState(() => monthPeriod().start);
+  const [salaryEnd, setSalaryEnd] = useState(() => monthPeriod().end);
   const [salarySearch, setSalarySearch] = useState("");
   const [salaryDepartment, setSalaryDepartment] = useState("");
   const [salaryReport, setSalaryReport] = useState(null);
   const [salaryLoading, setSalaryLoading] = useState(false);
   const [salaryCuts, setSalaryCuts] = useState({});
   const [salaryWeeklySalaries, setSalaryWeeklySalaries] = useState({});
+  const [salaryMonthlySalaries, setSalaryMonthlySalaries] = useState({});
   const [salarySaving, setSalarySaving] = useState({});
   const [historyEmployee, setHistoryEmployee] = useState(null);
   const [historyClearing, setHistoryClearing] = useState(false);
@@ -425,9 +462,23 @@ export default function Attendance() {
       setSalaryReport(report);
       setSalaryCuts(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.cut || 0)])));
       setSalaryWeeklySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.weekly_salary ?? 0)])));
+      setSalaryMonthlySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.monthly_salary ?? "")])));
     } catch (e) { toast.error(apiError(e)); } finally { setSalaryLoading(false); }
   };
   const saveSalaryRate = async (employee) => {
+    if (employee.pay_frequency === "monthly_fixed") {
+      const monthlySalary = Number(salaryMonthlySalaries[employee.employee_id]);
+      if (!Number.isFinite(monthlySalary) || monthlySalary <= 0) return toast.error("Monthly salary must be greater than zero");
+      setSalarySaving((current) => ({ ...current, [employee.employee_id]: true }));
+      try {
+        await api.put(`/salaries/rates/${employee.employee_id}`, { monthly_salary: monthlySalary });
+        toast.success(`Monthly salary updated for ${employee.name}`);
+        await loadSalaries();
+      } catch (e) { toast.error(apiError(e)); } finally {
+        setSalarySaving((current) => ({ ...current, [employee.employee_id]: false }));
+      }
+      return;
+    }
     const weeklySalary = Number(salaryWeeklySalaries[employee.employee_id]);
     if (!Number.isFinite(weeklySalary) || weeklySalary <= 0) return toast.error("Weekly salary must be greater than zero");
     setSalarySaving((current) => ({ ...current, [employee.employee_id]: true }));
@@ -440,6 +491,9 @@ export default function Attendance() {
     }
   };
   const saveSalaryCut = async (employee) => {
+    if (employee.pay_frequency === "monthly_fixed" && !isFullMonthPeriod(salaryStart, salaryEnd)) {
+      return toast.error("Select a complete calendar month before saving a salary cut");
+    }
     const amount = Number(salaryCuts[employee.employee_id] || 0);
     if (!Number.isFinite(amount) || amount < 0) return toast.error("Cut amount must be zero or more");
     setSalarySaving((current) => ({ ...current, [employee.employee_id]: true }));
@@ -494,6 +548,12 @@ export default function Attendance() {
     setSalaryEnd(period.end);
     loadSalaries(period.start, period.end);
   };
+  const chooseSalaryMonth = (offset) => {
+    const period = monthPeriod(offset);
+    setSalaryStart(period.start);
+    setSalaryEnd(period.end);
+    loadSalaries(period.start, period.end);
+  };
   const Stat = ({ l, v, cls, k }) => <Card className="p-4" data-testid={`att-${k}`}><p className="text-xs text-slate-400 uppercase font-semibold">{l}</p><p className={`text-2xl font-bold font-mono mt-1 ${cls}`}>{v}</p></Card>;
 
   return (
@@ -530,17 +590,19 @@ export default function Attendance() {
           <Card className="space-y-4 p-4">
             <div>
               <h2 className="font-display text-lg font-bold text-slate-800">Choose pay period</h2>
-              <p className="mt-1 text-sm text-slate-500">Each cut is saved against the selected dates. Start a new week by selecting “This week”; previous balances carry forward automatically.</p>
+              <p className="mt-1 text-sm text-slate-500">Cuts are saved against the selected dates, and previous balances carry forward automatically. Monthly fixed salaries are included only for a complete calendar month.</p>
             </div>
             <div className="flex flex-wrap items-end gap-3">
-              <div className="w-44"><Input label="Week starts" type="date" value={salaryStart} onChange={(event) => { setSalaryStart(event.target.value); setSalaryReport(null); }} data-testid="salary-start-date" /></div>
-              <div className="w-44"><Input label="Week ends" type="date" value={salaryEnd} onChange={(event) => { setSalaryEnd(event.target.value); setSalaryReport(null); }} data-testid="salary-end-date" /></div>
+              <div className="w-44"><Input label="Period starts" type="date" value={salaryStart} onChange={(event) => { setSalaryStart(event.target.value); setSalaryReport(null); }} data-testid="salary-start-date" /></div>
+              <div className="w-44"><Input label="Period ends" type="date" value={salaryEnd} onChange={(event) => { setSalaryEnd(event.target.value); setSalaryReport(null); }} data-testid="salary-end-date" /></div>
+              <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryMonth(0)} data-testid="salary-this-month-btn">This month</Btn>
+              <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryMonth(-1)} data-testid="salary-last-month-btn">Last month</Btn>
               <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryWeek(0)} data-testid="salary-this-week-btn">This week (Mon–Sun)</Btn>
               <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryWeek(-1)} data-testid="salary-last-week-btn">Last week</Btn>
               <Btn disabled={salaryLoading} onClick={loadSalaries} data-testid="load-salaries-btn">{salaryLoading ? "Loading..." : "Show salaries"}</Btn>
               <Btn variant="danger" disabled={rosterResetting || salaryLoading} onClick={resetPayrollRosterAndAttendance} data-testid="reset-payroll-roster-btn">{rosterResetting ? "Resetting roster…" : "Reset roster and attendance"}</Btn>
             </div>
-            <p className="border-t border-border pt-3 text-xs leading-relaxed text-slate-500">The fixed weekly salary is divided by six paid days: each full day Monday–Saturday earns one sixth of the weekly amount (8 working hours Monday–Friday, including an unpaid break in the 8:00–17:00 shift; 5 hours Saturday). Overtime is paid separately at R20 per hour. Ayanda and Asive remain on piece pay.</p>
+            <p className="border-t border-border pt-3 text-xs leading-relaxed text-slate-500">Weekly salaries are divided by six paid days. Yaseen Uncle and Ameena receive fixed monthly pay once per calendar month; record their attendance daily. Overtime is paid separately at R20 per hour for weekly-paid staff. Ayanda and Asive remain on piece pay.</p>
           </Card>
           {salaryReport && <Card className="overflow-hidden">
             {salaryReport.employees.length === 0 ? <Empty icon={Users} title="No employees found" /> : <>
@@ -575,9 +637,12 @@ export default function Attendance() {
                   key={employee.employee_id}
                   employee={employee}
                   weeklySalary={salaryWeeklySalaries[employee.employee_id]}
+                  monthlySalary={salaryMonthlySalaries[employee.employee_id]}
                   deduction={deduction}
                   saving={saving}
+                  fullMonthPeriod={isFullMonthPeriod(salaryStart, salaryEnd)}
                   onWeeklySalaryChange={(value) => setSalaryWeeklySalaries((current) => ({ ...current, [employee.employee_id]: value }))}
+                  onMonthlySalaryChange={(value) => setSalaryMonthlySalaries((current) => ({ ...current, [employee.employee_id]: value }))}
                   onSaveSalary={() => saveSalaryRate(employee)}
                   onDeductionChange={(value) => setSalaryCuts((current) => ({ ...current, [employee.employee_id]: value }))}
                   onSaveCut={() => saveSalaryCut(employee)}

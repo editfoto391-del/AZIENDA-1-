@@ -236,3 +236,61 @@ def test_five_weekdays_earn_five_sixths_of_fixed_weekly_salary(monkeypatch):
     assert result["regular_hours"] == 40
     assert result["regular_pay"] == 833.33
     assert result["gross_salary"] == 833.33
+
+
+def test_monthly_fixed_employees_are_recognized_by_name():
+    assert server.is_monthly_fixed_salary_employee({"name": "MR. YASEEN"})
+    assert server.is_monthly_fixed_salary_employee({"name": "Yassine Uncle"})
+    assert server.is_monthly_fixed_salary_employee({"name": "AMEENA"})
+    assert server.is_monthly_fixed_salary_employee({"name": "Amina"})
+    assert not server.is_monthly_fixed_salary_employee({"name": "Yaseen"})
+
+
+def test_monthly_fixed_salary_is_paid_once_for_a_complete_month(monkeypatch):
+    employee = {
+        "id": "employee-monthly",
+        "name": "MR. YASEEN",
+        "monthly_salary": 12000,
+        "weekly_salary": 1000,
+    }
+    records = {
+        "employees": [employee],
+        "attendance": [],
+        "piece_production": [],
+        "salary_advances": [],
+        "salary_cuts": [],
+    }
+
+    async def fake_listall(collection, *_args, **_kwargs):
+        return records[collection]
+
+    monkeypatch.setattr(server, "listall", fake_listall)
+
+    report = asyncio.run(server.salary_report("2026-10-01", "2026-10-31"))
+    result = report["employees"][0]
+
+    assert result["pay_frequency"] == "monthly_fixed"
+    assert result["monthly_salary"] == 12000
+    assert result["gross_salary"] == 12000
+    assert result["regular_pay"] == 0
+    assert result["overtime_pay"] == 0
+
+
+def test_monthly_fixed_salary_is_not_repeated_in_a_partial_month(monkeypatch):
+    records = {
+        "employees": [{"id": "employee-monthly", "name": "AMEENA", "monthly_salary": 9000}],
+        "attendance": [],
+        "piece_production": [],
+        "salary_advances": [],
+        "salary_cuts": [],
+    }
+
+    async def fake_listall(collection, *_args, **_kwargs):
+        return records[collection]
+
+    monkeypatch.setattr(server, "listall", fake_listall)
+
+    report = asyncio.run(server.salary_report("2026-10-26", "2026-11-01"))
+
+    assert report["employees"][0]["gross_salary"] == 0
+    assert report["employees"][0]["is_full_month_period"] is False

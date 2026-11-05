@@ -90,3 +90,27 @@ def test_invoice_stock_still_rejects_missing_product_size_pair(monkeypatch):
 
     assert error.value.status_code == 400
     assert error.value.detail == "Stock item not found for invoice line 1: Ribbon Pink 1000x1000"
+
+
+@pytest.mark.parametrize(
+    "stock_product,stock_size,invoice_category,invoice_size",
+    [
+        ("Brown Spunbond Fabric STD", "Roll A", "BROWN SPUNBOND FABRIC STD", "roll a"),
+        ("BROWN\nSPUNBOND FABRIC STD", "SPUNBOND FABRIC STD", "brown spunbond fabric std", "spunbond   fabric std"),
+    ],
+)
+def test_invoice_stock_matches_text_names_and_sizes_case_insensitively(
+    monkeypatch, stock_product, stock_size, invoice_category, invoice_size
+):
+    deductions = asyncio.run(resolve_deductions(
+        monkeypatch,
+        [{"id": "stock-text", "product": stock_product, "size": stock_size}],
+        {"items": [{"category": invoice_category, "size": invoice_size, "qty": 1}]},
+    ))
+
+    assert deductions == [{
+        "stock_id": "stock-text",
+        "product": stock_product,
+        "size": stock_size,
+        "quantity": server.D("1"),
+    }]

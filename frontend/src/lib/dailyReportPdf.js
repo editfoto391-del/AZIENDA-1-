@@ -23,7 +23,7 @@ function sectionRows(report, mainInvoiceNo) {
       columns: [
         { label: "NO", width: 0.08, value: (_row, index) => index + 1 },
         { label: "INVOICE NO.", width: 0.2, value: (row) => row.number },
-        { label: "CLIENT / DESCRIPTION", width: 0.46, value: (row) => row.client_name },
+        { label: "CLIENT DESCRIPTION", width: 0.46, value: (row) => row.client_name },
         { label: "AMOUNT", width: 0.26, value: (row) => money(row.amount), align: "right" },
       ],
       rows: report.invoices || [],

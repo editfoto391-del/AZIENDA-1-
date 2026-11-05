@@ -558,7 +558,7 @@ export default function Production() {
             })} data-testid="block-cutting-sheet-toggle" />
             Sheet
           </label>
-          {!cutForm.has_sheet && <Select label="Which size?" value={cutForm.size} onChange={(event) => setCutForm({ ...cutForm, size: event.target.value })} disabled={!cutForm.block || availableSizes.length === 0} data-testid="block-cutting-size-select">
+          {!cutForm.has_sheet && <Select label="Which size?" value={cutForm.size} onChange={(event) => setCutForm((current) => ({ ...current, size: event.target.value }))} disabled={availableSizes.length === 0} data-testid="block-cutting-size-select">
             <option value="">{availableSizes.length ? "Select size..." : "No sizes available in Stock"}</option>
             {availableSizes.map((size) => <option key={size} value={size}>{size}</option>)}
           </Select>}

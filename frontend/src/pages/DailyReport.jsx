@@ -27,7 +27,7 @@ function ReportSection({ number, title, columns, rows, totalLabel, total, mainIn
         <span>{title}</span>
       </div>
       <div className="overflow-x-auto">
-        <table className="daily-report-table">
+        <table className={`daily-report-table${number === "01" ? " daily-report-invoices-table" : ""}`}>
           <thead>
             <tr>{columns.map((column) => <th key={column.key} className={column.align === "right" ? "text-right" : ""}>{column.label}</th>)}</tr>
           </thead>
@@ -75,7 +75,7 @@ function ReportTables({ report }) {
         columns={[
           { key: "no", label: "NO", render: (_row, index) => index + 1 },
           { key: "number", label: "INVOICE NO.", render: (row) => row.number },
-          { key: "client", label: "CLIENT / DESCRIPTION", render: (row) => row.client_name },
+          { key: "client", label: "CLIENT DESCRIPTION", render: (row) => row.client_name },
           { key: "amount", label: "AMOUNT", align: "right", render: (row) => formatMoney(row.amount) },
         ]}
         rows={report.invoices || []}
@@ -443,12 +443,12 @@ export default function DailyReport() {
   const [reportCompany, setReportCompany] = useState(user?.company_id || "");
   const [report, setReport] = useState(null);
   const [financialReport, setFinancialReport] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [financialLoading, setFinancialLoading] = useState(false);
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [downloadingHome, setDownloadingHome] = useState(false);
-  const followToday = useRef(true);
+  const reportRequestId = useRef(0);
   const companyName = report?.company_name || companyDailyReportName(user?.company_id);
   const accessibleCompanies = Array.isArray(user?.company_ids) && user.company_ids.length
     ? user.company_ids
@@ -460,66 +460,20 @@ export default function DailyReport() {
     }
   }, [reportCompany, user?.company_id, user?.company_ids]);
 
-  useEffect(() => {
-    if (viewMode !== "daily") return undefined;
-    let active = true;
-    let firstLoad = true;
-    let latestRequest = 0;
-    let requestInFlight = false;
-    let refreshQueued = false;
-    const loadReport = async () => {
-      if (!active) return;
-      if (requestInFlight) {
-        refreshQueued = true;
-        return;
-      }
-      requestInFlight = true;
-      const requestId = ++latestRequest;
-      if (firstLoad && active) {
-        setLoading(true);
-        setReport(null);
-        setError("");
-      }
-      try {
-        const data = await api.getUncached("/daily-report", { report_date: reportDate });
-        if (!active || requestId !== latestRequest) return;
-        setReport(data);
-        setError("");
-      } catch (requestError) {
-        if (active && requestId === latestRequest) setError(apiError(requestError));
-      } finally {
-        if (active && firstLoad) setLoading(false);
-        firstLoad = false;
-        requestInFlight = false;
-        if (active && refreshQueued && document.visibilityState === "visible") {
-          refreshQueued = false;
-          void loadReport();
-        }
-      }
-    };
-
-    const refreshOnChange = () => { loadReport(); };
-    const handleVisibility = () => {
-      if (document.visibilityState === "visible") loadReport();
-    };
-    loadReport();
-    const interval = window.setInterval(() => {
-      if (document.visibilityState !== "visible") return;
-      if (followToday.current && reportDate !== today()) {
-        setReportDate(today());
-        return;
-      }
-      loadReport();
-    }, 20000);
-    window.addEventListener("erp:data-changed", refreshOnChange);
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-      window.removeEventListener("erp:data-changed", refreshOnChange);
-      document.removeEventListener("visibilitychange", handleVisibility);
-    };
-  }, [reportDate, viewMode]);
+  const generateDailyReport = async () => {
+    const requestId = ++reportRequestId.current;
+    setLoading(true);
+    setReport(null);
+    setError("");
+    try {
+      const data = await api.getUncached("/daily-report", { report_date: reportDate });
+      if (requestId === reportRequestId.current) setReport(data);
+    } catch (requestError) {
+      if (requestId === reportRequestId.current) setError(apiError(requestError));
+    } finally {
+      if (requestId === reportRequestId.current) setLoading(false);
+    }
+  };
 
   const financialValue = viewMode === "monthly" ? monthValue : weekDate;
   useEffect(() => {
@@ -608,7 +562,15 @@ export default function DailyReport() {
         </div>
       </div>
       <nav className="flex gap-2 border-b border-slate-200 pb-2" aria-label="Report period">
-        {["daily", "weekly", "monthly"].map((period) => <button type="button" key={period} onClick={() => setViewMode(period)} className={`rounded-md px-3 py-2 text-sm font-semibold capitalize ${viewMode === period ? "bg-slate-800 text-white" : "text-slate-600 hover:bg-slate-100"}`} data-testid={`report-period-${period}`}>{period}</button>)}
+        {["daily", "weekly", "monthly"].map((period) => <button type="button" key={period} onClick={() => {
+          if (period !== viewMode) {
+            reportRequestId.current += 1;
+            setReport(null);
+            setLoading(false);
+            setError("");
+            setViewMode(period);
+          }
+        }} className={`rounded-md px-3 py-2 text-sm font-semibold capitalize ${viewMode === period ? "bg-slate-800 text-white" : "text-slate-600 hover:bg-slate-100"}`} data-testid={`report-period-${period}`}>{period}</button>)}
       </nav>
       <div className="flex flex-wrap items-end gap-2" data-report-controls>
         <label className="block">
@@ -620,7 +582,10 @@ export default function DailyReport() {
             onChange={(event) => {
               const selected = event.target.value || (viewMode === "monthly" ? today().slice(0, 7) : today());
               if (viewMode === "daily") {
-                followToday.current = selected === today();
+                reportRequestId.current += 1;
+                setReport(null);
+                setLoading(false);
+                setError("");
                 setReportDate(selected);
               } else if (viewMode === "weekly") setWeekDate(selected);
               else setMonthValue(selected);
@@ -628,6 +593,10 @@ export default function DailyReport() {
             className="rounded-md border border-input bg-white px-3 py-2.5 text-sm text-slate-800"
           />
         </label>
+        {viewMode === "daily" && <Btn onClick={generateDailyReport} disabled={loading} data-testid="daily-report-generate">
+          {loading ? <RefreshCw size={16} className="animate-spin" /> : <CalendarDays size={16} />}
+          {loading ? "Generating report..." : "GENERATE DAILY REPORT"}
+        </Btn>}
         {viewMode === "daily" && <Btn onClick={downloadPdf} disabled={!report || loading || downloading} data-testid="daily-report-download-pdf">
           {downloading ? <RefreshCw size={16} className="animate-spin" /> : <Download size={16} />}
           {downloading ? "Preparing PDF..." : "DOWNLOAD COMPANY PDF"}
@@ -665,7 +634,9 @@ export default function DailyReport() {
         </div>
       )}
 
-      {viewMode === "daily" && <div className="daily-report-paper" aria-busy={loading}>
+      {viewMode === "daily" && loading && <div role="status" className="daily-report-loading">Generating daily report...</div>}
+      {viewMode === "daily" && !loading && !report && !error && <div role="status" className="daily-report-loading">Select a date and generate the daily report to view or download it.</div>}
+      {viewMode === "daily" && report && <div className="daily-report-paper">
         <header className="daily-report-heading">
           <div className="daily-report-company">{companyName}</div>
           <div className="daily-report-title">DAILY REPORT</div>
@@ -675,15 +646,9 @@ export default function DailyReport() {
             <span><strong>Company:</strong> {companyName}</span>
           </div>
         </header>
-        {loading ? (
-          <div role="status" className="daily-report-loading">Loading report...</div>
-        ) : report ? (
-          <ReportTables report={report} />
-        ) : (
-          <div role="status" className="daily-report-loading">Report data could not be loaded.</div>
-        )}
+        <ReportTables report={report} />
       </div>}
-      {viewMode === "daily" && !loading && report && <HomeReportTable report={report} />}
+      {viewMode === "daily" && report && <HomeReportTable report={report} />}
       {viewMode !== "daily" && <FinancialReport
         report={financialReport}
         mode={accountingMode}

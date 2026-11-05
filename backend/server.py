@@ -6769,12 +6769,21 @@ def invoice_stock_product_aliases(item):
         return ("Ribbon Pink", "Ribbon")
     return tuple(dict.fromkeys((canonical, category)))
 
+
+def invoice_stock_text_key(value):
+    return " ".join(str(value or "").split()).casefold()
+
+
+def invoice_stock_size_key(value):
+    return invoice_stock_text_key(canonical_price_size(value))
+
+
 async def invoice_stock_deductions(invoice, allow_empty=False):
     stock_items = await listall("stock")
     stock_by_product_size = {
         (
-            (item.get("product") or "").strip().casefold(),
-            canonical_price_size(item.get("size")),
+            invoice_stock_text_key(item.get("product")),
+            invoice_stock_size_key(item.get("size")),
         ): item
         for item in stock_items
     }
@@ -6784,12 +6793,12 @@ async def invoice_stock_deductions(invoice, allow_empty=False):
         size = (item.get("size") or "").strip()
         if not products[0] or not size:
             continue
-        normalized_size = canonical_price_size(size)
+        normalized_size = invoice_stock_size_key(size)
         stock = next(
             (
-                stock_by_product_size.get((product.casefold(), normalized_size))
+                stock_by_product_size.get((invoice_stock_text_key(product), normalized_size))
                 for product in products
-                if stock_by_product_size.get((product.casefold(), normalized_size))
+                if stock_by_product_size.get((invoice_stock_text_key(product), normalized_size))
             ),
             None,
         )
@@ -6927,6 +6936,7 @@ async def get_stock(user=Depends(get_current_user)):
         await stock_current(s)
         stock_for_user(s, user)
     return items
+
 
 @api.post("/stock")
 async def add_stock(body: StockIn, user=Depends(get_current_user)):
@@ -7380,6 +7390,16 @@ def is_piece_paid_employee(employee):
         or normalized_name in seed_data.PIECEWORK_EMPLOYEE_NAMES
     )
 
+
+def is_monthly_fixed_salary_employee(employee):
+    normalized_name = " ".join(
+        "".join(character if character.isalnum() else " " for character in (employee.get("name") or "")).split()
+    ).upper()
+    tokens = set(normalized_name.split())
+    return normalized_name in {"AMEENA", "AMINA", "MR YASEEN", "MR YASSINE"} or (
+        "UNCLE" in tokens and bool(tokens & {"YASEEN", "YASSEN", "YASSINE", "YASIN"})
+    )
+
 def piecework_includes_sunday(employee_name):
     normalized_name = " ".join((employee_name or "").split()).upper()
     return normalized_name not in seed_data.PIECEWORK_EMPLOYEE_NAMES
@@ -7663,6 +7683,7 @@ class SalaryCutIn(BaseModel):
 class SalaryRateIn(BaseModel):
     hourly_rate: Optional[float] = Field(default=None, ge=0.01)
     weekly_salary: Optional[float] = Field(default=None, gt=0)
+    monthly_salary: Optional[float] = Field(default=None, gt=0)
     work_days_per_week: Optional[int] = Field(default=None, ge=6, le=6)
 
 class PieceProductionIn(BaseModel):
@@ -7773,8 +7794,19 @@ def salary_period_dates(start_date, end_date):
         raise HTTPException(400, "Salary period end date must not be before start date")
     return start_date, end_date
 
+
+def is_full_calendar_month(start_date, end_date):
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    return (
+        start.day == 1
+        and end == date(start.year, start.month, calendar.monthrange(start.year, start.month)[1])
+    )
+
+
 async def salary_report(start_date, end_date):
     salary_period_dates(start_date, end_date)
+    full_month_period = is_full_calendar_month(start_date, end_date)
     employees, attendance, piece_records, advances, cuts = await asyncio.gather(
         listall("employees", sort=("name", 1)),
         listall("attendance", {"date": {"$gte": start_date, "$lte": end_date}}, ("date", 1)),
@@ -7786,12 +7818,14 @@ async def salary_report(start_date, end_date):
     for employee in employees:
         hourly_rate = float(employee.get("hourly_rate") or 20)
         is_piece_paid = is_piece_paid_employee(employee)
-        weekly_salary = employee.get("weekly_salary") if not is_piece_paid else None
+        is_monthly_fixed = is_monthly_fixed_salary_employee(employee) and not is_piece_paid
+        monthly_salary = employee.get("monthly_salary") if is_monthly_fixed else None
+        weekly_salary = employee.get("weekly_salary") if not is_piece_paid and not is_monthly_fixed else None
         hours_per_week = STANDARD_WEEKLY_HOURS
         work_days_per_week = 6
-        if weekly_salary is None and not is_piece_paid:
+        if weekly_salary is None and not is_piece_paid and not is_monthly_fixed:
             weekly_salary = r2(D(hourly_rate) * D(8) * D(STANDARD_PAID_DAYS_PER_WEEK))
-        if not is_piece_paid:
+        if not is_piece_paid and not is_monthly_fixed:
             hourly_rate = float(
                 (D(weekly_salary) / D(STANDARD_PAID_DAYS_PER_WEEK) / D(8))
                 .quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
@@ -7813,9 +7847,9 @@ async def salary_report(start_date, end_date):
         half_days = sum(day["status"] == "Half Day" for day in days)
         for day in days:
             day["regular_pay"] = r2(
-                D(weekly_salary) * D(day["attendance_fraction"]) / D(STANDARD_PAID_DAYS_PER_WEEK)
-            )
-            day["overtime_pay"] = r2(D(day["overtime_hours"]) * D(OVERTIME_HOURLY_RATE))
+                D(weekly_salary or 0) * D(day["attendance_fraction"]) / D(STANDARD_PAID_DAYS_PER_WEEK)
+            ) if not is_monthly_fixed else 0
+            day["overtime_pay"] = r2(D(day["overtime_hours"]) * D(OVERTIME_HOURLY_RATE)) if not is_monthly_fixed else 0
             day["pay"] = r2(D(day["regular_pay"]) + D(day["overtime_pay"]))
         employee_advances = [item for item in advances if item.get("employee_id") == employee["id"]]
         employee_cuts = [item for item in cuts if item.get("employee_id") == employee["id"]]
@@ -7829,9 +7863,12 @@ async def salary_report(start_date, end_date):
                 for day in days
             ),
             Decimal("0"),
-        ))
-        overtime_pay = r2(D(overtime_hours) * D(OVERTIME_HOURLY_RATE))
-        gross = employee_piecework["piece_pay"] if is_piece_paid else r2(regular_pay + overtime_pay)
+        )) if not is_monthly_fixed else 0
+        overtime_pay = r2(D(overtime_hours) * D(OVERTIME_HOURLY_RATE)) if not is_monthly_fixed else 0
+        monthly_pay = r2(monthly_salary) if is_monthly_fixed and monthly_salary is not None and full_month_period else 0
+        gross = employee_piecework["piece_pay"] if is_piece_paid else (
+            monthly_pay if is_monthly_fixed else r2(regular_pay + overtime_pay)
+        )
         cut = r2((period_cut or {}).get("amount", 0))
         balance = all_advance_total - all_cut_total
         balance_before_period = sum(
@@ -7877,6 +7914,9 @@ async def salary_report(start_date, end_date):
             "employee_id": employee["id"], "name": employee.get("name", ""),
             "department": employee.get("department", ""), "active": employee.get("active", True),
             "hourly_rate": hourly_rate, "weekly_salary": weekly_salary,
+            "monthly_salary": monthly_salary,
+            "pay_frequency": "piece" if is_piece_paid else ("monthly_fixed" if is_monthly_fixed else "weekly_fixed"),
+            "is_full_month_period": full_month_period,
             "hours_per_week": hours_per_week, "work_days_per_week": work_days_per_week,
             "pay_type": "piece" if is_piece_paid else "hourly",
             "total_pieces": employee_piecework["total_pieces"],
@@ -7907,6 +7947,14 @@ async def save_salary_rate(eid: str, body: SalaryRateIn, user=Depends(get_curren
     employee = await db.employees.find_one({"id": eid}, {"_id": 0})
     if not employee:
         raise HTTPException(404, "Employee not found")
+    if body.monthly_salary is not None:
+        if not is_monthly_fixed_salary_employee(employee):
+            raise HTTPException(422, "Monthly fixed pay is only available for the monthly payroll employees")
+        updated = await update_doc("employees", eid, {"monthly_salary": r2(D(body.monthly_salary))})
+        await log_audit("employee", eid, "monthly_salary_updated", user,
+                        before={"monthly_salary": employee.get("monthly_salary")},
+                        after={"monthly_salary": updated["monthly_salary"]})
+        return updated
     if body.weekly_salary is None and body.hourly_rate is None:
         raise HTTPException(422, "Provide a weekly salary or an hourly rate")
     work_days_per_week = 6
@@ -7981,6 +8029,8 @@ async def save_salary_cut(body: SalaryCutIn, user=Depends(get_current_user)):
     employee = next((item for item in report["employees"] if item["employee_id"] == body.employee_id), None)
     if not employee:
         raise HTTPException(404, "Employee not found")
+    if employee["pay_frequency"] == "monthly_fixed" and not employee["is_full_month_period"]:
+        raise HTTPException(400, "Select a complete calendar month before saving a salary cut")
     before = await db.salary_cuts.find_one({
         "employee_id": body.employee_id, "start_date": body.start_date, "end_date": body.end_date,
     }, {"_id": 0})

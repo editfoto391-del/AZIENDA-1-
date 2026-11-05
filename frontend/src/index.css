@@ -225,6 +225,8 @@ main table:not(.border-slate-300):not(.border-slate-800) tbody tr:hover {
   html {
     min-height: 100%;
     scroll-padding-top: 4.5rem;
+    text-size-adjust: 100%;
+    -webkit-text-size-adjust: 100%;
   }
   body {
     @apply bg-background text-foreground;
@@ -236,14 +238,26 @@ main table:not(.border-slate-300):not(.border-slate-800) tbody tr:hover {
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
   }
-  #root { min-height: 100vh; min-height: 100dvh; }
+  #root { width: 100%; min-width: 0; min-height: 100vh; min-height: 100dvh; }
   h1,h2,h3,h4 { font-family: var(--font-display); }
   button:not(:disabled), [role='button']:not(:disabled) { cursor: pointer; }
+  :where(a, button, input, select, textarea, [tabindex]:not([tabindex="-1"])):focus-visible {
+    outline: 3px solid hsl(var(--ring) / 0.75);
+    outline-offset: 2px;
+  }
   .font-mono, .tabular { font-family: var(--font-mono); }
   .luxury-card { box-shadow: 0 8px 26px hsl(158 30% 15% / 0.045), 0 1px 2px hsl(158 30% 15% / 0.04); }
   ::selection { background: hsl(72 42% 82%); color: hsl(158 30% 12%); }
   ::-webkit-scrollbar { height: 8px; width: 8px; }
   ::-webkit-scrollbar-thumb { background: hsl(154 14% 66%); border-radius: 8px; }
+}
+
+@media (pointer: coarse) {
+  button:not([data-compact-touch]),
+  [role='button']:not([data-compact-touch]),
+  .erp-sidebar-nav a {
+    min-height: 44px;
+  }
 }
 
 @media screen and (max-width: 639px) {

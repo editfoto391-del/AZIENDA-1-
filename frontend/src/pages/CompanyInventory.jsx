@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Boxes, Pencil, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Boxes, Download, Layers3, Pencil, Plus, Printer, Trash2 } from "lucide-react";
 import { Btn, Card, Empty, Input, Modal, PageHeader } from "@/components/common";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -9,8 +9,34 @@ import { today } from "@/lib/format";
 const CATEGORIES = ["Glue", "Solo Tape", "Fabric Roll", "Ribbon", "Cotton"];
 const PACKAGINGS = ["Box", "Carton", "Pallet", "Roll", "Drum"];
 const UNITS = ["pcs", "rolls", "kg", "L", "m"];
+const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const PLASTIC_ROLL_SIZES = ["32", "34", "36", "38", "40", "42", "45", "47", "62"];
 const OTHER = "__other__";
 const fmt = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+function printInventorySummary(sheet) {
+  if (!sheet) return false;
+  const printWindow = window.open("", "_blank");
+  if (!printWindow) return false;
+  const styles = [...document.head.querySelectorAll('link[rel="stylesheet"], style')]
+    .map((node) => node.outerHTML)
+    .join("");
+  printWindow.document.write(
+    `<!doctype html><html><head><meta charset="utf-8"><title>Weekly Daily Stock Summary</title>${styles}`
+    + "<style>@page{size:A4 landscape;margin:8mm}html,body{margin:0;background:#fff!important}"
+    + ".company-inventory-sheet{width:100%!important;max-width:none!important;min-width:0!important;margin:0!important;"
+    + "border-radius:0!important;box-shadow:none!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}"
+    + "</style></head><body>"
+    + `${sheet.outerHTML}</body></html>`,
+  );
+  printWindow.document.close();
+  window.setTimeout(() => {
+    if (printWindow.closed) return;
+    printWindow.focus();
+    printWindow.print();
+  }, 600);
+  return true;
+}
 
 const blank = {
   name: "", category: CATEGORIES[0], categoryCustom: "", size: "",
@@ -38,6 +64,7 @@ const pick = (list, value) => (list.includes(value) ? { v: value, c: "" } : { v:
 
 export default function CompanyInventory() {
   const { user } = useAuth();
+  const isSuperIqFoam = user?.company_id === "superiqfoam";
   const canEdit = !user?.is_worker;
   const canDelete = canEdit && (user?.is_owner || user?.is_company_owner);
   const [items, setItems] = useState(null);
@@ -47,6 +74,7 @@ export default function CompanyInventory() {
   const [filter, setFilter] = useState("");
   const [saving, setSaving] = useState(false);
   const [savingDailyUpdate, setSavingDailyUpdate] = useState(false);
+  const [downloadingSummary, setDownloadingSummary] = useState(false);
   const set = (patch) => setForm((current) => ({ ...current, ...patch }));
 
   const load = () => api.getUncached("/company-inventory")
@@ -138,11 +166,170 @@ export default function CompanyInventory() {
 
   const preview = Number(form?.loose_units || 0);
 
+  const downloadInventorySummary = async () => {
+    const sheet = document.getElementById("superiqfoam-weekly-stock-summary");
+    if (!sheet || downloadingSummary) return;
+    setDownloadingSummary(true);
+    try {
+      await document.fonts?.ready;
+      const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
+        import("html2canvas-pro"),
+        import("jspdf"),
+      ]);
+      const canvas = await html2canvas(sheet, {
+        scale: 2,
+        backgroundColor: "#ffffff",
+        logging: false,
+        width: sheet.scrollWidth,
+        height: sheet.scrollHeight,
+        windowWidth: Math.max(document.documentElement.clientWidth, window.innerWidth),
+      });
+      const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+      const margin = 6;
+      const scale = Math.min((297 - margin * 2) / canvas.width, (210 - margin * 2) / canvas.height);
+      const width = canvas.width * scale;
+      const height = canvas.height * scale;
+      pdf.addImage(canvas.toDataURL("image/png"), "PNG", (297 - width) / 2, (210 - height) / 2, width, height);
+      pdf.save("superiqfoam-weekly-daily-stock-summary.pdf");
+      toast.success("Stock summary PDF downloaded");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not download the stock summary PDF");
+    } finally {
+      setDownloadingSummary(false);
+    }
+  };
+
   return (
     <div data-testid="company-inventory-page">
       <PageHeader title="Company Inventory" subtitle="Resources used by the company: glue, tape, fabric rolls, ribbon, cotton and more.">
         {canEdit && <Btn onClick={openAdd} data-testid="add-inventory-product-btn"><Plus size={16} /> Add Product</Btn>}
       </PageHeader>
+
+      {isSuperIqFoam && (
+        <section className="mb-6" aria-labelledby="weekly-stock-summary-title">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 id="weekly-stock-summary-title" className="text-sm font-bold text-slate-800">Weekly Daily Stock Summary</h2>
+              <p className="text-xs text-slate-500">Print or download the Monday–Saturday stock check sheet.</p>
+            </div>
+            <div className="no-print flex gap-2">
+              <Btn
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  if (!printInventorySummary(document.getElementById("superiqfoam-weekly-stock-summary"))) {
+                    toast.error("Allow pop-ups to print the stock summary");
+                  }
+                }}
+                data-testid="print-weekly-stock-summary"
+              >
+                <Printer size={16} /> Print
+              </Btn>
+              <Btn
+                type="button"
+                onClick={downloadInventorySummary}
+                disabled={downloadingSummary}
+                data-testid="download-weekly-stock-summary"
+              >
+                <Download size={16} /> {downloadingSummary ? "Preparing..." : "Download PDF"}
+              </Btn>
+            </div>
+          </div>
+          <div className="overflow-x-auto rounded-lg">
+            <div
+              id="superiqfoam-weekly-stock-summary"
+              className="company-inventory-sheet mx-auto min-w-[880px] max-w-[1120px] rounded-lg border border-slate-300 bg-white p-3 text-slate-900 shadow-sm"
+              data-testid="weekly-stock-summary-sheet"
+            >
+              <header className="mb-2 grid grid-cols-[1.05fr_1.1fr_1fr] items-center gap-2">
+                <div className="flex items-center gap-2 border-r-2 border-slate-300 pr-2">
+                  <Layers3 size={48} strokeWidth={2.5} className="shrink-0 text-slate-900" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <h3 className="whitespace-nowrap text-[clamp(14px,2vw,25px)] font-black leading-none tracking-tight">SUPER IQ-FOAM</h3>
+                    <p className="mt-1 whitespace-nowrap text-[9px] font-bold tracking-[0.12em] text-slate-500">QUALITY · COMFORT · TRUST</p>
+                  </div>
+                </div>
+                <div className="text-center">
+                  <h3 className="rounded-md bg-[#10263e] px-2 py-1 text-[clamp(15px,2vw,24px)] font-black leading-[1.05] text-white">WEEKLY DAILY<br />STOCK SUMMARY</h3>
+                  <p className="mt-1 text-[11px] font-extrabold tracking-wide">MONDAY – SATURDAY (6 DAYS)</p>
+                </div>
+                <div className="space-y-1 rounded-md bg-slate-100 px-2 py-1.5 text-[10px] font-bold">
+                  {["WEEK START DATE:", "CHECKED BY:", "WAREHOUSE:"].map((label) => (
+                    <div key={label} className="flex items-end gap-1">
+                      <span className="whitespace-nowrap">{label}</span>
+                      <span className="mb-0.5 min-w-0 flex-1 border-b border-slate-500" aria-hidden="true" />
+                    </div>
+                  ))}
+                </div>
+              </header>
+
+              <table className="w-full table-fixed border-collapse text-[11px] leading-tight">
+                <colgroup>
+                  <col style={{ width: "24%" }} />
+                  {WEEKDAYS.map((day) => <col key={day} style={{ width: "12.666%" }} />)}
+                </colgroup>
+                <thead>
+                  <tr className="bg-[#10263e] text-white">
+                    {["ITEM / SIZE", ...WEEKDAYS].map((label) => (
+                      <th key={label} scope="col" className="border border-slate-400 px-1 py-2 text-center font-extrabold">
+                        {label}
+                        {label !== "ITEM / SIZE" && <span className="mx-auto mt-1 block w-3/4 border-b border-slate-300" />}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="bg-[#10263e] text-white">
+                    <th scope="row" className="border border-slate-500 px-2 py-1 text-left font-extrabold">
+                      <span className="mr-2 inline-flex align-middle"><Layers3 size={22} aria-hidden="true" /></span> PLASTIC ROLLS
+                    </th>
+                    <td colSpan={WEEKDAYS.length} className="border border-slate-500" />
+                  </tr>
+                  {PLASTIC_ROLL_SIZES.map((size) => (
+                    <tr key={size} className="h-6">
+                      <th scope="row" className="border border-slate-400 bg-slate-100 px-2 text-center font-semibold">{size}</th>
+                      {WEEKDAYS.map((day) => <td key={day} className="border border-slate-400 bg-white" />)}
+                    </tr>
+                  ))}
+                  <tr className="bg-[#10263e] text-white">
+                    <th scope="row" className="border border-slate-500 px-2 py-1 text-left font-extrabold">
+                      <span className="mr-2 inline-flex align-middle"><Boxes size={22} aria-hidden="true" /></span> GLUE
+                    </th>
+                    <td colSpan={WEEKDAYS.length} className="border border-slate-500" />
+                  </tr>
+                  <tr className="h-6">
+                    <th scope="row" className="border border-slate-400 bg-slate-100 px-2 text-left font-medium">20 Lts Glue (Box)</th>
+                    {WEEKDAYS.map((day) => <td key={day} className="border border-slate-400 bg-white" />)}
+                  </tr>
+                  <tr className="bg-[#10263e] text-white">
+                    <th scope="row" className="border border-slate-500 px-2 py-1 text-left font-extrabold">
+                      <span className="mr-2 inline-flex align-middle"><Boxes size={22} aria-hidden="true" /></span> OTHER MATERIALS
+                    </th>
+                    <td colSpan={WEEKDAYS.length} className="border border-slate-500" />
+                  </tr>
+                  {["Solo Tapes", "Cotton", "Ribbon"].map((item) => (
+                    <tr key={item} className="h-6">
+                      <th scope="row" className="border border-slate-400 bg-slate-100 px-2 text-left font-medium">{item}</th>
+                      {WEEKDAYS.map((day) => <td key={day} className="border border-slate-400 bg-white" />)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                {["NOTES / REMARKS", "STOCK ISSUES / ACTIONS REQUIRED"].map((label) => (
+                  <section key={label} className="overflow-hidden rounded-md border-2 border-slate-700">
+                    <h4 className="flex items-center gap-1 bg-[#10263e] px-2 py-1 text-[10px] font-extrabold text-white">
+                      <AlertTriangle size={14} aria-hidden="true" /> {label}
+                    </h4>
+                    <div className="h-10 bg-white" />
+                  </section>
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       <Card className="p-4 mb-6">
         <h2 className="text-xs font-bold uppercase tracking-wide text-slate-600 mb-3">Totals by category</h2>
