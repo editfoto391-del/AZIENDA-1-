@@ -460,7 +460,7 @@ export default function DailyReport() {
     }
   }, [reportCompany, user?.company_id, user?.company_ids]);
 
-  const generateDailyReport = async () => {
+  const generateDailyReport = useCallback(async () => {
     const requestId = ++reportRequestId.current;
     setLoading(true);
     setReport(null);
@@ -474,10 +474,6 @@ export default function DailyReport() {
       if (requestId === reportRequestId.current) setLoading(false);
     }
   }, [reportDate]);
-
-  useEffect(() => {
-    if (viewMode === "daily") void generateDailyReport();
-  }, [viewMode, generateDailyReport]);
 
   const financialValue = viewMode === "monthly" ? monthValue : weekDate;
   useEffect(() => {
