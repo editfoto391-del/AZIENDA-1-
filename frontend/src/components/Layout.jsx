@@ -62,20 +62,6 @@ const NAV_GROUPS = [
   ] },
 ];
 
-function WhatsAppFloatingButton() {
-  return (
-    <a href="https://web.whatsapp.com/" target="_blank" rel="noreferrer"
-      aria-label="Open WhatsApp Web" title="Open WhatsApp Web"
-      data-testid="whatsapp-floating-button"
-      className="fixed bottom-5 right-5 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-[#25D366] text-white shadow-lg transition-transform hover:scale-105 hover:bg-[#20bd5a] focus:outline-none focus:ring-4 focus:ring-[#25D366]/30"
-    >
-      <svg viewBox="0 0 32 32" className="pointer-events-none h-8 w-8" aria-hidden="true">
-        <path fill="currentColor" d="M16.02 3.2A12.7 12.7 0 0 0 5.08 22.35L3.3 28.8l6.6-1.73A12.8 12.8 0 1 0 16.02 3.2Zm0 23.3c-1.94 0-3.84-.52-5.5-1.5l-.4-.24-3.92 1.03 1.05-3.82-.26-.42a10.48 10.48 0 1 1 9.03 4.95Zm5.75-7.85c-.31-.16-1.84-.91-2.12-1.02-.28-.1-.49-.15-.69.16-.21.31-.8 1.02-.98 1.23-.18.21-.36.23-.67.08-.31-.16-1.3-.48-2.48-1.52-.92-.82-1.54-1.84-1.72-2.15-.18-.31-.02-.48.14-.64.14-.14.31-.36.46-.54.15-.18.21-.31.31-.52.1-.2.05-.39-.03-.54-.08-.15-.69-1.66-.94-2.28-.25-.6-.5-.51-.69-.52h-.59c-.2 0-.54.08-.82.39-.28.31-1.08 1.05-1.08 2.56s1.1 2.97 1.26 3.18c.15.2 2.17 3.32 5.25 4.66.73.32 1.3.51 1.74.65.73.23 1.4.2 1.93.12.59-.09 1.84-.75 2.1-1.48.26-.72.26-1.33.18-1.46-.08-.13-.28-.2-.59-.36Z" />
-      </svg>
-    </a>
-  );
-}
-
 function SidebarContent({ onNav, companyName, companyId, user }) {
   const reduceMotion = useReducedMotion();
   const [openGroups, setOpenGroups] = useState({});
@@ -386,7 +372,6 @@ export default function Layout() {
           </Suspense>
         </main>
       </div>
-      {(user?.is_admin || user?.role === "admin") && <WhatsAppFloatingButton />}
     </div>
   );
 }
