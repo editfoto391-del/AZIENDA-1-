@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, Boxes, Download, Layers3, Pencil, Plus, Printer, Trash2 } from "lucide-react";
+import { AlertTriangle, Boxes, Download, Layers3, Pencil, Plus, Trash2 } from "lucide-react";
 import { Btn, Card, Empty, Input, Modal, PageHeader } from "@/components/common";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -13,30 +13,6 @@ const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Satur
 const PLASTIC_ROLL_SIZES = ["32", "34", "36", "38", "40", "42", "45", "47", "62"];
 const OTHER = "__other__";
 const fmt = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-
-function printInventorySummary(sheet) {
-  if (!sheet) return false;
-  const printWindow = window.open("", "_blank");
-  if (!printWindow) return false;
-  const styles = [...document.head.querySelectorAll('link[rel="stylesheet"], style')]
-    .map((node) => node.outerHTML)
-    .join("");
-  printWindow.document.write(
-    `<!doctype html><html><head><meta charset="utf-8"><title>Weekly Daily Stock Summary</title>${styles}`
-    + "<style>@page{size:A4 landscape;margin:8mm}html,body{margin:0;background:#fff!important}"
-    + ".company-inventory-sheet{width:100%!important;max-width:none!important;min-width:0!important;margin:0!important;"
-    + "border-radius:0!important;box-shadow:none!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}"
-    + "</style></head><body>"
-    + `${sheet.outerHTML}</body></html>`,
-  );
-  printWindow.document.close();
-  window.setTimeout(() => {
-    if (printWindow.closed) return;
-    printWindow.focus();
-    printWindow.print();
-  }, 600);
-  return true;
-}
 
 const blank = {
   name: "", category: CATEGORIES[0], categoryCustom: "", size: "",
@@ -190,8 +166,8 @@ export default function CompanyInventory() {
       const width = canvas.width * scale;
       const height = canvas.height * scale;
       pdf.addImage(canvas.toDataURL("image/png"), "PNG", (297 - width) / 2, (210 - height) / 2, width, height);
-      pdf.save("superiqfoam-weekly-daily-stock-summary.pdf");
-      toast.success("Stock summary PDF downloaded");
+      pdf.save("superiqfoam-blank-company-inventory-calculation.pdf");
+      toast.success("Blank company inventory calculation downloaded");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not download the stock summary PDF");
     } finally {
@@ -206,36 +182,16 @@ export default function CompanyInventory() {
       </PageHeader>
 
       {isSuperIqFoam && (
-        <section className="mb-6" aria-labelledby="weekly-stock-summary-title">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 id="weekly-stock-summary-title" className="text-sm font-bold text-slate-800">Weekly Daily Stock Summary</h2>
-              <p className="text-xs text-slate-500">Print or download the Monday–Saturday stock check sheet.</p>
-            </div>
-            <div className="no-print flex gap-2">
-              <Btn
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  if (!printInventorySummary(document.getElementById("superiqfoam-weekly-stock-summary"))) {
-                    toast.error("Allow pop-ups to print the stock summary");
-                  }
-                }}
-                data-testid="print-weekly-stock-summary"
-              >
-                <Printer size={16} /> Print
-              </Btn>
-              <Btn
-                type="button"
-                onClick={downloadInventorySummary}
-                disabled={downloadingSummary}
-                data-testid="download-weekly-stock-summary"
-              >
-                <Download size={16} /> {downloadingSummary ? "Preparing..." : "Download PDF"}
-              </Btn>
-            </div>
-          </div>
-          <div className="overflow-x-auto rounded-lg">
+        <section className="mb-6 flex justify-end">
+          <Btn
+            type="button"
+            onClick={downloadInventorySummary}
+            disabled={downloadingSummary}
+            data-testid="download-weekly-stock-summary"
+          >
+            <Download size={16} /> {downloadingSummary ? "Preparing..." : "Download Blank Company Inventory Calculation Sheet"}
+          </Btn>
+          <div className="download-only-sheet" aria-hidden="true">
             <div
               id="superiqfoam-weekly-stock-summary"
               className="company-inventory-sheet mx-auto min-w-[880px] max-w-[1120px] rounded-lg border border-slate-300 bg-white p-3 text-slate-900 shadow-sm"

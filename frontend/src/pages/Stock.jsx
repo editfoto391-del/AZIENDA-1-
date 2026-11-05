@@ -6,7 +6,7 @@ import { fmtDateTime, fmtMoney } from "@/lib/format";
 import { companyProfileName, usesUnifiedPriceList } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
-import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2, Search, X, ChevronDown, ChevronUp, Download, Printer, Layers3 } from "lucide-react";
+import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2, Search, X, ChevronDown, ChevronUp, Download, Layers3 } from "lucide-react";
 import { listViewState, loadListRequest } from "@/lib/listRequest.mjs";
 
 const ProductIdentificationManager = lazy(() => import("@/components/ProductIdentificationManager"));
@@ -66,30 +66,6 @@ const REPORT_PRODUCT_NAMES = {
   "uncovered-blue": new Set(["uncoveredblue16density"]),
 };
 const normalizeReportValue = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-
-function printStockRangeReport(sheet) {
-  if (!sheet) return false;
-  const printWindow = window.open("", "_blank");
-  if (!printWindow) return false;
-  const styles = [...document.head.querySelectorAll('link[rel="stylesheet"], style')]
-    .map((node) => node.outerHTML)
-    .join("");
-  printWindow.document.write(
-    `<!doctype html><html><head><meta charset="utf-8"><title>Super IQ-Foam Product Range Report</title>${styles}`
-    + "<style>@page{size:A4 portrait;margin:8mm}html,body{margin:0;background:#fff!important}"
-    + ".stock-range-report{width:100%!important;max-width:none!important;min-width:0!important;margin:0!important;"
-    + "border-radius:0!important;box-shadow:none!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}"
-    + "</style></head><body>"
-    + `${sheet.outerHTML}</body></html>`,
-  );
-  printWindow.document.close();
-  window.setTimeout(() => {
-    if (printWindow.closed) return;
-    printWindow.focus();
-    printWindow.print();
-  }, 600);
-  return true;
-}
 
 export default function Stock() {
   const { user } = useAuth();
@@ -158,10 +134,20 @@ export default function Stock() {
     const quantity = matches.reduce((total, item) => total + Number(item.current || 0), 0);
     return quantity.toLocaleString(undefined, { maximumFractionDigits: 2 });
   };
-  const downloadRangeReport = async () => {
-    const sheet = document.getElementById("superiqfoam-product-range-report");
+  const downloadRangeReport = async ({ blank = false } = {}) => {
+    const sourceSheet = document.getElementById("superiqfoam-product-range-report");
+    const sheet = blank ? sourceSheet?.cloneNode(true) : sourceSheet;
     if (!sheet || downloadingRangeReport) return;
     setDownloadingRangeReport(true);
+    if (blank) {
+      sheet.removeAttribute("id");
+      sheet.classList.add("download-only-sheet");
+      sheet.setAttribute("aria-hidden", "true");
+      sheet.querySelectorAll("[data-stock-quantity]").forEach((cell) => {
+        cell.textContent = "";
+      });
+      document.body.appendChild(sheet);
+    }
     try {
       await document.fonts?.ready;
       const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
@@ -176,17 +162,18 @@ export default function Stock() {
         height: sheet.scrollHeight,
         windowWidth: Math.max(document.documentElement.clientWidth, window.innerWidth, sheet.scrollWidth),
       });
-      const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
       const margin = 6;
-      const scale = Math.min((210 - margin * 2) / canvas.width, (297 - margin * 2) / canvas.height);
+      const scale = Math.min((297 - margin * 2) / canvas.width, (210 - margin * 2) / canvas.height);
       const width = canvas.width * scale;
       const height = canvas.height * scale;
-      pdf.addImage(canvas.toDataURL("image/png"), "PNG", (210 - width) / 2, (297 - height) / 2, width, height);
-      pdf.save("superiqfoam-product-range-report.pdf");
-      toast.success("Product range report PDF downloaded");
+      pdf.addImage(canvas.toDataURL("image/png"), "PNG", (297 - width) / 2, (210 - height) / 2, width, height);
+      pdf.save(blank ? "superiqfoam-stock-calculation-sheet.pdf" : "superiqfoam-current-stock.pdf");
+      toast.success(blank ? "Stock calculation sheet downloaded" : "Current stock PDF downloaded");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not download the product range report PDF");
+      toast.error(error instanceof Error ? error.message : "Could not download the stock PDF");
     } finally {
+      if (blank) sheet.remove();
       setDownloadingRangeReport(false);
     }
   };
@@ -348,68 +335,28 @@ export default function Stock() {
 
   return (
     <div>
-      <PageHeader title="Finished Stock" subtitle="Calculated from the stock movement ledger">
-        {isSuperIqFoam ? (
-          <div className="no-print flex flex-wrap items-center justify-start gap-2 rounded-xl border border-slate-200 bg-white p-2 shadow-sm sm:justify-end">
-            {searchAction}
-            {productIdsAction}
-            {ledgerAction}
-            {addProductAction}
-          </div>
-        ) : (
-          <>{searchAction}{productIdsAction}{ledgerAction}{addProductAction}</>
-        )}
-      </PageHeader>
+      <PageHeader title="Finished Stock" subtitle="Calculated from the stock movement ledger" />
 
       {isSuperIqFoam && (
-        <section className="mb-6" aria-labelledby="product-range-report-title">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 id="product-range-report-title" className="text-sm font-bold text-slate-800">Product Range Report</h2>
-              <p className="text-xs text-slate-500">Print or download the current stock range sheet.</p>
-            </div>
-            <div className="no-print flex flex-wrap gap-2">
-              <Btn
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  if (!printStockRangeReport(document.getElementById("superiqfoam-product-range-report"))) {
-                    toast.error("Allow pop-ups to print the product range report");
-                  }
-                }}
-                data-testid="print-product-range-report"
-              >
-                <Printer size={16} /> Print
-              </Btn>
-              <Btn
-                type="button"
-                onClick={downloadRangeReport}
-                disabled={downloadingRangeReport}
-                data-testid="download-product-range-report"
-              >
-                <Download size={16} /> {downloadingRangeReport ? "Preparing..." : "Download PDF"}
-              </Btn>
-            </div>
-          </div>
-          <div className="overflow-x-auto rounded-lg">
+        <div className="download-only-sheet" aria-hidden="true">
             <div
               id="superiqfoam-product-range-report"
-              className="stock-range-report mx-auto min-w-[700px] max-w-[820px] rounded-lg border border-slate-300 bg-white p-3 text-slate-900 shadow-sm"
+              className="stock-range-report mx-auto min-w-[1000px] max-w-[1100px] rounded-lg border border-slate-300 bg-white p-4 text-slate-900 shadow-sm"
               data-testid="product-range-report"
             >
-              <header className="mb-2 rounded-t-md bg-[#10263e] px-3 py-2 text-white">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 border-r border-white/60 pr-3">
-                    <Layers3 size={38} strokeWidth={2.5} className="shrink-0" aria-hidden="true" />
+              <header className="mb-3 rounded-t-md bg-[#10263e] px-4 py-3 text-white">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3 border-r border-white/60 pr-4">
+                    <Layers3 size={48} strokeWidth={2.5} className="shrink-0" aria-hidden="true" />
                     <div className="leading-none">
-                      <h3 className="whitespace-nowrap text-[20px] font-black tracking-tight">SUPER IQ-FOAM</h3>
-                      <p className="mt-1 whitespace-nowrap text-[8px] font-bold tracking-[0.16em]">QUALITY · COMFORT · TRUST</p>
+                      <h3 className="whitespace-nowrap text-[28px] font-black tracking-tight">SUPER IQ-FOAM</h3>
+                      <p className="mt-2 whitespace-nowrap text-[11px] font-bold tracking-[0.16em]">QUALITY · COMFORT · TRUST</p>
                     </div>
                   </div>
-                  <h3 className="text-right text-[22px] font-black leading-[1.05]">PRODUCT RANGE<br />REPORT</h3>
+                  <h3 className="text-right text-[32px] font-black leading-[1.05]">PRODUCT RANGE<br />REPORT</h3>
                 </div>
               </header>
-              <div className="mb-2 grid grid-cols-3 gap-3 bg-slate-100 px-2 py-1.5 text-[9px] font-bold">
+              <div className="mb-3 grid grid-cols-3 gap-4 bg-slate-100 px-3 py-2 text-[13px] font-bold">
                 {["DATE:", "PREPARED BY:", "WAREHOUSE:"].map((label) => (
                   <div key={label} className="flex items-end gap-1">
                     <span className="whitespace-nowrap">{label}</span>
@@ -417,14 +364,14 @@ export default function Stock() {
                   </div>
                 ))}
               </div>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-3">
                 {PRODUCT_RANGE_SECTIONS.map((section) => (
                   <section
                     key={section.title}
                     className={`overflow-hidden rounded-md border border-slate-400 ${section.title.includes("STRONG") || section.title.includes("UNCOVERED") ? "" : "col-span-2"}`}
                   >
-                    <h4 className="bg-[#10263e] px-2 py-1 text-[13px] font-extrabold text-white">{section.title}</h4>
-                    <table className="w-full table-fixed border-collapse text-[8px] leading-[1.1]">
+                    <h4 className="bg-[#10263e] px-3 py-2 text-[18px] font-extrabold text-white">{section.title}</h4>
+                    <table className="w-full table-fixed border-collapse text-[13px] leading-[1.2]">
                       <colgroup>
                         {section.columns.map((column, index) => (
                           <col key={column} style={{ width: index === 0 ? "11%" : index === 1 ? "30%" : index === 2 ? "31%" : "28%" }} />
@@ -432,16 +379,16 @@ export default function Stock() {
                       </colgroup>
                       <thead>
                         <tr className="bg-slate-200 font-extrabold">
-                          {section.columns.map((column) => <th key={column} scope="col" className="border border-slate-400 px-1 py-1 text-center">{column}</th>)}
+                          {section.columns.map((column) => <th key={column} scope="col" className="border border-slate-400 px-2 py-2 text-center">{column}</th>)}
                         </tr>
                       </thead>
                       <tbody>
                         {section.rows.map((row) => (
-                          <tr key={`${row.number}-${row.size}`} className="h-[13px]">
-                            <td className="border border-slate-400 px-1 text-center font-semibold">{row.number}</td>
-                            <td className="border border-slate-400 px-1 text-center font-bold">{row.size.replace("x", " X ")}</td>
-                            <td className="border border-slate-400 px-1 text-center font-semibold">{row.type}</td>
-                            <td className="border border-slate-400 px-1 text-center font-bold">{getRangeReportQuantity(row.group, row.size)}</td>
+                          <tr key={`${row.number}-${row.size}`} className="h-[24px]">
+                            <td className="border border-slate-400 px-2 py-1 text-center font-semibold">{row.number}</td>
+                            <td className="border border-slate-400 px-2 py-1 text-center font-bold">{row.size.replace("x", " X ")}</td>
+                            <td className="border border-slate-400 px-2 py-1 text-center font-semibold">{row.type}</td>
+                            <td className="border border-slate-400 px-2 py-1 text-center font-bold" data-stock-quantity>{getRangeReportQuantity(row.group, row.size)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -449,37 +396,65 @@ export default function Stock() {
                   </section>
                 ))}
               </div>
-              <footer className="mt-2 grid grid-cols-[1fr_0.7fr] gap-2">
-                <section className="flex h-12 items-center gap-2 overflow-hidden rounded-md border border-slate-500">
-                  <h4 className="flex h-full shrink-0 items-center bg-[#10263e] px-2 text-[9px] font-extrabold text-white">NOTES /<br />REMARKS:</h4>
+              <footer className="mt-3 grid grid-cols-[1fr_0.7fr] gap-3">
+                <section className="flex h-16 items-center gap-3 overflow-hidden rounded-md border border-slate-500">
+                  <h4 className="flex h-full shrink-0 items-center bg-[#10263e] px-3 text-[13px] font-extrabold text-white">NOTES /<br />REMARKS:</h4>
                   <div className="flex-1" />
                 </section>
-                <section className="flex h-12 flex-col justify-between rounded-md bg-[#10263e] px-3 py-1.5 text-white">
-                  <h4 className="text-[9px] font-extrabold">SIGNATURE:</h4>
+                <section className="flex h-16 flex-col justify-between rounded-md bg-[#10263e] px-4 py-2 text-white">
+                  <h4 className="text-[13px] font-extrabold">SIGNATURE:</h4>
                   <div className="border-b border-white" />
                 </section>
               </footer>
             </div>
           </div>
-        </section>
       )}
 
-      <div className="mb-4 grid max-w-2xl gap-3 sm:grid-cols-2">
-        {showStockSearch && (
-          <Input
-            id="stock-search-input"
-            label="Search stock"
-            type="search"
-            placeholder="Product or size"
-            value={stockSearch}
-            onChange={(event) => setStockSearch(event.target.value)}
-            data-testid="stock-search-input"
-          />
-        )}
-        <Select label="Filter by category" value={category} onChange={(event) => setCategory(event.target.value)} data-testid="stock-category-filter">
-          <option value="">All categories</option>
-          {stockCategories.map((item) => <option key={item} value={item}>{item}</option>)}
-        </Select>
+      <div className="no-print -mt-3 mb-4 flex flex-wrap items-end gap-3">
+        <div className="grid w-full max-w-2xl flex-1 gap-3 sm:grid-cols-2">
+          {showStockSearch && (
+            <Input
+              id="stock-search-input"
+              label="Search stock"
+              type="search"
+              placeholder="Product or size"
+              value={stockSearch}
+              onChange={(event) => setStockSearch(event.target.value)}
+              data-testid="stock-search-input"
+            />
+          )}
+          <Select label="Filter by category" value={category} onChange={(event) => setCategory(event.target.value)} data-testid="stock-category-filter">
+            <option value="">All categories</option>
+            {stockCategories.map((item) => <option key={item} value={item}>{item}</option>)}
+          </Select>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {searchAction}
+          {productIdsAction}
+          {ledgerAction}
+          {addProductAction}
+          {isSuperIqFoam && (
+            <>
+              <Btn
+                type="button"
+                onClick={() => downloadRangeReport()}
+                disabled={downloadingRangeReport}
+                data-testid="download-product-range-report"
+              >
+                <Download size={16} /> {downloadingRangeReport ? "Preparing..." : "Download Current Stock PDF"}
+              </Btn>
+              <Btn
+                type="button"
+                variant="outline"
+                onClick={() => downloadRangeReport({ blank: true })}
+                disabled={downloadingRangeReport}
+                data-testid="download-stock-count-sheet"
+              >
+                <Download size={16} /> {downloadingRangeReport ? "Preparing..." : "Download Stock Calculation Sheet"}
+              </Btn>
+            </>
+          )}
+        </div>
       </div>
 
       <Card className="p-4 mb-6 bg-slate-50 border-slate-200">
@@ -577,7 +552,7 @@ export default function Stock() {
                   <td className="px-4 text-right"><span className={`font-mono font-bold ${s.current < s.threshold ? "text-red-600" : "text-slate-800"}`} data-testid={`stock-current-${s.id}`}>{s.current}</span>{s.current < s.threshold && <Badge cls="bg-red-50 text-red-700 border-red-200 ml-2">Low</Badge>}</td>
                   {!user?.is_worker && <td className="px-4">
                     <div className="flex items-center justify-end gap-2">
-                      <Input aria-label={`Cost for ${s.product} ${s.size}`} type="number" min="0" step="0.01" value={costDrafts[s.id] ?? (s.unit_cost ?? "")} onChange={(e) => setCostDrafts((current) => ({ ...current, [s.id]: e.target.value }))} className="max-w-24 px-2 py-1.5 text-right" data-testid={`stock-cost-${s.id}`} />
+                      <Input aria-label={`Cost for ${s.product} ${s.size}`} type="number" min="0" step="0.01" value={costDrafts[s.id] ?? (s.unit_cost ?? "")} onChange={(e) => setCostDrafts((current) => ({ ...current, [s.id]: e.target.value }))} className="w-32 min-w-[8rem] max-w-none shrink-0 px-2 py-1.5 text-right tabular-nums" data-testid={`stock-cost-${s.id}`} />
                       <button type="button" onClick={() => saveCost(s)} disabled={busy} className="text-primary hover:underline text-xs font-semibold disabled:opacity-50" data-testid={`save-stock-cost-${s.id}`}>Save</button>
                     </div>
                   </td>}
