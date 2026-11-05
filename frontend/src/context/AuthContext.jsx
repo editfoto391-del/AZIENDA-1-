@@ -176,7 +176,7 @@ export function AuthProvider({ children }) {
   };
 
   const closeSupervisorPrompt = (password = null) => {
-    supervisorPrompt?.resolve(password);
+    supervisorPrompt?.resolve(typeof password === "string" ? password : null);
     setSupervisorPrompt(null);
     setSupervisorPassword("");
   };

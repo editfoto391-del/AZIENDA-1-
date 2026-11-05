@@ -98,6 +98,12 @@ function Protected({ children }) {
   const location = useLocation();
   if (booting || user === null) return <RouteLoading />;
   if (!user) return <Navigate to="/login" replace />;
+  if (
+    location.pathname.startsWith("/settings")
+    && (user.is_worker || user.role === "admin")
+  ) {
+    return <Navigate to="/" replace />;
+  }
   if (user.is_worker) {
     const warehousePath = location.pathname.match(/^\/warehouses\/([^/]+)/)?.[1];
     const warehouseSection = warehousePath === "chemical"

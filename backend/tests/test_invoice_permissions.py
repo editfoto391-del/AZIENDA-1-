@@ -1,0 +1,176 @@
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
+
+import server
+
+
+def make_request(path, method):
+    return Request({
+        "type": "http",
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "https",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 1234),
+        "server": ("test", 443),
+    })
+
+
+def test_admin_invoice_edit_does_not_need_supervisor_password():
+    admin = {"_active_role": "admin", "company_roles": {server.DEFAULT_COMPANY_ID: "admin"}}
+    worker_admin = {
+        "_active_role": "admin",
+        "is_worker": True,
+        "worker_allowed_sections": ["invoices"],
+        "worker_write_permissions": {"invoices": {"update": "allow", "create": "allow", "delete": "supervisor"}},
+    }
+
+    assert server.can_edit_invoice_without_supervisor(admin)
+    assert server.can_edit_invoice_without_supervisor(worker_admin)
+
+    worker_admin["worker_write_permissions"]["invoices"]["update"] = "supervisor"
+    assert not server.can_edit_invoice_without_supervisor(worker_admin)
+
+
+def test_admin_invoice_edit_skips_general_supervisor_write_gate():
+    async def scenario():
+        request = make_request("/api/invoices/invoice-1", "PUT")
+        admin = {
+            "_active_role": "admin",
+            "company_roles": {server.DEFAULT_COMPANY_ID: "admin"},
+            "_active_company_id": server.DEFAULT_COMPANY_ID,
+        }
+        await server.require_supervisor_for_company_write(request, admin)
+
+    asyncio.run(scenario())
+
+
+def test_admin_invoice_delete_requires_supervisor_password():
+    async def scenario():
+        request = make_request("/api/invoices/invoice-1", "DELETE")
+        admin = {
+            "_active_role": "admin",
+            "company_roles": {server.DEFAULT_COMPANY_ID: "admin"},
+            "_active_company_id": server.DEFAULT_COMPANY_ID,
+            "id": "admin-1",
+            "_session_id": "session-1",
+        }
+        with pytest.raises(HTTPException) as error:
+            await server.require_supervisor_for_company_write(request, admin)
+        assert error.value.status_code == 428
+
+    asyncio.run(scenario())
+
+
+def test_invoice_delete_worker_permission_requires_supervisor_and_rejects_allow():
+    assert server.worker_write_scope("/api/invoices/bulk-delete", "POST", {
+        "worker_allowed_sections": ["invoices"],
+    }) == ("invoices", "delete")
+    with pytest.raises(HTTPException, match="always requires the Supervisor Password"):
+        server.validate_worker_write_permissions(
+            {"invoices": {"create": "allow", "update": "allow", "delete": "allow"}},
+            ["invoices"],
+        )
+    assert server.validate_worker_write_permissions({}, ["invoices"]) == {
+        "invoices": {"create": "deny", "update": "deny", "delete": "deny"},
+    }
+
+
+def test_archived_invoice_list_is_owner_only():
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(server.get_invoices(
+            include_archived=True,
+            user={"_active_role": "admin"},
+        ))
+    assert error.value.status_code == 403
+
+
+@pytest.mark.parametrize("user", [
+    {"_active_role": "admin"},
+    {"_active_role": "owner", "is_worker": True},
+])
+def test_workers_and_admins_cannot_access_settings(user):
+    with pytest.raises(HTTPException) as error:
+        server.require_settings_owner(user)
+    assert error.value.status_code == 403
+
+
+def test_company_owner_can_access_settings():
+    server.require_settings_owner({"_active_role": "owner", "is_worker": False})
+
+
+def test_non_owner_cannot_open_an_archived_invoice(monkeypatch):
+    class Invoices:
+        async def find_one(self, *_args, **_kwargs):
+            return {"id": "invoice-1", "archived": True}
+
+    monkeypatch.setattr(server, "db", SimpleNamespace(invoices=Invoices()))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(server.get_invoice("invoice-1", {"_active_role": "admin"}))
+    assert error.value.status_code == 404
+
+
+def test_admin_cannot_change_existing_invoice_item_price(monkeypatch):
+    async def scenario():
+        body = server.InvoiceIn(items=[{
+            "category": "Foam",
+            "size": "100x100",
+            "unit_price": 13,
+            "price_override": True,
+        }])
+        existing = {"items": [{
+            "category": "Foam",
+            "size": "100x100",
+            "unit_price": 12.5,
+            "price_override": False,
+        }]}
+
+        with pytest.raises(HTTPException) as error:
+            await server.validate_admin_invoice_item_prices(
+                body, existing, {"_active_role": "admin"},
+            )
+        assert error.value.status_code == 403
+
+    async def price_lookup(*_args):
+        return {"price": 12.5}
+
+    monkeypatch.setattr(server, "resolve_price", price_lookup)
+    asyncio.run(scenario())
+
+
+def test_admin_new_invoice_item_must_use_configured_price(monkeypatch):
+    async def price_lookup(*_args):
+        return {"price": 12.5}
+
+    monkeypatch.setattr(server, "resolve_price", price_lookup)
+
+    async def scenario():
+        accepted = server.InvoiceIn(items=[{
+            "category": "Foam",
+            "size": "100x100",
+            "unit_price": 12.5,
+        }])
+        await server.validate_admin_invoice_item_prices(
+            accepted, None, {"_active_role": "admin"},
+        )
+
+        rejected = server.InvoiceIn(items=[{
+            "category": "Foam",
+            "size": "100x100",
+            "unit_price": 20,
+            "price_override": True,
+        }])
+        with pytest.raises(HTTPException) as error:
+            await server.validate_admin_invoice_item_prices(
+                rejected, None, {"_active_role": "admin"},
+            )
+        assert error.value.status_code == 403
+
+    asyncio.run(scenario())

@@ -17,7 +17,10 @@ const normalizeWhatsAppPhone = (phone) => {
 
 export default function InvoiceList({ express = false }) {
   const { user } = useAuth();
-  const canManageInvoices = user?.is_admin || user?.role === "admin" || user?.is_owner;
+  const isInvoiceOwner = user?.is_owner || user?.is_company_owner || user?.role === "owner";
+  const canManageInvoices = user?.is_admin || user?.role === "admin" || user?.is_owner
+    || (user?.is_worker && user?.allowed_sections?.includes(express ? "express-invoices" : "invoices")
+      && user?.write_permissions?.[express ? "express-invoices" : "invoices"]?.delete !== "deny");
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -76,11 +79,13 @@ export default function InvoiceList({ express = false }) {
 
   const toggle = (id) => setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
   const removeMany = async (ids) => {
-    if (!window.confirm(`Delete ${ids.length} invoice(s)? They will be moved to Archived, not permanently erased. Invoice data and payments are retained and can be restored.`)) return;
+    if (!window.confirm(`Delete ${ids.length} invoice(s)?`)) return;
     const restoreStock = window.confirm("Also re-add the invoiced quantities to stock? Choose Cancel to archive without changing stock.");
     try {
       const r = await api.post("/invoices/bulk-delete", { ids, restore_stock: restoreStock });
-      toast.success(`${r.archived} invoice(s) moved to Archived${r.stock_restored ? " and stock returned" : ""}`);
+      toast.success(isInvoiceOwner
+        ? `${r.archived} invoice(s) moved to Archived${r.stock_restored ? " and stock returned" : ""}`
+        : `${r.archived} invoice(s) deleted${r.stock_restored ? " and stock returned" : ""}`);
       load();
     } catch (e) { toast.error(apiError(e)); }
   };
@@ -89,7 +94,9 @@ export default function InvoiceList({ express = false }) {
     const restoreStock = window.confirm("Also re-add the invoiced quantities to stock? Choose Cancel to archive without changing stock.");
     try {
       const r = await api.post("/invoices/bulk-delete", { ids, restore_stock: restoreStock });
-      toast.success(`${r.archived} invoice(s) archived${r.stock_restored ? " and stock returned" : ""}`);
+      toast.success(isInvoiceOwner
+        ? `${r.archived} invoice(s) archived${r.stock_restored ? " and stock returned" : ""}`
+        : `${r.archived} invoice(s) deleted${r.stock_restored ? " and stock returned" : ""}`);
       load();
     } catch (e) { toast.error(apiError(e)); }
   };
@@ -182,10 +189,10 @@ export default function InvoiceList({ express = false }) {
         {!unifiedPriceList && <select value={zone} onChange={(e) => setZone(e.target.value)} className="rounded-lg border border-input px-3 py-2.5 text-sm">
           <option value="all">All Zones</option><option value="1">Zone 1</option><option value="2">Zone 2</option>
         </select>}
-        <label className="flex items-center gap-2 text-sm text-slate-600">
-          <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
-          Show archived invoices
-        </label>
+        {isInvoiceOwner && <label className="flex items-center gap-2 text-sm text-slate-600">
+            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+            Show archived invoices
+        </label>}
       </Card>
 
       {canManageInvoices && sel.length > 0 && <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2" data-testid="bulk-bar">
@@ -262,8 +269,8 @@ export default function InvoiceList({ express = false }) {
                     </>
                   )}
                     {canManageInvoices && !i.archived && <>
-                      <button onClick={(e) => { e.stopPropagation(); archiveMany([i.id]); }} data-testid={`archive-invoice-row-${i.id}`} title="Archive invoice" aria-label={`Archive invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center gap-1 rounded-lg border border-amber-200 px-2 py-1 text-amber-700 hover:bg-amber-50"><Archive size={12} /><span>Archive</span></button>
-                      <button onClick={(e) => { e.stopPropagation(); removeMany([i.id]); }} data-testid={`delete-invoice-row-${i.id}`} title="Delete invoice (move to archive)" aria-label={`Delete invoice ${i.number || "draft"} (move to archive)`} className="ml-2 inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50"><Trash2 size={12} /><span>Delete</span></button>
+                      {isInvoiceOwner && <button onClick={(e) => { e.stopPropagation(); archiveMany([i.id]); }} data-testid={`archive-invoice-row-${i.id}`} title="Archive invoice" aria-label={`Archive invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center gap-1 rounded-lg border border-amber-200 px-2 py-1 text-amber-700 hover:bg-amber-50"><Archive size={12} /><span>Archive</span></button>}
+                      <button onClick={(e) => { e.stopPropagation(); removeMany([i.id]); }} data-testid={`delete-invoice-row-${i.id}`} title={`Delete invoice ${i.number || "draft"}`} aria-label={`Delete invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50"><Trash2 size={12} /><span>Delete</span></button>
                     </>}</td>
                 </tr>))}</tbody>
             </table>

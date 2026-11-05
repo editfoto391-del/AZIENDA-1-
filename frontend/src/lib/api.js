@@ -48,6 +48,7 @@ function workerWriteActionForRequest(config) {
   const path = String(config.url || "").split("?")[0].replace(/^\/api\//, "").replace(/\/+$/, "");
   const method = String(config.method || "GET").toUpperCase();
   if (!["POST", "PUT", "PATCH", "DELETE"].includes(method) || /\/authorize(?:-|$)/.test(path)) return null;
+  if (method === "POST" && path === "invoices/bulk-delete") return "invoices:delete";
   const section = /^invoices\/[^/]+\/payments$/.test(path)
     ? "client-payments"
     : WORKER_SECTION_PREFIXES.find(([prefix]) => path === prefix || path.startsWith(`${prefix}/`))?.[1];
@@ -68,7 +69,11 @@ function supervisorActionForRequest(config) {
       try {
         const [section, operation] = workerAction.split(":");
         const permissions = JSON.parse(sessionStorage.getItem("erp-worker-write-permissions") || "{}");
-        if (permissions[section]?.[operation] === "supervisor") return workerAction;
+        if (
+          permissions[section]?.[operation] === "supervisor"
+          || (operation === "delete" && ["invoices", "express-invoices"].includes(section)
+            && permissions[section]?.[operation] !== "deny")
+        ) return workerAction;
       } catch {
         return null;
       }
@@ -119,7 +124,7 @@ client.interceptors.response.use(
       && String(err.response.data?.detail || "").toLowerCase().includes("supervisor")
     ) {
       const password = await requestSupervisorPassword();
-      if (!password) {
+      if (typeof password !== "string" || !password) {
         throw new Error("Change cancelled: the Supervisor Password is required.");
       }
       const action = supervisorActionForRequest(err.config);

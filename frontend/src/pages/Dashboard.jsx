@@ -109,6 +109,9 @@ const defaultWorkerWritePermissions = (sections, current = {}, legacyActions = [
       const legacyRequiresPassword = legacyActions.some((action) =>
         LEGACY_WORKER_ACTIONS[action]?.some(([legacySection, legacyOperation]) =>
           legacySection === section && legacyOperation === operation));
+      if (["invoices", "express-invoices"].includes(section) && operation === "delete") {
+        return [operation, prior === "deny" ? "deny" : "supervisor"];
+      }
       return [operation, WORKER_WRITE_OPTIONS.some(([value]) => value === prior)
         ? prior
         : legacyRequiresPassword ? "supervisor" : "allow"];
@@ -229,6 +232,7 @@ export default function Dashboard() {
     name: "", username: "", email: "", worker_role: "", password: "",
     company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
     is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [],
+    is_admin: false,
     write_permissions: defaultWorkerWritePermissions(["invoices"]),
   });
   const canManageWorkers = !!(user?.is_owner || user?.is_admin);
@@ -347,6 +351,7 @@ export default function Dashboard() {
           warehouse_ids: workerDraft.warehouse_ids,
           supervisor_password_actions: workerDraft.supervisor_password_actions,
           write_permissions: workerDraft.write_permissions,
+          is_admin: workerDraft.is_admin,
         });
         setWorkers((current) => current.map((worker) => worker.id === updated.id ? updated : worker));
         toast.success("Worker access updated");
@@ -359,6 +364,7 @@ export default function Dashboard() {
         name: "", username: "", email: "", worker_role: "", password: "",
         company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
         is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [],
+        is_admin: false,
         write_permissions: defaultWorkerWritePermissions(["invoices"]),
       });
       setWorkerModalOpen(false);
@@ -451,6 +457,7 @@ export default function Dashboard() {
       supervisor_password_actions: (worker.supervisor_password_actions || []).filter((action) =>
         !SUPERVISOR_ACTION_SECTIONS[action]
         || SUPERVISOR_ACTION_SECTIONS[action].some((section) => expandedSectionList.includes(section))),
+      is_admin: worker.is_admin === true,
       write_permissions: defaultWorkerWritePermissions(
         expandedSectionList,
         expandedWritePermissions,
@@ -574,7 +581,7 @@ export default function Dashboard() {
         <h1 className="text-3xl sm:text-4xl font-normal text-slate-900 font-display mt-1">Business overview</h1>
         <p className="text-sm text-slate-500 mt-1">Performance, cash flow and daily operations</p>
         </div>
-        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [], write_permissions: defaultWorkerWritePermissions(["invoices"]) }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
+        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [], is_admin: false, write_permissions: defaultWorkerWritePermissions(["invoices"]) }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/70 p-3" data-testid="dashboard-period-controls">
         <div className="flex flex-wrap gap-1.5" role="group" aria-label="Dashboard date range">
@@ -666,6 +673,7 @@ export default function Dashboard() {
                   <td className="py-3"><p className="font-semibold text-slate-800">{worker.name}</p><p className="text-xs text-slate-400">{worker.username}</p></td>
                   <td className="py-3 text-slate-600">
                     <span>{worker.worker_role}</span>
+                    {worker.is_admin && <Badge cls="ml-2 border-amber-200 bg-amber-50 text-amber-700">Admin</Badge>}
                     {worker.is_supervisor && <Badge cls="ml-2 border-violet-200 bg-violet-50 text-violet-700">Supervisor</Badge>}
                   </td>
                   <td className="py-3 text-slate-600">
@@ -705,6 +713,18 @@ export default function Dashboard() {
             </>}
 
           </div>
+          <label className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50/50 px-3 py-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={workerDraft.is_admin}
+              onChange={(event) => setWorkerDraft((current) => ({ ...current, is_admin: event.target.checked }))}
+              data-testid="worker-admin"
+            />
+            <span>
+              <span className="block font-semibold">Also assign the Admin role</span>
+              <span className="block text-xs text-slate-500">The account remains restricted to the sections and actions configured below.</span>
+            </span>
+          </label>
           <label className="flex items-start gap-2 rounded-md border border-violet-200 bg-violet-50/50 px-3 py-2 text-sm text-slate-700">
             <input
               type="checkbox"
@@ -781,7 +801,9 @@ export default function Dashboard() {
                             data-testid={`worker-permission-${section}-${operation}`}
                             className="w-full rounded-md border border-input bg-white px-2 py-2 text-sm text-slate-700"
                           >
-                            {WORKER_WRITE_OPTIONS.map(([value, optionLabel]) => <option key={value} value={value}>{optionLabel}</option>)}
+                            {WORKER_WRITE_OPTIONS.filter(([value]) =>
+                              !(["invoices", "express-invoices"].includes(section) && operation === "delete" && value === "allow")
+                            ).map(([value, optionLabel]) => <option key={value} value={value}>{optionLabel}</option>)}
                           </select>
                         </label>
                       ))}

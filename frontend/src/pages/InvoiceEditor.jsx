@@ -30,6 +30,7 @@ const emptyItem = (category = "Simple/Mix color") => ({ qty: 1, category, size: 
 
 export default function InvoiceEditor({ express = false }) {
   const { user } = useAuth();
+  const isInvoiceOwner = user?.is_owner || user?.is_company_owner || user?.role === "owner";
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const { id } = useParams();
   const nav = useNavigate();
@@ -72,6 +73,7 @@ export default function InvoiceEditor({ express = false }) {
   const [compactPreview, setCompactPreview] = useState(false);
   const deliveryNoteRef = useRef(null);
   const locked = !!id && !editing;
+  const invoiceItemPriceLocked = user?.is_admin && user?.role === "admin";
 
   const prepareForEdit = (invoice) => invoice.opening_balance
     ? { ...invoice, opening_balance: false, reference: "", notes: "", items: [emptyItem()] }
@@ -102,7 +104,7 @@ export default function InvoiceEditor({ express = false }) {
       setPayRecords(d.payment_records || []);
       setPreviousInvoices(d.previous_invoices_pending || []);
       if (sp.get("edit") && d.status !== "void") {
-        if (user?.can_skip_supervisor_approval) {
+        if (user?.can_edit_invoices_without_supervisor) {
           setSnapshot(loaded);
           setInv(prepareForEdit(loaded));
           setEditAuthorization("");
@@ -114,7 +116,7 @@ export default function InvoiceEditor({ express = false }) {
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, user?.can_skip_supervisor_approval, express]);
+  }, [id, user?.can_edit_invoices_without_supervisor, express]);
 
   useEffect(() => {
     let active = true;
@@ -179,7 +181,7 @@ export default function InvoiceEditor({ express = false }) {
   }, [id, inv.date]);
 
   const startEdit = () => {
-    if (user?.can_skip_supervisor_approval) {
+    if (user?.can_edit_invoices_without_supervisor) {
       setSnapshot(inv);
       setInv(prepareForEdit(inv));
       setEditAuthorization("");
@@ -517,7 +519,7 @@ export default function InvoiceEditor({ express = false }) {
           setCustomers((current) => [...current, createdCustomer]);
         }
       }
-      const newProductsToSave = saveNewEntries ? (pendingSave?.newProducts || []) : [];
+      const newProductsToSave = saveNewEntries && !invoiceItemPriceLocked ? (pendingSave?.newProducts || []) : [];
       if (newProductsToSave.length) {
         const savedPrices = await Promise.all(newProductsToSave.map((item) => {
           const price = Number(item.unit_price);
@@ -664,10 +666,10 @@ export default function InvoiceEditor({ express = false }) {
   };
 
   const archiveDraft = async () => {
-    if (!window.confirm("Archive this draft invoice? It will be retained and can be restored from the invoice list.")) return;
+    if (!window.confirm(isInvoiceOwner ? "Archive this draft invoice?" : "Delete this draft invoice?")) return;
     try {
       await api.del(`/invoices/${id}`);
-      toast.success("Draft archived");
+      toast.success(isInvoiceOwner ? "Draft archived" : "Draft deleted");
       nav(invoicesPath);
     } catch (e) { toast.error(apiError(e)); }
   };
@@ -894,7 +896,7 @@ export default function InvoiceEditor({ express = false }) {
           <span className="text-sm font-semibold text-amber-800">Editing — unsaved changes</span>
           <div className="flex gap-2">
             <Btn variant="outline" onClick={cancelEdit} data-testid="cancel-edit-btn"><X size={15} /> Cancel</Btn>
-            <Btn disabled={busy} onClick={saveEdit} data-testid="save-edit-btn"><Save size={15} /> {busy ? "Saving..." : "Save changes"}</Btn>
+            <Btn disabled={busy} onClick={() => saveEdit()} data-testid="save-edit-btn"><Save size={15} /> {busy ? "Saving..." : "Save changes"}</Btn>
             {inv.status === "draft" && <Btn disabled={busy} onClick={() => saveEdit("issued")} data-testid="save-and-issue-draft-btn"><Send size={15} /> {busy ? "Issuing..." : "Save & Issue"}</Btn>}
           </div>
         </div>
@@ -988,6 +990,7 @@ export default function InvoiceEditor({ express = false }) {
                       <td className="pr-2">
                         <div className="flex items-center gap-1">
                           <input type="number" step="0.01" value={it.unit_price}
+                            readOnly={invoiceItemPriceLocked}
                             onChange={(e) => updateItem(idx, { unit_price: e.target.value, price_override: true })} data-testid={`item-price-${idx}`}
                             className={`w-24 rounded border px-2 py-1.5 text-sm font-mono ${it._needsConfig && it.size && !(it.price_override && Number(it.unit_price) > 0) ? "border-red-400 bg-red-50" : it.price_override ? "border-amber-400 bg-amber-50" : "border-input"}`} />
                           {it.price_override && <span title="Manual override" className="text-[10px] font-bold text-amber-600">M</span>}
@@ -1136,7 +1139,7 @@ export default function InvoiceEditor({ express = false }) {
       </Modal>
       <Modal open={editAuthOpen} onClose={() => { setEditAuthOpen(false); setSupervisorPassword(""); setPendingInvoiceAction(null); }} title="Supervisor approval required">
         <form onSubmit={authorizeEdit} className="space-y-4" data-testid="invoice-edit-authorization-form">
-          <p className="text-sm text-slate-600">Enter the supervisor password to {pendingInvoiceAction?.action === "void" ? "void this invoice" : pendingInvoiceAction?.action === "reverse_payment" ? "reverse this payment" : "edit this invoice"}. This approval is required for every user role.</p>
+          <p className="text-sm text-slate-600">Enter the supervisor password to {pendingInvoiceAction?.action === "void" ? "void this invoice" : pendingInvoiceAction?.action === "reverse_payment" ? "reverse this payment" : "edit this invoice"}.</p>
           <Input label="Supervisor password" type="password" autoComplete="current-password" autoFocus required value={supervisorPassword} onChange={(event) => setSupervisorPassword(event.target.value)} data-testid="supervisor-password-input" />
           <div className="flex justify-end gap-2">
             <Btn type="button" variant="outline" onClick={() => { setEditAuthOpen(false); setSupervisorPassword(""); setPendingInvoiceAction(null); }}>Cancel</Btn>

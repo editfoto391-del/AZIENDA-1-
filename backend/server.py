@@ -699,6 +699,14 @@ def can_skip_supervisor_approval(user):
         and user.get("_active_company_id") == "iqfoam-manufactoring"
     )
 
+def can_edit_invoice_without_supervisor(user):
+    if user.get("role") == "owner" or user.get("_active_role") == "owner":
+        return True
+    if user.get("is_worker"):
+        permission = worker_write_permission(user, "/api/invoices/invoice-id", "PUT")
+        return bool(permission and permission[2] == "allow")
+    return user.get("_active_role") == "admin"
+
 def is_supervisor_password_endpoint(path):
     return (
         path == "/api/settings/supervisor-password/authorize"
@@ -712,11 +720,51 @@ async def require_supervisor_for_company_write(request, user):
     if request.method in ("GET", "HEAD", "OPTIONS") or user.get("role") == "owner" \
             or is_supervisor_password_endpoint(request.url.path):
         return
+    if user.get("_active_role") == "admin" and (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and (
+            request.url.path == "/api/prices"
+            or re.fullmatch(r"/api/prices/[^/]+", request.url.path)
+        )
+    ):
+        raise HTTPException(403, "Only company owners can change the price list")
+    if user.get("_active_role") == "owner" and (
+        (
+            request.method in {"PUT", "DELETE"}
+            and re.fullmatch(r"/api/invoices/[^/]+", request.url.path)
+        )
+        or (
+            request.method == "POST"
+            and request.url.path == "/api/invoices/bulk-delete"
+        )
+    ):
+        return
 
     action = None
     if user.get("is_worker"):
         write_permission = worker_write_permission(user, request.url.path, request.method)
-        if write_permission:
+        is_invoice_delete = (
+            request.url.path == "/api/invoices/bulk-delete"
+            or (
+                request.method == "DELETE"
+                and re.fullmatch(r"/api/invoices/[^/]+", request.url.path)
+            )
+        )
+        if is_invoice_delete:
+            if write_permission and write_permission[2] == "deny":
+                return
+            section = write_permission[0] if write_permission else (
+                "express-invoices"
+                if "express-invoices" in (user.get("worker_allowed_sections") or [])
+                and "invoices" not in (user.get("worker_allowed_sections") or [])
+                else "invoices"
+            )
+            action = f"{section}:delete"
+        elif write_permission:
+            is_invoice_delete = (
+                write_permission[0] in {"invoices", "express-invoices"}
+                and write_permission[1] == "delete"
+            )
             if write_permission[2] != "supervisor":
                 return
             section, operation, _ = write_permission
@@ -733,8 +781,30 @@ async def require_supervisor_for_company_write(request, user):
         grant_company_id = user.get("_active_company_id")
     else:
         if (
-            not is_delegated_company_admin(user)
-            or user.get("_active_company_id") != DEFAULT_COMPANY_ID
+            request.method == "PUT"
+            and re.fullmatch(r"/api/invoices/[^/]+", request.url.path)
+            and user.get("_active_role") == "admin"
+        ):
+            return
+        is_invoice_delete = (
+            (
+                request.method == "DELETE"
+                and re.fullmatch(r"/api/invoices/[^/]+", request.url.path)
+            )
+            or (
+                request.method == "POST"
+                and request.url.path == "/api/invoices/bulk-delete"
+            )
+        )
+        if (
+            not (
+                is_delegated_company_admin(user)
+                or (is_invoice_delete and user.get("_active_role") == "admin")
+            )
+            or (
+                user.get("_active_company_id") != DEFAULT_COMPANY_ID
+                and not is_invoice_delete
+            )
             or (
                 request.method == "DELETE"
                 and re.fullmatch(r"/api/grvs/[^/]+", request.url.path)
@@ -742,7 +812,7 @@ async def require_supervisor_for_company_write(request, user):
         ):
             return
         grant_scope = "supervisor_company_write"
-        grant_company_id = DEFAULT_COMPANY_ID
+        grant_company_id = user.get("_active_company_id")
 
     encoded_grant = request.headers.get("X-Supervisor-Authorization", "")
     try:
@@ -876,6 +946,7 @@ class CreateWorkerIn(BaseModel):
     warehouse_ids: List[str] = Field(default_factory=list)
     supervisor_password_actions: List[str] = Field(default_factory=list)
     write_permissions: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+    is_admin: bool = False
 
 class WorkerAccessUpdateIn(BaseModel):
     worker_role: str
@@ -886,6 +957,7 @@ class WorkerAccessUpdateIn(BaseModel):
     warehouse_ids: List[str] = Field(default_factory=list)
     supervisor_password_actions: List[str] = Field(default_factory=list)
     write_permissions: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+    is_admin: Optional[bool] = None
 
 class UserStatusIn(BaseModel):
     active: bool
@@ -965,6 +1037,7 @@ def public_user(u):
                 )
             ),
             "can_skip_supervisor_approval": can_skip_supervisor_approval(u),
+            "can_edit_invoices_without_supervisor": can_edit_invoice_without_supervisor(u),
             "is_primary_owner": canonical_email(u.get("email")) == canonical_email(os.environ["ADMIN_EMAIL"]),
             "is_worker": u.get("is_worker", False),
             "is_stock_only_worker": u.get("is_worker", False) and u.get("worker_stock_only", False),
@@ -1040,7 +1113,10 @@ def validate_worker_supervisor_sections(sections, protected_actions):
 
 def validate_worker_write_permissions(permissions, sections):
     if not permissions:
-        return {}
+        return {
+            section: {operation: "deny" for operation in ("create", "update", "delete")}
+            for section in sections
+        }
     normalized = {}
     allowed_sections = set(sections)
     if set(permissions) - allowed_sections:
@@ -1053,6 +1129,8 @@ def validate_worker_write_permissions(permissions, sections):
             raise HTTPException(400, f"Choose create, edit, and delete permissions for {section}")
         if any(value not in WORKER_WRITE_PERMISSION_VALUES for value in section_permissions.values()):
             raise HTTPException(400, "Choose a valid worker write permission")
+        if section in {"invoices", "express-invoices"} and section_permissions.get("delete") == "allow":
+            raise HTTPException(400, "Invoice deletion always requires the Supervisor Password")
         normalized[section] = dict(section_permissions)
     return normalized
 
@@ -1063,9 +1141,15 @@ def worker_write_scope(path, method, user=None):
         return None
     if re.search(r"/authorize(?:-|$)", normalized_path):
         return None
+    if normalized_path == "invoices/bulk-delete":
+        return "invoices", "delete"
     if re.fullmatch(r"invoices/[^/]+/payments", normalized_path):
         allowed = set((user or {}).get("worker_allowed_sections") or [])
-        section = "client-payments" if "client-payments" in allowed else "express-client-payments"
+        section = (
+            "express-client-payments"
+            if "express-client-payments" in allowed and "client-payments" not in allowed
+            else "client-payments"
+        )
     else:
         section = worker_section_for_request(normalized_path, user or {})
     if not section:
@@ -1098,6 +1182,10 @@ def worker_write_permission(user, path, method):
 def require_profile_owner(user):
     if user.get("role") != "owner" and user.get("_active_role") != "owner":
         raise HTTPException(403, "Company owner access required")
+
+def require_settings_owner(user):
+    if user.get("is_worker") or user.get("_active_role") != "owner":
+        raise HTTPException(403, "Settings access requires company owner access")
 
 def is_company_admin(user):
     return user.get("role") in ("owner", "admin") or user.get("_active_role") in ("owner", "admin")
@@ -1844,6 +1932,22 @@ def require_admin(user):
     if user.get("_active_role") not in ("owner", "admin"):
         raise HTTPException(403, "Administrator access required for this company")
 
+def require_price_list_owner(user):
+    if user.get("_active_role") == "admin":
+        raise HTTPException(403, "Only company owners can change the price list")
+
+def require_invoice_delete_access(user):
+    if user.get("_active_role") in ("owner", "admin"):
+        return
+    if user.get("is_worker"):
+        permission = worker_write_permission(user, "/api/invoices/invoice-id", "DELETE")
+        if (
+            "invoices" in set(user.get("worker_allowed_sections") or [])
+            and (not permission or permission[2] != "deny")
+        ):
+            return
+    raise HTTPException(403, "Invoice deletion requires administrator access or an enabled worker permission")
+
 @api.get("/access/workers")
 async def get_workers(company_id: str = "", user=Depends(get_current_user)):
     company_id = company_id or user["_active_company_id"]
@@ -1864,6 +1968,7 @@ async def get_workers(company_id: str = "", user=Depends(get_current_user)):
         "warehouse_ids": worker_warehouse_ids(worker),
         "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
         "write_permissions": worker.get("worker_write_permissions", {}),
+        "is_admin": (worker.get("company_roles") or {}).get(company_id) == "admin",
         "company_id": company_id,
         "active": worker.get("active", True),
     } for worker in workers]
@@ -1897,6 +2002,7 @@ async def worker_access_details(worker_id, company_id, user):
         "warehouse_ids": worker_warehouse_ids(worker),
         "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
         "write_permissions": worker.get("worker_write_permissions", {}),
+        "is_admin": (worker.get("company_roles") or {}).get(company_id) == "admin",
         "active": worker.get("active", True),
         "can_regenerate": worker.get("active", True) is not False
                           or worker.get("personal_access_revoked", False),
@@ -1920,6 +2026,13 @@ async def issue_worker_personal_link(worker_id, company_id, user, regenerate=Fal
         return details
     if worker.get("active") is False and not worker.get("personal_access_revoked", False):
         raise HTTPException(403, "Worker account is disabled")
+    reactivating_admin = (
+        worker.get("active") is False
+        and worker.get("personal_access_revoked", False)
+        and (worker.get("company_roles") or {}).get(company_id) == "admin"
+    )
+    if reactivating_admin:
+        await reserve_company_admin(company_id)
     token = secrets.token_urlsafe(32)
     updates = {
         "personal_access_token_hash": worker_access_token_hash(token),
@@ -1928,7 +2041,16 @@ async def issue_worker_personal_link(worker_id, company_id, user, regenerate=Fal
     }
     if worker.get("personal_access_revoked"):
         updates["active"] = True
-    await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": updates})
+    try:
+        result = await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": updates})
+    except Exception:
+        if reactivating_admin:
+            await release_company_admin(company_id)
+        raise
+    if result.matched_count != 1:
+        if reactivating_admin:
+            await release_company_admin(company_id)
+        raise HTTPException(409, "Worker account changed; reload and try again")
     await log_audit("user", worker_id, "worker_access_link_regenerated" if regenerate else "worker_access_link_created",
                     user, after={"company_id": company_id})
     return {**details, "active": True, "can_regenerate": True, "link_active": True, "access_token": token}
@@ -1960,6 +2082,11 @@ async def revoke_worker_personal_link(
     }})
     if result.matched_count != 1:
         raise HTTPException(404, "Worker not found")
+    if (
+        details["active"] is not False
+        and details["is_admin"]
+    ):
+        await release_company_admin(company_id)
     await base_db.user_sessions.delete_many({"user_id": worker_id})
     await log_audit("user", worker_id, "worker_access_link_revoked", user,
                     before={"company_id": company_id}, after={"active": False})
@@ -2043,6 +2170,8 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         raise HTTPException(409, "Username already exists")
     if email and await base_db.users.find_one({"email": email}, {"_id": 0}):
         raise HTTPException(409, "An account with this email already exists")
+    if body.is_admin:
+        await reserve_company_admin(company_id)
     account = {
         "id": new_id(),
         "username": username,
@@ -2050,7 +2179,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "name": name,
         "password_hash": hash_pw(body.password),
         "role": "user",
-        "company_roles": {company_id: "user"},
+        "company_roles": {company_id: "admin" if body.is_admin else "user"},
         "company_ids": [company_id],
         "is_worker": True,
         "worker_role": worker_role,
@@ -2065,7 +2194,12 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "auth_provider": "password",
         "created_at": now_iso(),
     }
-    await base_db.users.insert_one(dict(account))
+    try:
+        await base_db.users.insert_one(dict(account))
+    except Exception:
+        if body.is_admin:
+            await release_company_admin(company_id)
+        raise
     company_context = active_company_id.set(company_id)
     try:
         await log_audit("user", account["id"], "worker_created", user, after={
@@ -2078,6 +2212,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
             "warehouse_ids": warehouse_ids,
             "supervisor_password_actions": protected_actions,
             "write_permissions": write_permissions,
+            "is_admin": body.is_admin,
         })
     finally:
         active_company_id.reset(company_context)
@@ -2093,6 +2228,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "warehouse_ids": warehouse_ids,
         "supervisor_password_actions": protected_actions,
         "write_permissions": write_permissions,
+        "is_admin": body.is_admin,
         "active": True,
     }
 
@@ -2127,16 +2263,38 @@ async def update_worker_access(
               "is_supervisor": worker.get("worker_is_supervisor", False),
               "warehouse_ids": worker_warehouse_ids(worker),
               "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
-              "write_permissions": worker.get("worker_write_permissions", {})}
-    await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": {
-        "worker_role": worker_role, "worker_allowed_sections": sections,
-        "worker_stock_only": body.stock_only,
-        "worker_is_supervisor": body.is_supervisor,
-        "worker_warehouse_ids": warehouse_ids,
-        "worker_warehouse_id": warehouse_ids[0] if warehouse_ids else None,
-        "worker_supervisor_password_actions": protected_actions,
-        "worker_write_permissions": write_permissions,
-    }})
+              "write_permissions": worker.get("worker_write_permissions", {}),
+              "is_admin": (worker.get("company_roles") or {}).get(company_id) == "admin"}
+    company_roles = dict(worker.get("company_roles") or {})
+    was_admin = company_roles.get(company_id) == "admin"
+    is_admin = was_admin if body.is_admin is None else body.is_admin
+    worker_active = worker.get("active", True) is not False
+    adding_admin = is_admin and not was_admin and worker_active
+    removing_admin = was_admin and not is_admin and worker_active
+    if adding_admin:
+        await reserve_company_admin(company_id)
+    company_roles[company_id] = "admin" if is_admin else "user"
+    try:
+        result = await base_db.users.update_one({"id": worker_id, "is_worker": True}, {"$set": {
+            "worker_role": worker_role, "worker_allowed_sections": sections,
+            "worker_stock_only": body.stock_only,
+            "worker_is_supervisor": body.is_supervisor,
+            "worker_warehouse_ids": warehouse_ids,
+            "worker_warehouse_id": warehouse_ids[0] if warehouse_ids else None,
+            "worker_supervisor_password_actions": protected_actions,
+            "worker_write_permissions": write_permissions,
+            "company_roles": company_roles,
+        }})
+    except Exception:
+        if adding_admin:
+            await release_company_admin(company_id)
+        raise
+    if result.matched_count != 1:
+        if adding_admin:
+            await release_company_admin(company_id)
+        raise HTTPException(409, "Worker access changed; reload and try again")
+    if removing_admin:
+        await release_company_admin(company_id)
     await base_db.user_sessions.delete_many({"user_id": worker_id})
     await log_audit("user", worker_id, "worker_access_updated", user, before=before,
                     after={"worker_role": worker_role, "allowed_sections": sections,
@@ -2144,7 +2302,8 @@ async def update_worker_access(
                            "is_supervisor": body.is_supervisor,
                            "warehouse_ids": warehouse_ids,
                            "supervisor_password_actions": protected_actions,
-                           "write_permissions": write_permissions})
+                           "write_permissions": write_permissions,
+                           "is_admin": is_admin})
     return {
         "id": worker_id,
         "name": worker.get("name", ""),
@@ -2157,6 +2316,7 @@ async def update_worker_access(
         "warehouse_ids": warehouse_ids,
         "supervisor_password_actions": protected_actions,
         "write_permissions": write_permissions,
+        "is_admin": is_admin,
         "active": worker.get("active", True),
     }
 
@@ -2172,6 +2332,11 @@ async def remove_worker(worker_id: str, company_id: str, user=Depends(get_curren
     await log_audit("user", worker_id, "worker_permanently_deleted", user,
                     before={"username": worker.get("username"), "name": worker.get("name"),
                             "company_id": company_id})
+    if (
+        worker.get("active", True) is not False
+        and (worker.get("company_roles") or {}).get(company_id) == "admin"
+    ):
+        await release_company_admin(company_id)
     await base_db.user_sessions.delete_many({"user_id": worker_id})
     await base_db.user_devices.delete_many({"user_id": worker_id})
     await base_db.assistant_sessions.delete_many({"user_id": worker_id})
@@ -4437,6 +4602,7 @@ async def get_prices(user=Depends(get_current_user)):
 
 @api.post("/prices")
 async def add_price(body: PriceIn, user=Depends(get_current_user)):
+    require_price_list_owner(user)
     d = {**body.model_dump(), "archived": False, "archived_at": None, "archived_by": None}
     if d["category"] == "Simple/Mix color":
         d["category"] = "Simple" if uses_unified_price_list(active_company_id.get()) else "Standard"
@@ -4452,6 +4618,7 @@ async def add_price(body: PriceIn, user=Depends(get_current_user)):
 
 @api.put("/prices/{pid}")
 async def edit_price(pid: str, body: PriceIn, user=Depends(get_current_user)):
+    require_price_list_owner(user)
     before = await db.prices.find_one({"id": pid}, {"_id": 0})
     d = body.model_dump()
     if d["category"] == "Simple/Mix color":
@@ -4468,6 +4635,7 @@ async def edit_price(pid: str, body: PriceIn, user=Depends(get_current_user)):
 
 @api.delete("/prices/{pid}")
 async def delete_price(pid: str, user=Depends(get_current_user)):
+    require_price_list_owner(user)
     before = await db.prices.find_one({"id": pid}, {"_id": 0})
     if not before:
         raise HTTPException(404, "Product price not found")
@@ -4853,6 +5021,8 @@ async def previous_invoice_balances(customer_id, invoice_type, invoice_date, exc
 
 @api.get("/invoices")
 async def get_invoices(include_archived: bool = False, express: bool = False, user=Depends(get_current_user)):
+    if include_archived:
+        require_profile_owner(user)
     invs = await listall("invoices", invoice_list_query(express, include_archived), ("created_at", -1))
     invoice_ids = [invoice["id"] for invoice in invs]
     shared_links = await db.invoice_share_links.find(
@@ -4868,6 +5038,10 @@ async def get_invoices(include_archived: bool = False, express: bool = False, us
 async def get_invoice(iid: str, user=Depends(get_current_user)):
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
+        raise HTTPException(404, "Invoice not found")
+    if inv.get("archived") and (
+        user.get("role") != "owner" and user.get("_active_role") != "owner"
+    ):
         raise HTTPException(404, "Invoice not found")
     inv["status"] = derive_status(inv)
     inv["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
@@ -5049,7 +5223,9 @@ async def create_invoice_action_authorization(iid, action, password, user, targe
     return {"authorization_id": authorization_id, "expires_at": expires_at.isoformat()}
 
 async def consume_invoice_action_authorization(authorization_id, iid, action, user, target_id=None):
-    if can_skip_supervisor_approval(user):
+    if can_skip_supervisor_approval(user) or (
+        action == "edit" and can_edit_invoice_without_supervisor(user)
+    ):
         return {
             "id": authorization_id,
             "invoice_id": iid,
@@ -5140,14 +5316,14 @@ async def _archive_invoice(iid, user, reason="", restore_stock=False):
 
 @api.delete("/invoices/{iid}")
 async def delete_invoice(iid: str, restore_stock: bool = False, user=Depends(get_current_user)):
-    require_admin(user)
+    require_invoice_delete_access(user)
     if not await _archive_invoice(iid, user, restore_stock=restore_stock):
         raise HTTPException(404, "Invoice not found")
     return {"ok": True, "archived": True, "stock_restored": restore_stock}
 
 @api.delete("/invoices/{iid}/permanent")
 async def permanently_delete_invoice(iid: str, user=Depends(get_current_user)):
-    require_admin(user)
+    require_profile_owner(user)
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
         raise HTTPException(404, "Invoice not found")
@@ -5163,7 +5339,7 @@ async def permanently_delete_invoice(iid: str, user=Depends(get_current_user)):
 
 @api.post("/invoices/{iid}/restore")
 async def restore_invoice(iid: str, user=Depends(get_current_user)):
-    require_admin(user)
+    require_profile_owner(user)
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
         raise HTTPException(404, "Invoice not found")
@@ -5188,7 +5364,7 @@ class BulkDeleteIn(BaseModel):
 
 @api.post("/invoices/bulk-delete")
 async def bulk_delete_invoices(body: BulkDeleteIn, user=Depends(get_current_user)):
-    require_admin(user)
+    require_invoice_delete_access(user)
     n = 0
     for iid in body.ids:
         n += await _archive_invoice(iid, user, body.reason or "", body.restore_stock)
@@ -5275,8 +5451,51 @@ async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
     compute_invoice(inv)
     return inv
 
+def invoice_item_price_key(item, zone):
+    return (
+        price_category(zone, item.get("category", "")).casefold(),
+        canonical_price_size(item.get("size", "")).casefold(),
+        " ".join(str(item.get("description") or "").split()).casefold(),
+    )
+
+async def validate_admin_invoice_item_prices(body, existing, user):
+    if user.get("_active_role") != "admin":
+        return
+    zone = 1 if uses_unified_price_list(active_company_id.get()) else body.zone
+    previous_items = {}
+    for item in (existing or {}).get("items", []):
+        previous_items.setdefault(invoice_item_price_key(item, zone), []).append(item)
+
+    for item in body.items:
+        submitted = item.model_dump()
+        matches = previous_items.get(invoice_item_price_key(submitted, zone), [])
+        if matches:
+            previous = matches.pop(0)
+            if (
+                r2(submitted.get("unit_price")) != r2(previous.get("unit_price"))
+                or bool(submitted.get("price_override")) != bool(previous.get("price_override"))
+            ):
+                raise HTTPException(403, "Administrators cannot change invoice item prices")
+            continue
+
+        if (
+            body.status == "draft"
+            and not submitted.get("size")
+            and not submitted.get("description")
+            and not D(submitted.get("unit_price"))
+        ):
+            continue
+        if not submitted.get("size") or submitted.get("price_override"):
+            raise HTTPException(403, "Administrators can only add invoice items at a configured price")
+        resolved = await resolve_price(zone, submitted.get("category", ""), submitted["size"])
+        if resolved.get("price") is None:
+            raise HTTPException(403, "Administrators can only add invoice items at a configured price")
+        if r2(submitted.get("unit_price")) != r2(resolved["price"]):
+            raise HTTPException(403, "Administrators cannot change invoice item prices")
+
 @api.post("/invoices")
 async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
+    await validate_admin_invoice_item_prices(body, None, user)
     deduct_stock = body.deduct_stock
     inv = await _prepare_invoice(body, user=user)
     if body.idempotency_key:
@@ -5359,6 +5578,7 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
     if not reason:
         raise HTTPException(400, "A reason is required to edit an invoice")
     await consume_invoice_action_authorization(body.supervisor_authorization, iid, "edit", user)
+    await validate_admin_invoice_item_prices(body, existing, user)
     inv = await _prepare_invoice(body, user=user, existing=existing)
     inv["status"] = invoice_status_for_update(body, existing.get("status"))
     if existing.get("idempotency_key"):
@@ -9510,12 +9730,22 @@ async def authorize_supervisor_company_change(
     if user.get("is_worker"):
         action = body.action
         generic_action = None
-        if ":" in action:
+        if isinstance(action, str) and ":" in action:
             section, operation = action.split(":", 1)
             if operation in {"create", "update", "delete"}:
                 configured = (user.get("worker_write_permissions") or {}).get(section, {})
-                if configured.get(operation) == "supervisor":
+                is_invoice_delete = (
+                    section in {"invoices", "express-invoices"}
+                    and operation == "delete"
+                    and section in set(user.get("worker_allowed_sections") or [])
+                    and configured.get(operation) != "deny"
+                )
+                if configured.get(operation) == "supervisor" or is_invoice_delete:
                     generic_action = (section, operation)
+        if not generic_action and action in {"invoices:delete", "express-invoices:delete"}:
+            section = action.split(":", 1)[0]
+            if section in set(user.get("worker_allowed_sections") or []):
+                generic_action = (section, "delete")
         if generic_action:
             grant_company_id = user.get("_active_company_id")
         else:
@@ -9529,11 +9759,11 @@ async def authorize_supervisor_company_change(
             grant_company_id = MANUFACTURING_COMPANY_ID
         grant_scope = "supervisor_worker_action"
     else:
-        if not is_delegated_company_admin(user) or user.get("_active_company_id") != DEFAULT_COMPANY_ID:
-            raise HTTPException(403, "This authorization is only available to company owners in SUPERIQFOAM")
+        if not is_delegated_company_admin(user) and user.get("_active_role") != "admin":
+            raise HTTPException(403, "Company administrator access is required for this authorization")
         action = None
         grant_scope = "supervisor_company_write"
-        grant_company_id = DEFAULT_COMPANY_ID
+        grant_company_id = user.get("_active_company_id")
 
     settings = await db.settings.find_one({"id": "singleton"}, {"_id": 0, "supervisor_password_hash": 1})
     password_hash = (settings or {}).get("supervisor_password_hash")
@@ -9600,6 +9830,7 @@ async def update_supervisor_password(body: SupervisorPasswordIn, user=Depends(ge
 
 @api.put("/settings")
 async def update_settings(body: dict, user=Depends(get_current_user)):
+    require_settings_owner(user)
     def _finite(v):
         if isinstance(v, float):
             return math.isfinite(v)
@@ -9632,8 +9863,7 @@ class DieselPriceUpdate(BaseModel):
 
 @api.put("/settings/diesel")
 async def update_diesel_price(body: DieselPriceUpdate, user=Depends(get_current_user)):
-    if user.get("role") != "admin":
-        raise HTTPException(403, "Only an administrator can update the diesel price")
+    require_settings_owner(user)
     if body.price_per_l <= 0 or body.price_per_l > 100:
         raise HTTPException(400, "Enter a valid diesel price per litre")
     updated_at = now_iso()
