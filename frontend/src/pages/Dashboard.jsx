@@ -233,6 +233,7 @@ export default function Dashboard() {
     company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
     is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [],
     is_admin: false,
+    can_edit_invoice_prices: false,
     write_permissions: defaultWorkerWritePermissions(["invoices"]),
   });
   const canManageWorkers = !!(user?.is_owner || user?.is_admin);
@@ -351,6 +352,7 @@ export default function Dashboard() {
           warehouse_ids: workerDraft.warehouse_ids,
           supervisor_password_actions: workerDraft.supervisor_password_actions,
           write_permissions: workerDraft.write_permissions,
+          can_edit_invoice_prices: workerDraft.can_edit_invoice_prices,
           is_admin: workerDraft.is_admin,
         });
         setWorkers((current) => current.map((worker) => worker.id === updated.id ? updated : worker));
@@ -365,6 +367,7 @@ export default function Dashboard() {
         company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false,
         is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [],
         is_admin: false,
+        can_edit_invoice_prices: false,
         write_permissions: defaultWorkerWritePermissions(["invoices"]),
       });
       setWorkerModalOpen(false);
@@ -392,6 +395,9 @@ export default function Dashboard() {
       ...current,
       allowed_sections: nextSections,
       warehouse_ids: warehouseIds,
+      can_edit_invoice_prices: nextSections.some((item) => ["invoices", "express-invoices"].includes(item))
+        ? current.can_edit_invoice_prices
+        : false,
       supervisor_password_actions: current.supervisor_password_actions.filter((item) =>
         SUPERVISOR_ACTION_SECTIONS[item].some((required) => nextSections.includes(required))),
       write_permissions: writePermissions,
@@ -407,6 +413,9 @@ export default function Dashboard() {
       company_id: companyId,
       warehouse_ids: current.warehouse_ids.filter((id) => availableSections.includes(`warehouse-${id.toLowerCase()}`)),
       supervisor_password_actions: [],
+      can_edit_invoice_prices: current.can_edit_invoice_prices
+        && current.allowed_sections.some((section) =>
+          availableSections.includes(section) && ["invoices", "express-invoices"].includes(section)),
       write_permissions: Object.fromEntries(Object.entries(current.write_permissions)
         .filter(([section]) => availableSections.includes(section) && current.allowed_sections.includes(section))),
       allowed_sections: current.allowed_sections.filter((section) => availableSections.includes(section)),
@@ -458,6 +467,7 @@ export default function Dashboard() {
         !SUPERVISOR_ACTION_SECTIONS[action]
         || SUPERVISOR_ACTION_SECTIONS[action].some((section) => expandedSectionList.includes(section))),
       is_admin: worker.is_admin === true,
+      can_edit_invoice_prices: worker.can_edit_invoice_prices === true,
       write_permissions: defaultWorkerWritePermissions(
         expandedSectionList,
         expandedWritePermissions,
@@ -581,7 +591,7 @@ export default function Dashboard() {
         <h1 className="text-3xl sm:text-4xl font-normal text-slate-900 font-display mt-1">Business overview</h1>
         <p className="text-sm text-slate-500 mt-1">Performance, cash flow and daily operations</p>
         </div>
-        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [], is_admin: false, write_permissions: defaultWorkerWritePermissions(["invoices"]) }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
+        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [], is_admin: false, can_edit_invoice_prices: false, write_permissions: defaultWorkerWritePermissions(["invoices"]) }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/70 p-3" data-testid="dashboard-period-controls">
         <div className="flex flex-wrap gap-1.5" role="group" aria-label="Dashboard date range">
@@ -751,6 +761,7 @@ export default function Dashboard() {
               warehouse_ids: event.target.checked ? [] : current.warehouse_ids,
               is_supervisor: event.target.checked ? false : current.is_supervisor,
               supervisor_password_actions: event.target.checked ? [] : current.supervisor_password_actions,
+              can_edit_invoice_prices: event.target.checked ? false : current.can_edit_invoice_prices,
               write_permissions: event.target.checked
                 ? { stock: current.write_permissions.stock || defaultWorkerWritePermissions(["stock"]).stock }
                 : current.write_permissions,
@@ -772,6 +783,23 @@ export default function Dashboard() {
             </div>
             <p className="text-xs text-slate-500">Each page has its own permission. Warehouse A, B and C also assign access to the matching warehouse.</p>
           </fieldset>
+          {workerDraft.allowed_sections.some((section) => ["invoices", "express-invoices"].includes(section)) && (
+            <label className="flex items-start gap-2 rounded-md border border-border px-3 py-2 text-sm text-slate-700" data-testid="worker-invoice-price-permission">
+              <input
+                type="checkbox"
+                checked={workerDraft.can_edit_invoice_prices}
+                onChange={(event) => setWorkerDraft((current) => ({
+                  ...current,
+                  can_edit_invoice_prices: event.target.checked,
+                }))}
+                data-testid="worker-can-edit-invoice-prices"
+              />
+              <span>
+                <span className="block font-semibold">Allow this worker to edit invoice prices</span>
+                <span className="block text-xs text-slate-500">When disabled, invoice item prices must stay at the configured price. This applies to standard and express invoices.</span>
+              </span>
+            </label>
+          )}
           <fieldset className="space-y-3 rounded-md border border-border p-3" data-testid="worker-write-permissions">
             <legend className="px-1 text-sm font-semibold text-slate-700">Section actions and password rules</legend>
             <p className="text-xs text-slate-500">Each section shows its relevant actions. For each one, choose no access, access without a password, or require the company Supervisor Password.</p>

@@ -946,6 +946,7 @@ class CreateWorkerIn(BaseModel):
     warehouse_ids: List[str] = Field(default_factory=list)
     supervisor_password_actions: List[str] = Field(default_factory=list)
     write_permissions: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+    can_edit_invoice_prices: bool = False
     is_admin: bool = False
 
 class WorkerAccessUpdateIn(BaseModel):
@@ -957,6 +958,7 @@ class WorkerAccessUpdateIn(BaseModel):
     warehouse_ids: List[str] = Field(default_factory=list)
     supervisor_password_actions: List[str] = Field(default_factory=list)
     write_permissions: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+    can_edit_invoice_prices: Optional[bool] = None
     is_admin: Optional[bool] = None
 
 class UserStatusIn(BaseModel):
@@ -1046,6 +1048,7 @@ def public_user(u):
             "warehouse_ids": worker_warehouse_ids(u),
             "allowed_sections": u.get("worker_allowed_sections", []),
             "write_permissions": u.get("worker_write_permissions", {}),
+            "can_edit_invoice_prices": u.get("worker_can_edit_invoice_prices", False),
             "admin_company_ids": admin_company_ids,
             "company_id": company_id, "company_ids": allowed_company_ids(u), "picture": u.get("picture", "")}
 
@@ -1133,6 +1136,11 @@ def validate_worker_write_permissions(permissions, sections):
             raise HTTPException(400, "Invoice deletion always requires the Supervisor Password")
         normalized[section] = dict(section_permissions)
     return normalized
+
+def validate_worker_invoice_price_permission(can_edit, sections):
+    if can_edit and not {"invoices", "express-invoices"}.intersection(sections):
+        raise HTTPException(400, "Invoice price editing requires invoice section access")
+    return bool(can_edit)
 
 def worker_write_scope(path, method, user=None):
     normalized_path = path.removeprefix("/api/").strip("/")
@@ -1968,6 +1976,7 @@ async def get_workers(company_id: str = "", user=Depends(get_current_user)):
         "warehouse_ids": worker_warehouse_ids(worker),
         "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
         "write_permissions": worker.get("worker_write_permissions", {}),
+        "can_edit_invoice_prices": worker.get("worker_can_edit_invoice_prices", False),
         "is_admin": (worker.get("company_roles") or {}).get(company_id) == "admin",
         "company_id": company_id,
         "active": worker.get("active", True),
@@ -2002,6 +2011,7 @@ async def worker_access_details(worker_id, company_id, user):
         "warehouse_ids": worker_warehouse_ids(worker),
         "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
         "write_permissions": worker.get("worker_write_permissions", {}),
+        "can_edit_invoice_prices": worker.get("worker_can_edit_invoice_prices", False),
         "is_admin": (worker.get("company_roles") or {}).get(company_id) == "admin",
         "active": worker.get("active", True),
         "can_regenerate": worker.get("active", True) is not False
@@ -2159,6 +2169,9 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         company_id, body.is_supervisor, requested_warehouses, body.supervisor_password_actions, sections,
     )
     write_permissions = validate_worker_write_permissions(body.write_permissions, sections)
+    can_edit_invoice_prices = validate_worker_invoice_price_permission(
+        body.can_edit_invoice_prices, sections,
+    )
     if body.stock_only and body.is_supervisor:
         raise HTTPException(400, "Stock-only workers cannot be supervisors")
     validate_worker_supervisor_sections(sections, protected_actions)
@@ -2190,6 +2203,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "worker_warehouse_id": warehouse_ids[0] if warehouse_ids else None,
         "worker_supervisor_password_actions": protected_actions,
         "worker_write_permissions": write_permissions,
+        "worker_can_edit_invoice_prices": can_edit_invoice_prices,
         "active": True,
         "auth_provider": "password",
         "created_at": now_iso(),
@@ -2212,6 +2226,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
             "warehouse_ids": warehouse_ids,
             "supervisor_password_actions": protected_actions,
             "write_permissions": write_permissions,
+            "can_edit_invoice_prices": can_edit_invoice_prices,
             "is_admin": body.is_admin,
         })
     finally:
@@ -2228,6 +2243,7 @@ async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
         "warehouse_ids": warehouse_ids,
         "supervisor_password_actions": protected_actions,
         "write_permissions": write_permissions,
+        "can_edit_invoice_prices": can_edit_invoice_prices,
         "is_admin": body.is_admin,
         "active": True,
     }
@@ -2252,6 +2268,15 @@ async def update_worker_access(
         company_id, body.is_supervisor, requested_warehouses, body.supervisor_password_actions, sections,
     )
     write_permissions = validate_worker_write_permissions(body.write_permissions, sections)
+    inherited_price_permission = worker.get("worker_can_edit_invoice_prices", False) and bool(
+        {"invoices", "express-invoices"}.intersection(sections)
+    )
+    can_edit_invoice_prices = validate_worker_invoice_price_permission(
+        body.can_edit_invoice_prices
+        if body.can_edit_invoice_prices is not None
+        else inherited_price_permission,
+        sections,
+    )
     if body.stock_only and body.is_supervisor:
         raise HTTPException(400, "Stock-only workers cannot be supervisors")
     validate_worker_supervisor_sections(sections, protected_actions)
@@ -2264,6 +2289,7 @@ async def update_worker_access(
               "warehouse_ids": worker_warehouse_ids(worker),
               "supervisor_password_actions": worker.get("worker_supervisor_password_actions", []),
               "write_permissions": worker.get("worker_write_permissions", {}),
+              "can_edit_invoice_prices": worker.get("worker_can_edit_invoice_prices", False),
               "is_admin": (worker.get("company_roles") or {}).get(company_id) == "admin"}
     company_roles = dict(worker.get("company_roles") or {})
     was_admin = company_roles.get(company_id) == "admin"
@@ -2283,6 +2309,7 @@ async def update_worker_access(
             "worker_warehouse_id": warehouse_ids[0] if warehouse_ids else None,
             "worker_supervisor_password_actions": protected_actions,
             "worker_write_permissions": write_permissions,
+            "worker_can_edit_invoice_prices": can_edit_invoice_prices,
             "company_roles": company_roles,
         }})
     except Exception:
@@ -2303,6 +2330,7 @@ async def update_worker_access(
                            "warehouse_ids": warehouse_ids,
                            "supervisor_password_actions": protected_actions,
                            "write_permissions": write_permissions,
+                           "can_edit_invoice_prices": can_edit_invoice_prices,
                            "is_admin": is_admin})
     return {
         "id": worker_id,
@@ -2316,6 +2344,7 @@ async def update_worker_access(
         "warehouse_ids": warehouse_ids,
         "supervisor_password_actions": protected_actions,
         "write_permissions": write_permissions,
+        "can_edit_invoice_prices": can_edit_invoice_prices,
         "is_admin": is_admin,
         "active": worker.get("active", True),
     }
@@ -5649,9 +5678,13 @@ def invoice_item_price_key(item, zone):
         " ".join(str(item.get("description") or "").split()).casefold(),
     )
 
-async def validate_admin_invoice_item_prices(body, existing, user):
-    if user.get("_active_role") != "admin":
+async def validate_invoice_item_price_edits(body, existing, user):
+    if user.get("is_worker"):
+        if user.get("worker_can_edit_invoice_prices"):
+            return
+    elif user.get("_active_role") != "admin":
         return
+    restricted_role = "Workers" if user.get("is_worker") else "Administrators"
     zone = 1 if uses_unified_price_list(active_company_id.get()) else body.zone
     previous_items = {}
     for item in (existing or {}).get("items", []):
@@ -5666,7 +5699,7 @@ async def validate_admin_invoice_item_prices(body, existing, user):
                 r2(submitted.get("unit_price")) != r2(previous.get("unit_price"))
                 or bool(submitted.get("price_override")) != bool(previous.get("price_override"))
             ):
-                raise HTTPException(403, "Administrators cannot change invoice item prices")
+                raise HTTPException(403, f"{restricted_role} cannot change invoice item prices")
             continue
 
         if (
@@ -5677,16 +5710,16 @@ async def validate_admin_invoice_item_prices(body, existing, user):
         ):
             continue
         if not submitted.get("size") or submitted.get("price_override"):
-            raise HTTPException(403, "Administrators can only add invoice items at a configured price")
+            raise HTTPException(403, f"{restricted_role} can only add invoice items at a configured price")
         resolved = await resolve_price(zone, submitted.get("category", ""), submitted["size"])
         if resolved.get("price") is None:
-            raise HTTPException(403, "Administrators can only add invoice items at a configured price")
+            raise HTTPException(403, f"{restricted_role} can only add invoice items at a configured price")
         if r2(submitted.get("unit_price")) != r2(resolved["price"]):
-            raise HTTPException(403, "Administrators cannot change invoice item prices")
+            raise HTTPException(403, f"{restricted_role} cannot change invoice item prices")
 
 @api.post("/invoices")
 async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
-    await validate_admin_invoice_item_prices(body, None, user)
+    await validate_invoice_item_price_edits(body, None, user)
     deduct_stock = body.deduct_stock
     inv = await _prepare_invoice(body, user=user)
     if body.idempotency_key:
@@ -5769,7 +5802,7 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
     if not reason:
         raise HTTPException(400, "A reason is required to edit an invoice")
     await consume_invoice_action_authorization(body.supervisor_authorization, iid, "edit", user)
-    await validate_admin_invoice_item_prices(body, existing, user)
+    await validate_invoice_item_price_edits(body, existing, user)
     inv = await _prepare_invoice(body, user=user, existing=existing)
     inv["status"] = invoice_status_for_update(body, existing.get("status"))
     if existing.get("idempotency_key"):

@@ -83,6 +83,13 @@ def test_invoice_delete_worker_permission_requires_supervisor_and_rejects_allow(
     }
 
 
+def test_worker_invoice_price_permission_requires_invoice_access():
+    assert server.validate_worker_invoice_price_permission(True, ["express-invoices"])
+    assert not server.validate_worker_invoice_price_permission(False, ["stock"])
+    with pytest.raises(HTTPException, match="requires invoice section access"):
+        server.validate_worker_invoice_price_permission(True, ["stock"])
+
+
 def test_archived_invoice_list_is_owner_only():
     with pytest.raises(HTTPException) as error:
         asyncio.run(server.get_invoices(
@@ -218,7 +225,7 @@ def test_admin_cannot_change_existing_invoice_item_price(monkeypatch):
         }]}
 
         with pytest.raises(HTTPException) as error:
-            await server.validate_admin_invoice_item_prices(
+            await server.validate_invoice_item_price_edits(
                 body, existing, {"_active_role": "admin"},
             )
         assert error.value.status_code == 403
@@ -242,7 +249,7 @@ def test_admin_new_invoice_item_must_use_configured_price(monkeypatch):
             "size": "100x100",
             "unit_price": 12.5,
         }])
-        await server.validate_admin_invoice_item_prices(
+        await server.validate_invoice_item_price_edits(
             accepted, None, {"_active_role": "admin"},
         )
 
@@ -253,9 +260,49 @@ def test_admin_new_invoice_item_must_use_configured_price(monkeypatch):
             "price_override": True,
         }])
         with pytest.raises(HTTPException) as error:
-            await server.validate_admin_invoice_item_prices(
+            await server.validate_invoice_item_price_edits(
                 rejected, None, {"_active_role": "admin"},
             )
         assert error.value.status_code == 403
+
+    asyncio.run(scenario())
+
+
+def test_worker_invoice_price_edit_requires_explicit_permission(monkeypatch):
+    async def price_lookup(*_args):
+        return {"price": 12.5}
+
+    monkeypatch.setattr(server, "resolve_price", price_lookup)
+
+    async def scenario():
+        existing = {"items": [{
+            "category": "Foam",
+            "size": "100x100",
+            "unit_price": 12.5,
+            "price_override": False,
+        }]}
+        changed = server.InvoiceIn(items=[{
+            "category": "Foam",
+            "size": "100x100",
+            "unit_price": 13,
+            "price_override": True,
+        }])
+        worker = {"is_worker": True, "_active_role": "user"}
+
+        with pytest.raises(HTTPException, match="Workers cannot change invoice item prices"):
+            await server.validate_invoice_item_price_edits(changed, existing, worker)
+
+        await server.validate_invoice_item_price_edits(
+            changed, existing, {**worker, "worker_can_edit_invoice_prices": True},
+        )
+
+        custom_new_item = server.InvoiceIn(items=[{
+            "category": "Foam",
+            "size": "100x100",
+            "unit_price": 13,
+            "price_override": True,
+        }])
+        with pytest.raises(HTTPException, match="Workers can only add invoice items at a configured price"):
+            await server.validate_invoice_item_price_edits(custom_new_item, None, worker)
 
     asyncio.run(scenario())

@@ -73,7 +73,9 @@ export default function InvoiceEditor({ express = false }) {
   const [compactPreview, setCompactPreview] = useState(false);
   const deliveryNoteRef = useRef(null);
   const locked = !!id && !editing;
-  const invoiceItemPriceLocked = user?.is_admin && user?.role === "admin";
+  const invoiceItemPriceLocked = user?.is_worker
+    ? !user?.can_edit_invoice_prices
+    : user?.is_admin && user?.role === "admin";
 
   const prepareForEdit = (invoice) => invoice.opening_balance
     ? { ...invoice, opening_balance: false, reference: "", notes: "", items: [emptyItem()] }
