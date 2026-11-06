@@ -137,25 +137,6 @@ export default function Customers() {
       toast.success(flag ? "Balance added to Express Balances and Payments" : "Balance removed from Express Balances and Payments");
     } catch (e) { toast.error(apiError(e)); }
   };
-  const deleteOtherBalancePayment = async (payment, index) => {
-    if (!window.confirm("Delete this payment from the history? The balance will NOT change.")) return;
-    const paymentId = payment.id || payment.payment_id;
-    try {
-      if (paymentId) await api.del(`/payments/${paymentId}/other-balance`);
-      else await api.del(`/customers/${profile.c.id}/other-balance-history/${index}`);
-      toast.success("Payment deleted");
-      try {
-        const summary = await api.get(`/customers/${profile.c.id}/summary`);
-        setProfile((current) => current ? { ...current, ...summary } : current);
-        load();
-      } catch (error) {
-        toast.error(`Payment deleted, but history could not be refreshed: ${apiError(error)}`);
-      }
-    } catch (error) {
-      toast.error(apiError(error));
-    }
-  };
-
   const openProfile = async (c) => {
     const requestId = ++profileRequest.current;
     try {
@@ -296,19 +277,11 @@ export default function Customers() {
                     <span className="text-slate-500">
                       {fmtDate(p.date)} · {p.method || "Other balance"} · Other balance
                       {p.reversed && <span className="ml-2 font-semibold text-red-600">Reversed</span>}
+                      {p.archived && <span className="ml-2 font-semibold text-slate-500">Archived invoice</span>}
                     </span>
                     <span className={`font-mono font-semibold ${p.reversed ? "line-through text-slate-400" : "text-emerald-600"}`}>
                       {fmtMoney(p.amount)}
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => deleteOtherBalancePayment(p, idx)}
-                      className="text-xs text-red-600 hover:underline"
-                      aria-label={`Delete other balance payment of ${fmtMoney(p.amount)}`}
-                      data-testid={`delete-other-balance-${p.id}`}
-                    >
-                      Delete
-                    </button>
                   </div>
                 ))}</div>
               </section>
@@ -330,7 +303,12 @@ export default function Customers() {
               {profile.payments.length === 0 ? <p className="text-sm text-slate-400">No payments.</p> : (
                 <div className="space-y-1.5">{profile.payments.map((p) => (
                   <div key={p.id} className="flex items-center justify-between text-sm border border-border rounded-lg px-3 py-2">
-                    <span>{fmtDate(p.date)} · {p.method}</span><span className="font-mono text-emerald-600 font-semibold">{fmtMoney(p.amount)}</span>
+                    <span>
+                      {fmtDate(p.date)} · {p.method}
+                      {p.reversed && <span className="ml-2 font-semibold text-red-600">Reversed</span>}
+                      {p.archived && <span className="ml-2 font-semibold text-slate-500">Archived invoice</span>}
+                    </span>
+                    <span className={`font-mono font-semibold ${p.reversed ? "line-through text-slate-400" : "text-emerald-600"}`}>{fmtMoney(p.amount)}</span>
                   </div>))}</div>
               )}
             </div>

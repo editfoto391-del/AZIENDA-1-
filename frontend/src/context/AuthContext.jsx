@@ -74,6 +74,7 @@ export function AuthProvider({ children }) {
     }
     if (workerAccessEntry || sharedEntry) {
       if (workerAccessEntry) {
+        localStorage.removeItem("token");
         window.sessionStorage.removeItem("erp-worker-session-token");
         window.sessionStorage.removeItem("erp-worker-access-session");
         window.sessionStorage.removeItem("erp-worker-write-permissions");
@@ -115,7 +116,8 @@ export function AuthProvider({ children }) {
   }, []);
 
   const finishLogin = async (data, shareLocation, workerAccessLogin = false) => {
-    if (workerAccessLogin && data.user.is_worker) {
+    if (workerAccessLogin && (data.user.is_worker || data.user.is_worker_account)) {
+      localStorage.removeItem("token");
       window.sessionStorage.setItem("erp-worker-access-session", "true");
       window.sessionStorage.setItem("erp-worker-session-token", data.token);
       window.sessionStorage.setItem("erp-worker-access-entry", window.location.pathname);
@@ -165,11 +167,12 @@ export function AuthProvider({ children }) {
   };
 
   const logout = async () => {
-    const workerSession = user?.is_worker === true;
+    const workerSession = user?.is_worker === true || user?.is_worker_account === true;
     const workerEntry = window.sessionStorage.getItem("erp-worker-access-entry");
     try { await api.logout(); } catch { /* Local logout must still complete if the server is unavailable. */ }
     finally {
       if (workerSession) {
+        localStorage.removeItem("token");
         window.sessionStorage.removeItem("erp-worker-session-token");
         window.sessionStorage.removeItem("erp-worker-write-permissions");
       } else {

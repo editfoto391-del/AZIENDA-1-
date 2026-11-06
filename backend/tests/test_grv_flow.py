@@ -1,4 +1,5 @@
 import asyncio
+import re
 from copy import deepcopy
 
 import pytest
@@ -21,6 +22,10 @@ def _matches(document, query):
                 return False
             if "$in" in expected and actual not in expected["$in"]:
                 return False
+            if "$regex" in expected:
+                options = re.IGNORECASE if "i" in expected.get("$options", "") else 0
+                if actual is None or not re.search(expected["$regex"], str(actual), options):
+                    return False
         elif actual != expected:
             return False
     return True
@@ -105,6 +110,7 @@ class FakeDatabase:
             "stock_movements": FakeCollection(),
             "grvs": FakeCollection(),
             "buyings": FakeCollection(),
+            "prices": FakeCollection(),
             "audit_log": FakeCollection(),
         }
 
@@ -156,6 +162,15 @@ def _install_fake_grv_dependencies(monkeypatch, fake_db):
     monkeypatch.setattr(server, "log_audit", _no_audit)
     monkeypatch.setattr(server, "next_ref", _next_grv_reference)
 
+    async def listall(collection, *args, **kwargs):
+        return deepcopy(fake_db[collection].documents)
+
+    async def ensure_product_identification(stock, company_id):
+        return {"stock_id": stock["id"], "company_id": company_id}
+
+    monkeypatch.setattr(server, "listall", listall)
+    monkeypatch.setattr(server, "ensure_product_identification", ensure_product_identification)
+
 
 async def _no_audit(*args, **kwargs):
     return None
@@ -165,7 +180,7 @@ async def _next_grv_reference(*args, **kwargs):
     return "GRV-2026-0001"
 
 
-def _grv(actual):
+def _grv(actual, *, sale_price_zone_1=None, sale_price_zone_2=None):
     return server.GRVIn(
         purchase_order_id="po-1",
         received_date="2026-10-29",
@@ -175,6 +190,8 @@ def _grv(actual):
             purchase_order_item_index=0,
             actual_received_quantity=actual,
             accepted_quantity=actual,
+            sale_price_zone_1=sale_price_zone_1,
+            sale_price_zone_2=sale_price_zone_2,
         )],
     )
 
@@ -208,6 +225,288 @@ def test_partial_grvs_update_po_and_stock_once_without_creating_buyings(monkeypa
         with pytest.raises(HTTPException) as duplicate:
             await server.confirm_grv(second["id"], user)
         assert duplicate.value.status_code == 409
+
+    asyncio.run(scenario())
+
+
+def test_superiqfoam_grv_updates_both_price_zones_when_confirmed(monkeypatch):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    user = {
+        "email": "owner@example.test", "name": "Owner",
+        "_active_role": "owner", "_active_company_id": "superiqfoam",
+    }
+
+    async def scenario():
+        company_token = server.active_company_id.set("superiqfoam")
+        try:
+            grv = await server.create_grv(
+                _grv(5, sale_price_zone_1=120, sale_price_zone_2=135), user,
+            )
+            assert fake_db.prices.documents == []
+
+            confirmed = await server.confirm_grv(grv["id"], user)
+            assert confirmed["items"][0]["sale_price_zone_1"] == 120
+            assert confirmed["items"][0]["sale_price_zone_2"] == 135
+            assert {
+                (price["zone"], price["category"], price["size"], price["price"])
+                for price in fake_db.prices.documents
+            } == {
+                (1, "Standard", "910x100", 120),
+                (2, "Standard", "910x100", 135),
+            }
+            assert all(price["active"] and price["confirmed"] for price in fake_db.prices.documents)
+            assert (await server.resolve_price(1, "Simple", "910x100"))["price"] == 120
+            assert (await server.resolve_price(2, "Simple", "910x100"))["price"] == 135
+
+            await server._apply_grv_sale_prices([{
+                "zone": 1, "category": "Standard", "size": "910x100", "price": 125,
+            }], user, confirmed)
+            assert len(fake_db.prices.documents) == 2
+            assert await server.resolve_price(1, "Simple", "910x100") == {
+                "found": True, "price": 125,
+            }
+        finally:
+            server.active_company_id.reset(company_token)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("company_id", ["iqfoam-manufactoring", "iqfoam-whole-sallers"])
+def test_unified_price_companies_use_one_grv_sale_price(monkeypatch, company_id):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    user = {
+        "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": company_id,
+    }
+
+    async def scenario():
+        company_token = server.active_company_id.set(company_id)
+        try:
+            grv = await server.create_grv(_grv(5, sale_price_zone_1=120), user)
+            await server.confirm_grv(grv["id"], user)
+            assert len(fake_db.prices.documents) == 1
+            assert fake_db.prices.documents[0]["zone"] == 1
+            assert fake_db.prices.documents[0]["price"] == 120
+            assert (await server.resolve_price(1, "Simple", "910x100"))["price"] == 120
+        finally:
+            server.active_company_id.reset(company_token)
+
+    asyncio.run(scenario())
+
+
+def test_grv_rejects_zone_two_price_for_other_companies_before_receipt(monkeypatch):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    user = {
+        "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": "iqfoam-manufactoring",
+    }
+
+    async def scenario():
+        company_token = server.active_company_id.set("iqfoam-manufactoring")
+        try:
+            grv = await server.create_grv(
+                _grv(5, sale_price_zone_2=135), user,
+            )
+            with pytest.raises(HTTPException) as invalid_zone:
+                await server.confirm_grv(grv["id"], user)
+            assert invalid_zone.value.status_code == 400
+            assert fake_db.stock_movements.documents == []
+            assert fake_db.prices.documents == []
+            assert (await fake_db.grvs.find_one({"id": grv["id"]}))["status"] == "draft"
+        finally:
+            server.active_company_id.reset(company_token)
+
+    asyncio.run(scenario())
+
+
+def test_grv_price_list_updates_require_existing_owner_access(monkeypatch):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    admin = {
+        "email": "admin@example.test", "_active_role": "admin",
+        "_active_company_id": "superiqfoam",
+    }
+
+    async def scenario():
+        company_token = server.active_company_id.set("superiqfoam")
+        try:
+            grv = await server.create_grv(_grv(5, sale_price_zone_1=120), admin)
+            with pytest.raises(HTTPException) as unauthorized:
+                await server.confirm_grv(grv["id"], admin)
+            assert unauthorized.value.status_code == 403
+            assert fake_db.stock_movements.documents == []
+            assert fake_db.prices.documents == []
+            assert (await fake_db.grvs.find_one({"id": grv["id"]}))["status"] == "draft"
+        finally:
+            server.active_company_id.reset(company_token)
+
+    asyncio.run(scenario())
+
+
+def test_worker_cannot_update_price_list_through_grv(monkeypatch):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    worker = {
+        "email": "worker@example.test", "is_worker": True,
+        "_active_role": "user", "_active_company_id": "superiqfoam",
+    }
+
+    async def scenario():
+        company_token = server.active_company_id.set("superiqfoam")
+        try:
+            grv = await server.create_grv(_grv(5, sale_price_zone_1=120), worker)
+            with pytest.raises(HTTPException) as unauthorized:
+                await server.confirm_grv(grv["id"], worker)
+            assert unauthorized.value.status_code == 403
+            assert fake_db.stock_movements.documents == []
+            assert fake_db.prices.documents == []
+            assert (await fake_db.grvs.find_one({"id": grv["id"]}))["status"] == "draft"
+        finally:
+            server.active_company_id.reset(company_token)
+
+    asyncio.run(scenario())
+
+
+def test_grv_creates_new_stock_product_catalog_identity_and_invoice_prices(monkeypatch):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    user = {
+        "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": "superiqfoam",
+    }
+    identity_calls = []
+
+    async def ensure_identity(stock, company_id):
+        identity_calls.append((stock["id"], company_id))
+        stock["product_id"] = "IQF-NEW-PRODUCT"
+        await fake_db.stock.update_one(
+            {"id": stock["id"]}, {"$set": {"product_id": stock["product_id"]}},
+        )
+        return {"product_id": stock["product_id"]}
+
+    monkeypatch.setattr(server, "ensure_product_identification", ensure_identity)
+
+    async def scenario():
+        company_token = server.active_company_id.set("superiqfoam")
+        try:
+            body = server.GRVIn(
+                supplier_name="New Product Supplier",
+                received_date="2026-10-29",
+                received_by="Owner",
+                items=[server.GRVLineIn(
+                    new_product=True,
+                    product="Premium Foam",
+                    size="600x100",
+                    actual_received_quantity=8,
+                    accepted_quantity=8,
+                    unit_cost=30,
+                    sale_price_zone_1=60,
+                    sale_price_zone_2=70,
+                )],
+            )
+            grv = await server.create_grv(body, user)
+            assert len(fake_db.stock.documents) == 1
+            assert len(fake_db.prices.documents) == 0
+
+            confirming_grv = {**grv, "status": "confirming"}
+            await fake_db.grvs.update_one(
+                {"id": grv["id"]}, {"$set": {"status": "confirming"}},
+            )
+            await server._materialize_grv_new_products(confirming_grv, user)
+            await server._materialize_grv_new_products(confirming_grv, user)
+            assert len(fake_db.stock.documents) == 2
+            assert len(identity_calls) == 2
+            stock_item = next(item for item in fake_db.stock.documents if item["product"] == "Premium Foam")
+            assert stock_item["created_from_grv_id"] == grv["id"]
+            assert stock_item["product_id"] == "IQF-NEW-PRODUCT"
+
+            confirmed = await server.confirm_grv(grv["id"], user)
+            assert confirmed["status"] == "completed"
+            assert confirmed["items"][0]["stock_id"] == stock_item["id"]
+            assert confirmed["items"][0]["product_code"] == "IQF-NEW-PRODUCT"
+            assert len(fake_db.stock_movements.documents) == 1
+            assert fake_db.stock_movements.documents[0]["quantity"] == 8
+            assert len(fake_db.prices.documents) == 2
+            assert (await server.resolve_price(1, "Premium Foam", "600x100"))["price"] == 60
+            assert (await server.resolve_price(2, "Premium Foam", "600x100"))["price"] == 70
+        finally:
+            server.active_company_id.reset(company_token)
+
+    asyncio.run(scenario())
+
+
+def test_grv_new_product_requires_sale_price_in_each_superiqfoam_zone(monkeypatch):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    user = {
+        "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": "superiqfoam",
+    }
+
+    async def scenario():
+        company_token = server.active_company_id.set("superiqfoam")
+        try:
+            grv = await server.create_grv(server.GRVIn(
+                supplier_name="New Product Supplier",
+                received_date="2026-10-29",
+                items=[server.GRVLineIn(
+                    new_product=True,
+                    product="Unpriced Foam",
+                    size="600x100",
+                    actual_received_quantity=1,
+                    accepted_quantity=1,
+                    sale_price_zone_1=60,
+                )],
+            ), user)
+            with pytest.raises(HTTPException) as missing_zone_price:
+                await server.confirm_grv(grv["id"], user)
+            assert missing_zone_price.value.status_code == 400
+            assert len(fake_db.stock.documents) == 1
+            assert fake_db.prices.documents == []
+            assert (await fake_db.grvs.find_one({"id": grv["id"]}))["status"] == "draft"
+        finally:
+            server.active_company_id.reset(company_token)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("company_id", ["iqfoam-manufactoring", "iqfoam-whole-sallers"])
+def test_unified_price_company_grv_creates_new_product_with_one_price(monkeypatch, company_id):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    user = {
+        "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": company_id,
+    }
+
+    async def scenario():
+        company_token = server.active_company_id.set(company_id)
+        try:
+            grv = await server.create_grv(server.GRVIn(
+                supplier_name="New Product Supplier",
+                received_date="2026-10-29",
+                items=[server.GRVLineIn(
+                    new_product=True,
+                    product="Premium Foam",
+                    size="600x100",
+                    actual_received_quantity=2,
+                    accepted_quantity=2,
+                    sale_price_zone_1=60,
+                )],
+            ), user)
+            confirmed = await server.confirm_grv(grv["id"], user)
+            stock_item = next(
+                item for item in fake_db.stock.documents
+                if item["id"] == confirmed["items"][0]["stock_id"]
+            )
+            assert stock_item["product"] == "Premium Foam"
+            assert [(price["zone"], price["price"]) for price in fake_db.prices.documents] == [(1, 60)]
+            assert (await server.resolve_price(1, "Premium Foam", "600x100"))["price"] == 60
+        finally:
+            server.active_company_id.reset(company_token)
 
     asyncio.run(scenario())
 

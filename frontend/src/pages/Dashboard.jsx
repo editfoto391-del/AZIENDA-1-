@@ -125,10 +125,24 @@ const previousMonth = (month) => {
 };
 const monthLabel = (value) => new Date(`${value}-01T00:00:00`).toLocaleDateString("en", { month: "long", year: "numeric", timeZone: "UTC" });
 
-function KPI({ title, value, icon: Icon, tint, onClick, comparison }) {
+const KPI_SPARKLINES = {
+  default: "M0 64C32 61 47 53 73 57s36-19 62-14 40-30 65-19 15 1 20-6",
+  up: "M0 55C25 54 37 47 58 47S91 38 112 38S148 27 167 26S199 15 220 10",
+  blue: "M0 55C25 54 37 47 58 47S91 38 112 38S148 27 167 26S199 15 220 10",
+  down: "M0 10C25 11 37 18 58 18S91 27 112 27S148 38 167 39S199 50 220 55",
+  zigzag: "M0 39C18 38 29 19 47 20S78 48 98 48S128 25 148 25S178 48 196 40S212 29 220 27",
+};
+
+function KPI({ title, value, icon: Icon, tint, onClick, comparison, sparkline = "default" }) {
+  const sparklinePath = KPI_SPARKLINES[sparkline] || KPI_SPARKLINES.default;
   return (
     <div className="transition-transform duration-150 ease-out hover:-translate-y-0.5 active:scale-[0.995]">
       <Card className="premium-card group p-5 cursor-pointer border-l-2 border-l-transparent hover:border-l-primary hover:shadow-md transition-all" onClick={onClick} data-testid={`kpi-${title.toLowerCase().replace(/\s/g, "-")}`}>
+        <svg className={`dashboard-kpi-sparkline dashboard-kpi-sparkline-${sparkline}`} viewBox="0 0 220 70" preserveAspectRatio="none" aria-hidden="true">
+          <path d={`${sparklinePath}L220 70H0Z`} />
+          <path className="dashboard-kpi-sparkline-glow" d={sparklinePath} />
+          <path d={sparklinePath} />
+        </svg>
         <div className="flex items-start justify-between">
           <div>
             <p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.13em]">{title}</p>
@@ -236,7 +250,9 @@ export default function Dashboard() {
     can_edit_invoice_prices: false,
     write_permissions: defaultWorkerWritePermissions(["invoices"]),
   });
-  const canManageWorkers = !!(user?.is_owner || user?.is_admin);
+  const canManageWorkers = !!(
+    user?.is_owner || user?.is_company_owner || user?.role === "owner"
+  );
 
   const [companyInventory, setCompanyInventory] = useState(null);
   const [companyInventoryError, setCompanyInventoryError] = useState("");
@@ -254,9 +270,12 @@ export default function Dashboard() {
     if (!canManageWorkers) return;
     api.get("/companies/profiles")
       .then((companyList) => {
+        const manageableCompanyIds = user.role === "owner"
+          ? user.company_ids
+          : user.owner_company_ids;
         const accessibleCompanies = companyList.filter((company) =>
-          user.admin_company_ids?.includes(company.id)
-          && (!dedicatedDomain || user.is_worker || company.id === dedicatedDomain.companyId)
+          manageableCompanyIds?.includes(company.id)
+          && (!dedicatedDomain || company.id === dedicatedDomain.companyId)
         );
         setCompanies(accessibleCompanies);
         setWorkerCompanyId((current) => dedicatedDomain?.companyId || current || user.company_id || accessibleCompanies[0]?.id || "");
@@ -584,16 +603,35 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="dashboard-stagger space-y-6">
-      <div className="flex flex-wrap items-end justify-between gap-4">
+    <div className="dashboard-design dashboard-stagger relative isolate space-y-6">
+      <div className="dashboard-backdrop pointer-events-none absolute inset-x-0 top-[-1.5rem] z-0 h-[21rem] overflow-hidden" aria-hidden="true">
+        <svg className="dashboard-ribbons absolute inset-0 h-full w-full" viewBox="0 0 1440 360" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="dashboard-ribbon-fill" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stopColor="#d7e3d8" stopOpacity=".01" />
+              <stop offset=".5" stopColor="#a9b9ad" stopOpacity=".1" />
+              <stop offset="1" stopColor="#d7e3d8" stopOpacity=".01" />
+            </linearGradient>
+            <linearGradient id="dashboard-ribbon-line" x1="0" y1="0" x2="1" y2=".1">
+              <stop offset="0" stopColor="#d3dfd5" stopOpacity="0" />
+              <stop offset=".52" stopColor="#d3dfd5" stopOpacity=".38" />
+              <stop offset="1" stopColor="#d3dfd5" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <path d="M548 263c124-30 261-133 401-175 153-46 233 27 343 36 57 5 102-8 158-42v143c-79 41-132 57-207 30-113-41-190-92-307-63-134 33-244 112-341 116-21 1-37-15-47-45Z" fill="url(#dashboard-ribbon-fill)" />
+          <path d="M522 276c164-47 285-150 423-194 156-50 237 22 349 31 52 4 103-13 156-43M558 291c163-46 273-126 410-168 147-45 226 29 338 44 58 8 104-10 144-32M708 302c112-41 190-94 303-126 117-33 195 28 290 47 60 12 105 0 149-22" fill="none" stroke="url(#dashboard-ribbon-line)" strokeWidth="1.1" />
+          <path d="M767 249c108-57 193-102 286-106 102-5 164 51 252 63 55 8 96-3 145-26" fill="none" stroke="#d3dfd5" strokeOpacity=".12" strokeWidth="5" />
+        </svg>
+      </div>
+      <div className="dashboard-hero relative z-10 flex flex-wrap items-end justify-between gap-4">
         <div>
-        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary">{user?.name || "Company"} · Operations</p>
-        <h1 className="text-3xl sm:text-4xl font-normal text-slate-900 font-display mt-1">Business overview</h1>
-        <p className="text-sm text-slate-500 mt-1">Performance, cash flow and daily operations</p>
+        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary">Admin · Operations</p>
+        <h1 className="mt-1 font-display text-4xl font-normal text-slate-900 sm:text-5xl">Business overview</h1>
+        <p className="mt-1 font-display text-base italic text-slate-500">Performance, cash flow and daily operations</p>
         </div>
         {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [], is_admin: false, can_edit_invoice_prices: false, write_permissions: defaultWorkerWritePermissions(["invoices"]) }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/70 p-3" data-testid="dashboard-period-controls">
+      <div className="dashboard-period-panel relative z-10 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/70 p-3" data-testid="dashboard-period-controls">
         <div className="flex flex-wrap gap-1.5" role="group" aria-label="Dashboard date range">
           {[["today", "Today"], ["week", "This week"], ["month", "This month"]].map(([value, label]) => (
             <button
@@ -936,14 +974,16 @@ export default function Dashboard() {
             <p className="mt-1 text-xs text-slate-500">{periodRange} <span className="text-slate-400">· Previous: {previousRange}</span></p>
           </div>
         </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
-          <KPI title="Total Invoiced" value={fmtMoney(periodProfit.total_invoiced)} comparison={comparison(periodProfit.total_invoiced, previousProfit.total_invoiced)} icon={Receipt} tint="bg-blue-50 text-blue-600" onClick={() => nav("/invoices")} />
-          <KPI title="Payments Received" value={fmtMoney(periodProfit.revenue)} comparison={comparison(periodProfit.revenue, previousProfit.revenue)} icon={TrendingUp} tint="bg-emerald-50 text-emerald-600" onClick={() => nav("/invoices")} />
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-7">
+          <KPI title="Total Invoiced" value={fmtMoney(periodProfit.total_invoiced)} comparison={comparison(periodProfit.total_invoiced, previousProfit.total_invoiced)} icon={Receipt} tint="bg-blue-50 text-blue-600" onClick={() => nav("/invoices")} sparkline="blue" />
+          <KPI title="Payments Received · Revenue" value={fmtMoney(periodProfit.revenue)} comparison={comparison(periodProfit.revenue, previousProfit.revenue)} icon={TrendingUp} tint="bg-emerald-50 text-emerald-600" onClick={() => nav("/invoices")} sparkline="up" />
           <KPI title="Buyings" value={fmtMoney(periodProfit.buyings)} comparison={comparison(periodProfit.buyings, previousProfit.buyings)} icon={Boxes} tint="bg-violet-50 text-violet-600" onClick={() => nav("/buyings")} />
-          <KPI title="Expenses" value={fmtMoney(periodProfit.expenses)} comparison={comparison(periodProfit.expenses, previousProfit.expenses)} icon={Banknote} tint="bg-orange-50 text-orange-600" onClick={() => nav("/expenses")} />
-          <KPI title="Final Profit of the Company" value={fmtMoney(periodProfit.profit)} comparison={comparison(periodProfit.profit, previousProfit.profit)} icon={Wallet} tint={periodProfit.profit < 0 ? "bg-red-50 text-red-600" : "bg-emerald-50 text-emerald-700"} onClick={() => nav("/expenses")} />
+          <KPI title="GRV Purchases" value={fmtMoney(periodProfit.grv_expenses)} comparison={comparison(periodProfit.grv_expenses, previousProfit.grv_expenses)} icon={Boxes} tint="bg-indigo-50 text-indigo-600" onClick={() => nav("/grv")} sparkline="zigzag" />
+          <KPI title="Calculated Salaries" value={fmtMoney(periodProfit.salaries)} comparison={comparison(periodProfit.salaries, previousProfit.salaries)} icon={Banknote} tint="bg-amber-50 text-amber-600" onClick={() => nav("/attendance")} sparkline="down" />
+          <KPI title="Expenses" value={fmtMoney(periodProfit.expenses)} comparison={comparison(periodProfit.expenses, previousProfit.expenses)} icon={Banknote} tint="bg-orange-50 text-orange-600" onClick={() => nav("/expenses")} sparkline="down" />
+          <KPI title="Final Profit of the Company" value={fmtMoney(periodProfit.profit)} comparison={comparison(periodProfit.profit, previousProfit.profit)} icon={Wallet} tint={periodProfit.profit < 0 ? "bg-red-50 text-red-600" : "bg-emerald-50 text-emerald-700"} onClick={() => nav("/expenses")} sparkline="up" />
         </div>
-        <p className="mt-2 text-xs text-slate-400">Payments received are recorded collections in this period. Final profit = payments received − buyings − recorded expenses. Estimated cash result, not accounting profit.</p>
+        <p className="mt-2 text-xs text-slate-400">Total Invoiced is invoices issued. Revenue is payments received. Company profit = revenue − expenses − Buyings − salaries − accepted GRV costs.</p>
       </section>
 
       <section data-testid="dashboard-business-balances">
@@ -1150,6 +1190,8 @@ export default function Dashboard() {
                       <div className="flex justify-between gap-2"><dt className="text-slate-500">Total Invoiced</dt><dd className="font-mono font-semibold">{fmtMoney(entry.total_invoiced)}</dd></div>
                       <div className="flex justify-between gap-2"><dt className="text-slate-500">Revenue</dt><dd className="font-mono font-semibold">{fmtMoney(entry.revenue)}</dd></div>
                       <div className="flex justify-between gap-2"><dt className="text-slate-500">Buyings</dt><dd className="font-mono">{fmtMoney(entry.buyings)}</dd></div>
+                      <div className="flex justify-between gap-2"><dt className="text-slate-500">GRV Purchases</dt><dd className="font-mono">{fmtMoney(entry.grv_expenses)}</dd></div>
+                      <div className="flex justify-between gap-2"><dt className="text-slate-500">Salaries</dt><dd className="font-mono">{fmtMoney(entry.salaries)}</dd></div>
                       <div className="flex justify-between gap-2"><dt className="text-slate-500">Expenses</dt><dd className="font-mono">{fmtMoney(entry.expenses)}</dd></div>
                       <div className="flex justify-between gap-2 border-t border-border pt-2"><dt className="font-semibold text-slate-700">Final Profit</dt><dd className="font-mono font-bold">{fmtMoney(entry.profit)}</dd></div>
                     </dl>
@@ -1161,6 +1203,8 @@ export default function Dashboard() {
                 Total Invoiced {comparisonDifference(comparisonResult.second.total_invoiced, comparisonResult.first.total_invoiced)} ·
                 Revenue {comparisonDifference(comparisonResult.second.revenue, comparisonResult.first.revenue)} ·
                 Buyings {comparisonDifference(comparisonResult.second.buyings, comparisonResult.first.buyings)} ·
+                GRV Purchases {comparisonDifference(comparisonResult.second.grv_expenses, comparisonResult.first.grv_expenses)} ·
+                Salaries {comparisonDifference(comparisonResult.second.salaries, comparisonResult.first.salaries)} ·
                 Expenses {comparisonDifference(comparisonResult.second.expenses, comparisonResult.first.expenses)} ·
                 Final Profit {comparisonDifference(comparisonResult.second.profit, comparisonResult.first.profit)}
               </div>

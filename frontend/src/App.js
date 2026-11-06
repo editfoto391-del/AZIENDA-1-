@@ -1,7 +1,7 @@
 import "@/App.css";
 import { Component, lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
-import { Toaster } from "sonner";
+import { Toaster } from "@/components/ui/sonner";
 import { ThemeProvider } from "next-themes";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import Layout from "@/components/Layout";
@@ -380,7 +380,7 @@ function RouteLoading() {
 
 function App() {
   return (
-    <ThemeProvider attribute="class" defaultTheme="light" forcedTheme="light" enableSystem={false} storageKey="erp-theme" disableTransitionOnChange>
+    <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false} storageKey="erp-theme" disableTransitionOnChange>
       <AuthProvider>
         <Toaster position="top-right" richColors />
         <BrowserRouter>

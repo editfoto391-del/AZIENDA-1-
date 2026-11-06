@@ -142,7 +142,7 @@ export default function Login() {
           )}
           <p className="mt-7 text-[10px] font-semibold uppercase tracking-[0.22em] text-emerald-50/35"><LockKeyhole size={12} className="mr-1 inline" /> Secure company access</p>
         </section> : (
-          <form key={selected.id} onSubmit={submit} className="luxury-card mx-auto max-w-md space-y-3 rounded-xl border border-white/70 bg-[hsl(45_28%_98%)] p-5 sm:p-6 profile-screen-enter" data-testid="login-form">
+          <form key={selected.id} onSubmit={submit} className="login-form luxury-card mx-auto max-w-md space-y-3 rounded-xl border border-white/70 bg-[hsl(45_28%_98%)] p-5 sm:p-6 profile-screen-enter" data-testid="login-form">
             {!dedicatedDomain && !personalAccessToken && <button type="button" onClick={() => { setSelected(null); setErr(""); setPassword(""); }} className="mb-1 inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline" data-testid="back-to-company-profiles"><ArrowLeft size={14} /> Change company</button>}
             <div className="pb-1">
               <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-primary">{personalAccessToken ? "Personal worker access" : "Selected workspace"}</p>

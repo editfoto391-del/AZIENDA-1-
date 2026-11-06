@@ -3,13 +3,52 @@ import { AlertCircle, CalendarDays, Download, Printer, RefreshCw } from "lucide-
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
-import { today } from "@/lib/format";
+import { today, TZ } from "@/lib/format";
 import { downloadDailyReportPdf, downloadHomeReportPdf } from "@/lib/dailyReportPdf";
 import { companyDailyReportName, companyProfileName } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Btn } from "@/components/common";
 
 const MIN_ROWS = 12;
+
+function getNextFinancialRefreshDelay(now = new Date()) {
+  const getZonedParts = (date) => Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: TZ,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(date).map(({ type, value }) => [type, value]),
+  );
+  const localNow = getZonedParts(now);
+  const nextLocalDate = new Date(Date.UTC(
+    Number(localNow.year),
+    Number(localNow.month) - 1,
+    Number(localNow.day),
+  ));
+  if (Number(localNow.hour) >= 18) nextLocalDate.setUTCDate(nextLocalDate.getUTCDate() + 1);
+  nextLocalDate.setUTCHours(18, 0, 0, 0);
+
+  const getOffset = (date) => {
+    const parts = getZonedParts(date);
+    return Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      Number(parts.second),
+    ) - date.getTime();
+  };
+  let refreshAt = nextLocalDate.getTime();
+  refreshAt -= getOffset(new Date(refreshAt));
+  refreshAt = nextLocalDate.getTime() - getOffset(new Date(refreshAt));
+  return Math.max(0, refreshAt - now.getTime());
+}
 
 function formatMoney(value) {
   return `R ${Number(value || 0).toLocaleString("en-US", {
@@ -162,21 +201,23 @@ const FINANCIAL_SECTIONS = [
   ["cogs", "Cost of goods sold", "Verified historical batch cost"],
   ["historical_cost_unavailable", "Historical cost unavailable", "Sales not linked to verified batch costs"],
   ["expenses", "Expenses", "Recorded expenses and completed fleet costs"],
-  ["buyings", "Buyings", "Purchases shown separately from P&L expenses"],
-  ["grvs", "GRV", "Accepted stock receipt value, not automatically an expense"],
+  ["salaries", "Salaries", "Calculated gross payroll; monthly fixed pay is prorated to the period"],
+  ["buyings", "Buyings", "Purchases deducted in the cash-basis profit calculation"],
+  ["grvs", "GRV", "Accepted stock receipt value deducted in estimated company profit"],
 ];
 
 const MONEY_LABELS = [
-  ["total_invoices", "Total invoices", "invoice_count", "invoices"],
-  ["payments_received", "Payments received", "payment_count", "payments"],
+  ["total_invoices", "Total Invoiced · invoices issued", "invoice_count", "invoices"],
+  ["payments_received", "Payments Received · revenue", "payment_count", "payments"],
   ["pending_payments", "Pending payments", null, "pending_payments"],
-  ["sales_revenue", "Sales revenue", null, "invoices"],
+  ["sales_revenue", "Invoiced sales", null, "invoices"],
   ["cogs", "COGS", null, "cogs"],
   ["gross_profit", "Gross profit", null, "profit_reconciliation"],
   ["buyings", "Buyings", "buying_count", "buyings"],
   ["expenses", "Expenses", "expense_count", "expenses"],
+  ["salaries", "Calculated salaries", "salary_count", "salaries"],
   ["grv", "GRV received", "grv_count", "grvs"],
-  ["final_profit", "Final profit", null, "profit_reconciliation"],
+  ["final_profit", "Estimated company profit", null, "profit_reconciliation"],
 ];
 
 function InvoicePaymentsDetails({ invoice }) {
@@ -256,10 +297,10 @@ function FinancialReport({ report, mode, onModeChange, category, onCategoryChang
           </select>
         </label>}
         <label className="block min-w-56">
-          <span className="mb-1.5 block text-xs font-semibold text-slate-500">Accounting mode</span>
+          <span className="mb-1.5 block text-xs font-semibold text-slate-500">COGS details</span>
           <select value={mode} onChange={(event) => onModeChange(event.target.value)} className="w-full rounded-md border border-input bg-white px-3 py-2.5 text-sm">
-            <option value="expenses_only">Expenses only (excludes COGS)</option>
-            <option value="full_production_cost">Full production cost (verified batch costs)</option>
+            <option value="expenses_only">Hide historical COGS</option>
+            <option value="full_production_cost">Show verified historical COGS</option>
           </select>
         </label>
         <label className="block min-w-52">
@@ -305,7 +346,7 @@ function FinancialReport({ report, mode, onModeChange, category, onCategoryChang
 
           {mode === "full_production_cost" && summary.historical_cost_unavailable_count > 0 && (
             <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900" role="status">
-              Historical cost is unavailable for {summary.historical_cost_unavailable_count} invoice(s). Their cost is excluded from verified COGS and final profit; the current stock cost is never substituted.
+              Historical cost is unavailable for {summary.historical_cost_unavailable_count} invoice(s). Their cost is excluded from verified COGS; company profit is still calculated from payments received and recorded costs.
             </div>
           )}
           <div className="rounded-lg border border-sky-100 bg-sky-50 p-3 text-xs leading-5 text-sky-900">
@@ -323,6 +364,7 @@ function FinancialReport({ report, mode, onModeChange, category, onCategoryChang
                 : key === "pending_payments" ? "pending_payments"
                   : key === "cogs" ? "cogs"
                     : key === "expenses" ? "expenses"
+                      : key === "salaries" ? "salaries"
                       : key === "buyings" ? "buyings"
                         : key === "grvs" ? "grv" : null;
             return (
@@ -407,11 +449,15 @@ function FinancialReport({ report, mode, onModeChange, category, onCategoryChang
           <section id="financial-section-profit_reconciliation" className="overflow-hidden rounded-xl border border-slate-200 bg-white">
             <button type="button" onClick={() => setOpenedSection(openedSection === "profit_reconciliation" ? "" : "profit_reconciliation")} className="w-full bg-slate-50 px-4 py-3 text-left font-semibold text-slate-800 hover:bg-slate-100">Profit reconciliation · {money(summary.final_profit)}</button>
             {(openedSection === "profit_reconciliation" || printing) && <div className="divide-y divide-slate-100 px-4 text-sm">
-              <div className="flex justify-between py-2"><span>Accrual sales revenue</span><span>{formatMoney(summary.sales_revenue)}</span></div>
+              <div className="flex justify-between py-2"><span>Total invoiced · sales issued</span><span>{formatMoney(summary.sales_revenue)}</span></div>
+              <div className="flex justify-between py-2 font-semibold"><span>Revenue · payments received</span><span>{formatMoney(summary.payments_received)}</span></div>
               <div className="flex justify-between py-2"><span>Verified historical COGS</span><span>{money(summary.cogs)}</span></div>
               <div className="flex justify-between py-2"><span>Eligible recorded expenses</span><span>− {formatMoney(summary.expenses)}</span></div>
-              <div className="flex justify-between py-2 text-xs text-slate-500"><span>Buyings and GRV inventory movement</span><span>Shown separately, not deducted twice</span></div>
-              <div className="flex justify-between py-3 font-bold"><span>Final profit</span><span className={profitClass}>{money(summary.final_profit)}</span></div>
+              <div className="flex justify-between py-2"><span>Buyings</span><span>− {formatMoney(summary.buyings)}</span></div>
+              <div className="flex justify-between py-2"><span>Calculated gross salaries</span><span>− {formatMoney(summary.salaries)}</span></div>
+              <div className="flex justify-between py-2"><span>Accepted GRV costs</span><span>− {formatMoney(summary.grv)}</span></div>
+              <p className="py-2 text-xs text-slate-500">Historical COGS is shown for reference and is not subtracted again; stock purchases are already deducted as Buyings and GRVs.</p>
+              <div className="flex justify-between py-3 font-bold"><span>Estimated company profit</span><span className={profitClass}>{money(summary.final_profit)}</span></div>
               <p className="pb-3 text-xs text-slate-500">{summary.profit_status}</p>
             </div>}
           </section>
@@ -420,8 +466,8 @@ function FinancialReport({ report, mode, onModeChange, category, onCategoryChang
             <h3 className="px-4 py-3 font-semibold text-slate-800">Daily breakdown</h3>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[700px] text-sm">
-                <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500"><tr><th className="px-3 py-2">Date</th><th className="px-3 py-2 text-right">Invoices</th><th className="px-3 py-2 text-right">Payments</th><th className="px-3 py-2 text-right">Expenses</th><th className="px-3 py-2 text-right">Buyings</th><th className="px-3 py-2 text-right">GRV</th><th className="px-3 py-2 text-right">Daily profit</th></tr></thead>
-                <tbody>{(report.daily || []).map((day) => <tr key={day.date} className="border-t border-slate-100"><td className="px-3 py-2">{day.date}</td><td className="px-3 py-2 text-right">{formatMoney(day.sales_revenue)} <span className="text-xs text-slate-400">({day.invoice_count})</span></td><td className="px-3 py-2 text-right">{formatMoney(day.payments_received)} <span className="text-xs text-slate-400">({day.payment_count})</span></td><td className="px-3 py-2 text-right">{formatMoney(day.expenses)}</td><td className="px-3 py-2 text-right">{formatMoney(day.buyings)}</td><td className="px-3 py-2 text-right">{formatMoney(day.grv)}</td><td className="px-3 py-2 text-right font-semibold">{money(day.final_profit)}</td></tr>)}</tbody>
+                <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500"><tr><th className="px-3 py-2">Date</th><th className="px-3 py-2 text-right">Invoices</th><th className="px-3 py-2 text-right">Payments received</th><th className="px-3 py-2 text-right">Expenses</th><th className="px-3 py-2 text-right">Buyings</th><th className="px-3 py-2 text-right">GRV</th></tr></thead>
+                <tbody>{(report.daily || []).map((day) => <tr key={day.date} className="border-t border-slate-100"><td className="px-3 py-2">{day.date}</td><td className="px-3 py-2 text-right">{formatMoney(day.sales_revenue)} <span className="text-xs text-slate-400">({day.invoice_count})</span></td><td className="px-3 py-2 text-right">{formatMoney(day.payments_received)} <span className="text-xs text-slate-400">({day.payment_count})</span></td><td className="px-3 py-2 text-right">{formatMoney(day.expenses)}</td><td className="px-3 py-2 text-right">{formatMoney(day.buyings)}</td><td className="px-3 py-2 text-right">{formatMoney(day.grv)}</td></tr>)}</tbody>
               </table>
             </div>
           </section>
@@ -515,19 +561,19 @@ export default function DailyReport() {
     };
     loadFinancialReport(true);
     const refresh = () => loadFinancialReport();
-    const refreshOnVisibility = () => {
-      if (document.visibilityState === "visible") loadFinancialReport();
+    let refreshTimeout;
+    const scheduleDailyRefresh = () => {
+      refreshTimeout = window.setTimeout(() => {
+        void loadFinancialReport();
+        if (active) scheduleDailyRefresh();
+      }, getNextFinancialRefreshDelay());
     };
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === "visible") refresh();
-    }, 20000);
+    scheduleDailyRefresh();
     window.addEventListener("erp:data-changed", refresh);
-    document.addEventListener("visibilitychange", refreshOnVisibility);
     return () => {
       active = false;
-      window.clearInterval(interval);
+      window.clearTimeout(refreshTimeout);
       window.removeEventListener("erp:data-changed", refresh);
-      document.removeEventListener("visibilitychange", refreshOnVisibility);
     };
   }, [viewMode, financialValue, accountingMode, reportCompany]);
 
@@ -606,6 +652,11 @@ export default function DailyReport() {
           {downloadingHome ? "Preparing PDF..." : "DOWNLOAD HOME PDF"}
         </Btn>}
       </div>
+      {viewMode !== "daily" && (
+        <p role="status" className="text-lg font-bold text-red-600" data-testid="financial-report-refresh-info">
+          This report loads when opened and automatically refreshes every day at 6:00 PM (South Africa time) while this page is open.
+        </p>
+      )}
 
       {error && (
         <div role="alert" className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">

@@ -494,7 +494,7 @@ class TestCosts:
     def test_profit_shape(self, s):
         r = s.get(f"{API}/reports/profit").json()
         for k in ("today", "week", "month"):
-            assert r[k]["label"] == "Estimated result — payments received minus recorded expenses and buyings"
+            assert r[k]["label"] == "Estimated result — payments received minus recorded expenses, buyings, salaries and GRV costs"
         ws = datetime.fromisoformat(r["week_start"])
         assert ws.weekday() == 0
         assert r["week_start"] <= datetime.now(TZ).date().isoformat()

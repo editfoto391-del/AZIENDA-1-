@@ -38,11 +38,12 @@ const statusLabel = (status) => ({
   reversing: "Reversing",
 }[status] || status?.replaceAll("_", " ") || "Unknown");
 const blankLine = () => ({
-  stock_id: "", product_code: "", product: "", size: "",
+  stock_id: "", product_code: "", new_product: false, product: "", size: "",
   purchase_order_item_index: null, ordered_quantity: 0,
   previously_received_quantity: 0, remaining_quantity: 0,
   actual_received_quantity: 0, accepted_quantity: 0, rejected_quantity: 0,
-  damaged_quantity: 0, unit_cost: 0, total_value: 0,
+  damaged_quantity: 0, unit_cost: 0, sale_price_zone_1: "", sale_price_zone_2: "",
+  total_value: 0,
 });
 const blankGRV = () => ({
   supplier_id: "", supplier_name: "", purchase_order_id: "",
@@ -73,6 +74,8 @@ async function downloadGRVPdf(grv, companyName, settings = {}) {
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
   const right = pageWidth - margin;
+  const showZone2 = /super/i.test(companyName || settings.company_name || "")
+    && /iq.*foam/i.test(companyName || settings.company_name || "");
   let y = 16;
   const addText = (text, x, top, options = {}) => {
     pdf.text(String(text ?? ""), x, top, options);
@@ -133,13 +136,15 @@ async function downloadGRVPdf(grv, companyName, settings = {}) {
 
   y += 12;
   const cols = [
-    { title: "Product / size", x: margin, width: 45, align: "left" },
-    { title: "Ordered", x: 63, width: 18, align: "right" },
-    { title: "Received", x: 84, width: 18, align: "right" },
-    { title: "Accepted", x: 105, width: 18, align: "right" },
-    { title: "Rejected", x: 126, width: 18, align: "right" },
-    { title: "Unit cost", x: 147, width: 22, align: "right" },
-    { title: "Total", x: right - 23, width: 23, align: "right" },
+    { title: "Product / size", x: margin, width: 32, align: "left" },
+    { title: "Ordered", x: 49, width: 15, align: "right" },
+    { title: "Received", x: 66, width: 15, align: "right" },
+    { title: "Accepted", x: 83, width: 15, align: "right" },
+    { title: "Rejected", x: 100, width: 15, align: "right" },
+    { title: "Buy", x: 117, width: 17, align: "right" },
+    { title: "Sell Z1", x: 135, width: 17, align: "right" },
+    ...(showZone2 ? [{ title: "Sell Z2", x: 153, width: 17, align: "right" }] : []),
+    { title: "Value", x: right - 22, width: 22, align: "right" },
   ];
   const drawHeader = () => {
     pdf.setFillColor(239, 244, 241);
@@ -168,6 +173,8 @@ async function downloadGRVPdf(grv, companyName, settings = {}) {
       line.accepted_quantity || 0,
       line.rejected_quantity || 0,
       fmtMoney(line.unit_cost || 0),
+      line.sale_price_zone_1 == null ? "-" : fmtMoney(line.sale_price_zone_1),
+      ...(showZone2 ? [line.sale_price_zone_2 == null ? "-" : fmtMoney(line.sale_price_zone_2)] : []),
       fmtMoney(line.total_value ?? lineValue(line)),
     ];
     values.forEach((value, index) => addText(
@@ -207,6 +214,13 @@ async function downloadGRVPdf(grv, companyName, settings = {}) {
 export default function GRV() {
   const { user } = useAuth();
   const companyId = user?.company_id || "";
+  const isSuperIQFoam = companyId === "superiqfoam";
+  const salePriceFields = isSuperIQFoam
+    ? [
+      ["sale_price_zone_1", "Sale price · Zone 1"],
+      ["sale_price_zone_2", "Sale price · Zone 2"],
+    ]
+    : [["sale_price_zone_1", "Selling price"]];
   const [dashboard, setDashboard] = useState(null);
   const [records, setRecords] = useState(null);
   const [suppliers, setSuppliers] = useState([]);
@@ -303,9 +317,26 @@ export default function GRV() {
   };
 
   const chooseStock = (index, stockId) => {
+    if (stockId === "__new_product__") {
+      setDraft((current) => ({
+        ...current,
+        items: current.items.map((line, lineIndex) => lineIndex === index
+          ? {
+            ...line, stock_id: "", product_code: "", new_product: true,
+            product: "", size: "", sale_price_zone_1: "", sale_price_zone_2: "",
+          }
+          : line),
+      }));
+      return;
+    }
     const selected = stock.find((item) => item.id === stockId);
     if (!selected) {
-      updateLine(index, "stock_id", "");
+      setDraft((current) => ({
+        ...current,
+        items: current.items.map((line, lineIndex) => lineIndex === index
+          ? { ...line, stock_id: "", new_product: false }
+          : line),
+      }));
       return;
     }
     setDraft((current) => ({
@@ -314,6 +345,7 @@ export default function GRV() {
         ? {
           ...line,
           stock_id: selected.id,
+          new_product: false,
           product_code: selected.code || selected.sku || selected.id,
           product: selected.product,
           size: selected.size || "",
@@ -398,7 +430,11 @@ export default function GRV() {
     const raw = draft.purpose === "raw_material";
     if (draft.items.some((line) => !Number(line.unit_cost)) && !window.confirm("Unit cost is missing on some lines. It is optional but recommended for accurate stock value. Save without it?")) return;
     if (!draft.items.length) return toast.error("Add at least one product line");
-    if (!raw && draft.items.some((line) => !line.stock_id)) return toast.error("Select a stock product for every line");
+    if (!raw && draft.items.some((line) => line.new_product
+      ? !(line.product || "").trim() || !(line.size || "").trim()
+      : !line.stock_id)) {
+      return toast.error("Select a stock product or enter a name and size for every new product");
+    }
     if (raw && draft.items.some((line) => !(line.product || "").trim() || !(line.unit || "").trim())) return toast.error("Enter name and unit for every raw material");
     setSaving(true);
     try {
@@ -411,6 +447,10 @@ export default function GRV() {
           rejected_quantity: Number(line.rejected_quantity || 0),
           damaged_quantity: Number(line.damaged_quantity || 0),
           unit_cost: Number(line.unit_cost || 0),
+          sale_price_zone_1: line.sale_price_zone_1 === "" || line.sale_price_zone_1 == null
+            ? null : Number(line.sale_price_zone_1),
+          sale_price_zone_2: line.sale_price_zone_2 === "" || line.sale_price_zone_2 == null
+            ? null : Number(line.sale_price_zone_2),
         })),
       };
       if (draft.id) {
@@ -630,14 +670,18 @@ export default function GRV() {
             <BarcodeScanner onScan={scanGRVProduct} disabled={saving} dedupeWindowMs={0} label="Scan product to match its stock size" />
           </div>}
           <div className="overflow-x-auto rounded-lg border border-border">
-            <table className={`w-full ${scanReceivingMode ? "min-w-[700px]" : "min-w-[1000px]"} text-xs`}>
+            <table className={`w-full ${scanReceivingMode ? "min-w-[1000px]" : isSuperIQFoam ? "min-w-[1250px]" : "min-w-[1100px]"} text-xs`}>
               <thead><tr className="bg-slate-50 text-left text-slate-500">
                 <th className="p-2">Product / size</th>
                 {scanReceivingMode
-                  ? <><th className="p-2 text-right">Quantity received</th><th className="p-2 text-right">Unit cost (optional, recommended)</th><th className="p-2 text-right">Total value</th><th className="p-2"> </th></>
+                  ? <><th className="p-2 text-right">Quantity received</th><th className="p-2 text-right">Purchase price</th>
+                    {draft.purpose !== "raw_material" && salePriceFields.map(([key, label]) => <th key={key} className="p-2 text-right">{label}</th>)}
+                    <th className="p-2 text-right">Total value</th><th className="p-2"> </th></>
                   : <><th className="p-2 text-right">Actually received</th><th className="p-2 text-right">Accepted</th>
                     <th className="p-2 text-right">Rejected</th><th className="p-2 text-right">Damaged</th>
-                    <th className="p-2 text-right">Unit cost (optional, recommended)</th><th className="p-2 text-right">Total value</th>
+                    <th className="p-2 text-right">Purchase price</th>
+                    {draft.purpose !== "raw_material" && salePriceFields.map(([key, label]) => <th key={key} className="p-2 text-right">{label}</th>)}
+                    <th className="p-2 text-right">Total value</th>
                     {!draft.purchase_order_id && <th className="p-2"> </th>}</>}
               </tr></thead>
               <tbody>{draft.items.map((line, index) => (
@@ -655,8 +699,15 @@ export default function GRV() {
                         <input placeholder="Unit * (kg, L, pcs)" value={line.unit || ""} onChange={(event) => updateLine(index, "unit", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-unit-${index}`} />
                       </div>
                       : !draft.purchase_order_id
-                      ? <Select aria-label="Stock product" value={line.stock_id} onChange={(event) => chooseStock(index, event.target.value)} data-testid={`grv-stock-${index}`}>
+                      ? line.new_product
+                      ? <div className="grid min-w-[360px] grid-cols-2 gap-1">
+                        <input placeholder="New product / category *" value={line.product} onChange={(event) => updateLine(index, "product", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-new-product-name-${index}`} />
+                        <input placeholder="Size / measurement *" value={line.size} onChange={(event) => updateLine(index, "size", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-new-product-size-${index}`} />
+                        <button type="button" onClick={() => chooseStock(index, "")} className="col-span-2 text-left text-xs text-primary hover:underline" data-testid={`grv-select-existing-product-${index}`}>Choose an existing stock product instead</button>
+                      </div>
+                      : <Select aria-label="Stock product" value={line.stock_id} onChange={(event) => chooseStock(index, event.target.value)} data-testid={`grv-stock-${index}`}>
                         <option value="">Select stock item</option>
+                        <option value="__new_product__">+ Create new product / category</option>
                         {stock.map((item) => <option key={item.id} value={item.id}>{item.product} · {item.size}</option>)}
                       </Select>
                       : <><span className="block font-semibold text-slate-800">{line.product}</span><span className="text-slate-500">{line.size} · {line.product_code}</span></>}
@@ -680,10 +731,19 @@ export default function GRV() {
                     <td className="p-2">
                       <input type="number" min="0" step="0.01" value={line.unit_cost}
                         onChange={(event) => updateLine(index, "unit_cost", event.target.value)}
-                        aria-label={`Optional unit cost line ${index + 1}`}
+                        aria-label={`Purchase price line ${index + 1}`}
                         className="w-28 rounded border border-input px-2 py-1.5 text-right font-mono"
                         data-testid={`grv-quick-unit-cost-${index}`} />
                     </td>
+                    {draft.purpose !== "raw_material" && salePriceFields.map(([key, label]) => (
+                      <td key={key} className="p-2">
+                        <input type="number" min="0" step="0.01" value={line[key] ?? ""}
+                          onChange={(event) => updateLine(index, key, event.target.value)}
+                          aria-label={`${label} line ${index + 1}`}
+                          className="w-28 rounded border border-input px-2 py-1.5 text-right font-mono"
+                          data-testid={`grv-quick-${key}-${index}`} />
+                      </td>
+                    ))}
                     <td className="p-2 text-right font-mono font-semibold">{fmtMoney(lineValue(line))}</td>
                     <td className="p-2"><button type="button" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((_, row) => row !== index) }))} className="text-xs text-red-700 hover:underline">Remove</button></td>
                   </> : <>
@@ -692,12 +752,27 @@ export default function GRV() {
                       ["accepted_quantity", line.accepted_quantity],
                       ["rejected_quantity", line.rejected_quantity],
                       ["damaged_quantity", line.damaged_quantity],
-                      ["unit_cost", line.unit_cost],
                     ].map(([key, value]) => (
                       <td key={key} className="p-2">
                         <input type="number" min="0" step="0.01" value={value}
                           onChange={(event) => updateLine(index, key, Number(event.target.value))}
                           aria-label={`${key.replaceAll("_", " ")} line ${index + 1}`}
+                          className="w-24 rounded border border-input px-2 py-1.5 text-right font-mono"
+                          data-testid={`grv-${key}-${index}`} />
+                      </td>
+                    ))}
+                    <td className="p-2">
+                      <input type="number" min="0" step="0.01" value={line.unit_cost}
+                        onChange={(event) => updateLine(index, "unit_cost", Number(event.target.value))}
+                        aria-label={`Purchase price line ${index + 1}`}
+                        className="w-24 rounded border border-input px-2 py-1.5 text-right font-mono"
+                        data-testid={`grv-unit-cost-${index}`} />
+                    </td>
+                    {draft.purpose !== "raw_material" && salePriceFields.map(([key, label]) => (
+                      <td key={key} className="p-2">
+                        <input type="number" min="0" step="0.01" value={line[key] ?? ""}
+                          onChange={(event) => updateLine(index, key, event.target.value)}
+                          aria-label={`${label} line ${index + 1}`}
                           className="w-24 rounded border border-input px-2 py-1.5 text-right font-mono"
                           data-testid={`grv-${key}-${index}`} />
                       </td>
@@ -711,7 +786,7 @@ export default function GRV() {
           </div>
           {!draft.purchase_order_id && <Btn type="button" variant="outline" onClick={() => setDraft({ ...draft, items: [...draft.items, blankLine()] })}><Plus size={14} /> Add product line</Btn>}
           <Textarea label="Notes / discrepancies" rows={3} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} data-testid="grv-notes" />
-          <p className="rounded-md bg-blue-50 p-3 text-xs text-blue-800">This saves a draft only. Confirming posts accepted quantities to Stock and updates the linked purchase order once. Rejected and damaged quantities are excluded from available stock.</p>
+          <p className="rounded-md bg-blue-50 p-3 text-xs text-blue-800">This saves a draft only. Confirming posts accepted quantities to Stock and updates the linked purchase order once. A new product/category is created in Stock on confirmation and needs a selling price for each applicable zone to appear on invoices. Entered selling prices update the price list; a worker must have a company owner confirm a GRV that changes prices. Reversing a GRV does not revert those prices. Rejected and damaged quantities are excluded from available stock.</p>
           <div className="flex justify-end gap-2">
             <Btn type="button" variant="outline" onClick={() => setDraft(null)} disabled={saving}>Cancel</Btn>
             <Btn type="submit" disabled={saving} data-testid="grv-save-draft">{saving ? "Saving..." : draft.id ? "Save changes" : "Save GRV draft"}</Btn>

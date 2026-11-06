@@ -36,7 +36,7 @@ def test_admin_invoice_edit_does_not_need_supervisor_password():
     assert server.can_edit_invoice_without_supervisor(worker_admin)
 
     worker_admin["worker_write_permissions"]["invoices"]["update"] = "supervisor"
-    assert not server.can_edit_invoice_without_supervisor(worker_admin)
+    assert server.can_edit_invoice_without_supervisor(worker_admin)
 
 
 def test_admin_invoice_edit_skips_general_supervisor_write_gate():
@@ -124,13 +124,16 @@ def test_non_owner_cannot_open_an_archived_invoice(monkeypatch):
     assert error.value.status_code == 404
 
 
-def test_bulk_permanent_invoice_delete_requires_every_invoice_archived_and_deletes_related_data(monkeypatch):
+def test_bulk_permanent_invoice_delete_preserves_payments(monkeypatch):
     class Collection:
         def __init__(self, documents=()):
             self.documents = list(documents)
 
         async def find_one(self, query, _projection=None):
             return next((item.copy() for item in self.documents if item["id"] == query["id"]), None)
+
+        async def count_documents(self, query):
+            return sum(all(item.get(key) == value for key, value in query.items()) for item in self.documents)
 
         async def delete_one(self, query):
             self.documents = [
@@ -165,16 +168,17 @@ def test_bulk_permanent_invoice_delete_requires_every_invoice_archived_and_delet
         audits.append((args, kwargs))
 
     monkeypatch.setattr(server, "log_audit", log_audit)
-    result = asyncio.run(server.bulk_permanently_delete_invoices(
-        server.BulkPermanentDeleteIn(ids=["archived-1", "archived-2", "archived-1"]),
-        {"_active_role": "owner"},
-    ))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(server.bulk_permanently_delete_invoices(
+            server.BulkPermanentDeleteIn(ids=["archived-1", "archived-2", "archived-1"]),
+            {"_active_role": "owner"},
+        ))
 
-    assert result == {"deleted": 2}
-    assert invoices.documents == []
-    assert payments.documents == []
-    assert share_links.documents == []
-    assert len(audits) == 2
+    assert error.value.status_code == 409
+    assert len(invoices.documents) == 2
+    assert len(payments.documents) == 2
+    assert len(share_links.documents) == 2
+    assert audits == []
 
 
 def test_bulk_permanent_invoice_delete_validates_all_records_before_deleting(monkeypatch):
@@ -189,7 +193,11 @@ def test_bulk_permanent_invoice_delete_validates_all_records_before_deleting(mon
             return next((item.copy() for item in self.documents if item["id"] == query["id"]), None)
 
     invoices = Invoices()
-    monkeypatch.setattr(server, "db", SimpleNamespace(invoices=invoices))
+    class Payments:
+        async def count_documents(self, _query):
+            return 0
+
+    monkeypatch.setattr(server, "db", SimpleNamespace(invoices=invoices, payments=Payments()))
     with pytest.raises(HTTPException) as error:
         asyncio.run(server.bulk_permanently_delete_invoices(
             server.BulkPermanentDeleteIn(ids=["archived-1", "active-1"]),
@@ -209,7 +217,7 @@ def test_bulk_permanent_invoice_delete_is_owner_only():
     assert error.value.status_code == 403
 
 
-def test_admin_cannot_change_existing_invoice_item_price(monkeypatch):
+def test_admin_can_change_existing_invoice_item_price(monkeypatch):
     async def scenario():
         body = server.InvoiceIn(items=[{
             "category": "Foam",
@@ -224,11 +232,16 @@ def test_admin_cannot_change_existing_invoice_item_price(monkeypatch):
             "price_override": False,
         }]}
 
-        with pytest.raises(HTTPException) as error:
-            await server.validate_invoice_item_price_edits(
-                body, existing, {"_active_role": "admin"},
-            )
-        assert error.value.status_code == 403
+        await server.validate_invoice_item_price_edits(
+            body, existing, {"_active_role": "admin"},
+        )
+
+        worker_admin = {
+            "is_worker": True,
+            "_active_role": "admin",
+            "worker_can_edit_invoice_prices": False,
+        }
+        await server.validate_invoice_item_price_edits(body, existing, worker_admin)
 
     async def price_lookup(*_args):
         return {"price": 12.5}
@@ -237,33 +250,22 @@ def test_admin_cannot_change_existing_invoice_item_price(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_admin_new_invoice_item_must_use_configured_price(monkeypatch):
+def test_admin_can_add_invoice_item_with_custom_price(monkeypatch):
     async def price_lookup(*_args):
         return {"price": 12.5}
 
     monkeypatch.setattr(server, "resolve_price", price_lookup)
 
     async def scenario():
-        accepted = server.InvoiceIn(items=[{
-            "category": "Foam",
-            "size": "100x100",
-            "unit_price": 12.5,
-        }])
-        await server.validate_invoice_item_price_edits(
-            accepted, None, {"_active_role": "admin"},
-        )
-
-        rejected = server.InvoiceIn(items=[{
+        custom = server.InvoiceIn(items=[{
             "category": "Foam",
             "size": "100x100",
             "unit_price": 20,
             "price_override": True,
         }])
-        with pytest.raises(HTTPException) as error:
-            await server.validate_invoice_item_price_edits(
-                rejected, None, {"_active_role": "admin"},
-            )
-        assert error.value.status_code == 403
+        await server.validate_invoice_item_price_edits(
+            custom, None, {"_active_role": "admin"},
+        )
 
     asyncio.run(scenario())
 

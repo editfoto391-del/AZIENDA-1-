@@ -536,15 +536,15 @@ def test_worker_link_auth_scope_dynamic_permissions_and_revocation(worker_accoun
     asyncio.run(scenario())
 
 
-def test_company_admin_can_view_add_and_change_worker_roles(worker_accounts):
+def test_company_owner_can_view_add_and_change_worker_roles(worker_accounts):
     _, database = worker_accounts
     database.user_sessions.documents.append({"id": "worker-session", "user_id": "worker-a"})
     admin = {
-        "id": "company-admin",
+        "id": "company-owner",
         "role": "user",
-        "_active_role": "admin",
+        "_active_role": "owner",
         "_active_company_id": "superiqfoam",
-        "company_roles": {"superiqfoam": "admin"},
+        "company_roles": {"superiqfoam": "owner"},
     }
 
     async def scenario():
@@ -588,14 +588,84 @@ def test_company_admin_can_view_add_and_change_worker_roles(worker_accounts):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("account", [
+    {
+        "id": "company-admin",
+        "role": "user",
+        "_active_role": "admin",
+        "_active_company_id": "superiqfoam",
+        "company_roles": {"superiqfoam": "admin"},
+    },
+    {
+        "id": "worker-admin",
+        "role": "user",
+        "_active_role": "admin",
+        "_active_company_id": "superiqfoam",
+        "company_roles": {"superiqfoam": "admin"},
+        "is_worker": True,
+    },
+    {
+        "id": "ordinary-worker",
+        "role": "user",
+        "_active_role": "user",
+        "_active_company_id": "superiqfoam",
+        "company_roles": {"superiqfoam": "user"},
+        "is_worker": True,
+    },
+])
+def test_non_owners_cannot_view_or_manage_worker_accounts_or_links(worker_accounts, account):
+    with pytest.raises(HTTPException) as list_error:
+        asyncio.run(server.get_workers("superiqfoam", account))
+    assert list_error.value.status_code == 403
+
+    async def scenario():
+        with pytest.raises(HTTPException) as link_error:
+            await server.worker_access_details("worker-a", "superiqfoam", account)
+        assert link_error.value.status_code == 403
+
+        with pytest.raises(HTTPException) as create_error:
+            await server.create_worker(server.CreateWorkerIn(
+                username="forbidden-worker",
+                name="Forbidden Worker",
+                worker_role="Clerk",
+                password="worker-password",
+                company_id="superiqfoam",
+                allowed_sections=["invoices"],
+            ), account)
+        assert create_error.value.status_code == 403
+
+        with pytest.raises(HTTPException) as update_error:
+            await server.update_worker_access(
+                "worker-a",
+                server.WorkerAccessUpdateIn(worker_role="Changed", allowed_sections=["stock"]),
+                "superiqfoam",
+                account,
+            )
+        assert update_error.value.status_code == 403
+
+        with pytest.raises(HTTPException) as password_error:
+            await server.update_worker_password(
+                "worker-a", "superiqfoam",
+                server.ProfilePasswordIn(password="new-secure-pass"),
+                account,
+            )
+        assert password_error.value.status_code == 403
+
+        with pytest.raises(HTTPException) as remove_error:
+            await server.remove_worker("worker-a", "superiqfoam", account)
+        assert remove_error.value.status_code == 403
+
+    asyncio.run(scenario())
+
+
 def test_manufacturing_worker_creation_saves_warehouse_and_supervisor_permissions(worker_accounts):
     _, database = worker_accounts
     admin = {
-        "id": "manufacturing-admin",
+        "id": "manufacturing-owner",
         "role": "user",
-        "_active_role": "admin",
+        "_active_role": "owner",
         "_active_company_id": "iqfoam-manufactoring",
-        "company_roles": {"iqfoam-manufactoring": "admin"},
+        "company_roles": {"iqfoam-manufactoring": "owner"},
     }
 
     async def scenario():
@@ -647,14 +717,14 @@ def test_manufacturing_worker_creation_saves_warehouse_and_supervisor_permission
     asyncio.run(scenario())
 
 
-def test_company_admin_can_reset_worker_password_only_in_their_company(worker_accounts):
+def test_company_owner_can_reset_worker_password_only_in_their_company(worker_accounts):
     _, database = worker_accounts
     admin = {
-        "id": "company-admin",
+        "id": "company-owner",
         "role": "user",
-        "_active_role": "admin",
+        "_active_role": "owner",
         "_active_company_id": "superiqfoam",
-        "company_roles": {"superiqfoam": "admin"},
+        "company_roles": {"superiqfoam": "owner"},
     }
 
     async def scenario():

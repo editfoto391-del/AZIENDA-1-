@@ -19,12 +19,65 @@ import {
   invoiceCategoriesFor,
   invoicePriceCategory,
   invoiceSizesFor,
+  invoiceStockLinesChanged,
   isManualInvoicePrice,
   lookupInvoicePrice,
   resolveInvoiceLineForIssue,
 } from "@/lib/invoicePricing.mjs";
 
 const isOpeningBalancePlaceholder = (item) => !item.category && !item.size && item.description?.trim().toLowerCase() === "opening balance";
+const AUDIT_FIELD_LABELS = {
+  customer_name: "Customer",
+  date: "Invoice date",
+  due_date: "Due date",
+  zone: "Price zone",
+  payment_terms: "Payment terms",
+  reference: "Reference",
+  destination: "Delivery address",
+  notes: "Notes",
+  discount: "Discount",
+  extra_charges: "Additional charges",
+  delivery_fee: "Delivery fee",
+  made_by: "Made by",
+  client_number: "Client number",
+  assigned_driver_name: "Assigned driver",
+  tax_enabled: "Tax enabled",
+  tax_rate: "Tax rate",
+  total: "Invoice total",
+  items: "Products and prices",
+  cod_amount_due: "Cash to collect",
+  cod_amount_collected: "Cash collected",
+  status: "Status",
+};
+const auditFieldLabel = (field) => AUDIT_FIELD_LABELS[field]
+  || field.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+const auditActionLabel = (action) => ({
+  invoice_created: "Created invoice",
+  invoice_edited: "Edited invoice",
+  invoice_issued: "Issued invoice",
+  invoice_voided: "Voided invoice",
+}[action] || action.replaceAll("_", " "));
+const auditValue = (field, value) => {
+  if (value == null || value === "") return "—";
+  if (field === "items" && Array.isArray(value)) {
+    return value.length
+      ? value.map((item, index) => {
+        const product = [item.category, item.size].filter(Boolean).join(" · ") || item.description || "Product";
+        const quantity = Number(item.qty) || 0;
+        const price = Number(item.unit_price) || 0;
+        const total = item.line_total == null ? quantity * price : Number(item.line_total) || 0;
+        return `${index + 1}. ${quantity} × ${product} — ${fmtMoney(price)} each (line total ${fmtMoney(total)})${item.price_override ? " · manual price" : ""}`;
+      }).join("\n")
+      : "No products";
+  }
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (["total", "discount", "extra_charges", "delivery_fee", "cod_amount_due", "cod_amount_collected"].includes(field)) {
+    return fmtMoney(value);
+  }
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "—";
+  if (typeof value === "object") return Object.entries(value).map(([key, item]) => `${auditFieldLabel(key)}: ${item}`).join("\n");
+  return String(value);
+};
 
 const emptyItem = (category = "Simple/Mix color") => ({ qty: 1, category, size: "", description: "", unit_price: 0, price_override: false, tax: false, _needsConfig: false });
 
@@ -51,6 +104,7 @@ export default function InvoiceEditor({ express = false }) {
     amount_paid: 0, number: null,
   });
   const [payRecords, setPayRecords] = useState([]);
+  const [invoiceAudit, setInvoiceAudit] = useState([]);
   const [payModal, setPayModal] = useState(null);
   const [nextNum, setNextNum] = useState("");
   const [pendingSave, setPendingSave] = useState(null);
@@ -73,13 +127,18 @@ export default function InvoiceEditor({ express = false }) {
   const [compactPreview, setCompactPreview] = useState(false);
   const deliveryNoteRef = useRef(null);
   const locked = !!id && !editing;
-  const invoiceItemPriceLocked = user?.is_worker
-    ? !user?.can_edit_invoice_prices
-    : user?.is_admin && user?.role === "admin";
+  const invoiceItemPriceLocked = user?.is_worker && !user?.can_edit_invoice_prices;
 
   const prepareForEdit = (invoice) => invoice.opening_balance
     ? { ...invoice, opening_balance: false, reference: "", notes: "", items: [emptyItem()] }
     : invoice;
+
+  const refreshInvoiceAudit = () => {
+    if (!id || !isInvoiceOwner) return;
+    api.getUncached(`/invoices/${id}/audit`)
+      .then(setInvoiceAudit)
+      .catch((error) => toast.error(`Could not load invoice audit history: ${apiError(error)}`));
+  };
 
   useEffect(() => {
     Promise.all([api.get("/customers"), api.getUncached("/prices"), api.get("/settings"), api.get("/drivers")])
@@ -92,6 +151,12 @@ export default function InvoiceEditor({ express = false }) {
       .then(setStockItems)
       .catch((error) => toast.error(`Could not load stock products for invoices: ${apiError(error)}`));
     setEditing(false);
+    if (id && isInvoiceOwner) {
+      setInvoiceAudit([]);
+      refreshInvoiceAudit();
+    } else {
+      setInvoiceAudit([]);
+    }
     if (id) api.get(`/invoices/${id}`).then((d) => {
       if ((d.invoice_type || "standard") !== (express ? "express" : "standard")) {
         toast.error("This invoice belongs to a different invoice section");
@@ -118,7 +183,7 @@ export default function InvoiceEditor({ express = false }) {
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, user?.can_edit_invoices_without_supervisor, express]);
+  }, [id, user?.can_edit_invoices_without_supervisor, isInvoiceOwner, express]);
 
   useEffect(() => {
     let active = true;
@@ -568,6 +633,10 @@ export default function InvoiceEditor({ express = false }) {
     if (reason === null) return;
     if (!reason.trim()) return toast.error("A reason is required to edit an invoice");
     if (targetStatus !== "draft") {
+      if (snapshot?.stock_deducted && !invoiceStockLinesChanged(snapshot.items, inv.items)) {
+        await submitEdit(false, reason, false, targetStatus);
+        return;
+      }
       setPendingStockSubmit({ action: "edit", reason, status: targetStatus });
       return;
     }
@@ -592,6 +661,7 @@ export default function InvoiceEditor({ express = false }) {
         return;
       }
       setInv(res); setPayRecords(res.payment_records || []); setEditing(false); setEditAuthorization("");
+      refreshInvoiceAudit();
       toast.success(targetStatus === "draft" ? "Invoice updated" : "Invoice issued");
     } catch (e) {
       const detail = e.response?.data?.detail;
@@ -1044,18 +1114,39 @@ export default function InvoiceEditor({ express = false }) {
               </Card>
             )}
 
-            {(inv.audit || []).some((a) => a.action === "edited" && a.changes) && (
+            {isInvoiceOwner && invoiceAudit.length > 0 && (
               <Card className="p-5 no-print" data-testid="change-history">
-                <h3 className="font-bold text-slate-800 mb-3 font-display flex items-center gap-2"><History size={16} /> Change History</h3>
-                <ol className="relative border-l border-border ml-1.5 space-y-4">
-                  {[...inv.audit].reverse().filter((a) => a.action === "edited" && a.changes).map((a, i) => (
-                    <li key={i} className="ml-4" data-testid={`change-entry-${i}`}>
-                      <span className="absolute -left-1.5 mt-1 h-3 w-3 rounded-full border-2 border-white bg-primary" />
-                      <p className="text-xs text-slate-400">{fmtDateTime(a.at)}{a.reason ? <span className="text-slate-600"> · {a.reason}</span> : ""}</p>
-                      {a.changes.length === 0 ? <p className="text-xs text-slate-400">No field changes</p> : a.changes.map((c, k) => (
-                        <p key={k} className="text-xs text-slate-600 mt-0.5 break-words"><span className="font-semibold">{c.field.replace("_", " ")}:</span> <span className="line-through text-slate-400">{String(c.old ?? "—")}</span> → {String(c.new ?? "—")}</p>
-                      ))}
-                    </li>))}
+                <h3 className="font-bold text-slate-800 mb-3 font-display flex items-center gap-2"><History size={16} /> Invoice Audit History</h3>
+                <ol className="space-y-5">
+                  {invoiceAudit.map((entry) => {
+                    const before = entry.before || {};
+                    const after = entry.after || {};
+                    const fields = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+                      .filter((field) => JSON.stringify(before[field]) !== JSON.stringify(after[field]));
+                    return (
+                      <li key={entry.id} className="border-l-2 border-primary/30 pl-4" data-testid={`invoice-audit-entry-${entry.id}`}>
+                        <div className="flex flex-wrap justify-between gap-2 text-xs">
+                          <span className="font-semibold text-slate-700">{auditActionLabel(entry.action)} by {entry.user_name || entry.user || "Historical actor not recorded"}</span>
+                          <time className="text-slate-500">{fmtDateTime(entry.at)}</time>
+                        </div>
+                        {entry.reason && <p className="mt-1 text-xs text-slate-600"><span className="font-semibold">Reason for change:</span> {entry.reason}</p>}
+                        {fields.length > 0 && (
+                          <div className="mt-3 overflow-x-auto">
+                            <table className="w-full min-w-[560px] text-xs">
+                              <thead><tr className="border-b text-left text-slate-500"><th className="py-2 pr-3">Changed field</th><th className="py-2 pr-3">Before</th><th className="py-2">After</th></tr></thead>
+                              <tbody>{fields.map((field) => (
+                                <tr key={field} className="border-b border-slate-100 align-top">
+                                  <th className="py-2 pr-3 text-left font-semibold text-slate-700">{auditFieldLabel(field)}</th>
+                                  <td className="max-w-[260px] whitespace-pre-wrap break-words py-2 pr-3 text-slate-500">{auditValue(field, before[field])}</td>
+                                  <td className="max-w-[260px] whitespace-pre-wrap break-words py-2 text-slate-700">{auditValue(field, after[field])}</td>
+                                </tr>
+                              ))}</tbody>
+                            </table>
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ol>
               </Card>
             )}

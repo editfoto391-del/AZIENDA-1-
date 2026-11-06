@@ -136,7 +136,7 @@ def test_dashboard_compare_returns_all_five_financial_metrics(monkeypatch):
         }
 
 
-def report_data(mode):
+def report_data(mode, salary_rows=()):
     start, end = date(2026, 10, 26), date(2026, 11, 1)
     return server.build_financial_report(
         start,
@@ -197,6 +197,7 @@ def report_data(mode):
             },
             {"id": "reversed-grv", "received_date": "2026-10-31", "status": "cancelled", "items": [{"total_value": 999}]},
         ],
+        salary_rows=salary_rows,
         invoice_movements=[
             {
                 "invoice_id": "invoice-known", "type": "invoice", "quantity": 2,
@@ -209,8 +210,10 @@ def report_data(mode):
     )
 
 
-def test_expenses_only_uses_accrual_sales_and_does_not_double_count_inventory():
-    report = report_data("expenses_only")
+def test_company_profit_uses_received_payments_and_deducts_all_expense_groups():
+    report = report_data("expenses_only", salary_rows=[{
+        "employee_id": "employee-1", "name": "Worker", "gross_salary": 20,
+    }])
     summary = report["summary"]
     assert summary["total_invoices"] == 300
     assert summary["payments_received"] == 25
@@ -218,8 +221,10 @@ def test_expenses_only_uses_accrual_sales_and_does_not_double_count_inventory():
     assert summary["expenses"] == 15
     assert summary["buyings"] == 70
     assert summary["grv"] == 30
+    assert summary["salaries"] == 20
+    assert summary["cash_result"] == -110
     assert summary["cogs"] is None
-    assert summary["final_profit"] == 285
+    assert summary["final_profit"] == -110
     assert summary["historical_cost_unavailable_count"] == 1
     assert [row["id"] for row in report["transactions"]["invoices"]] == [
         "invoice-known", "invoice-unknown",
@@ -366,12 +371,12 @@ def test_full_production_cost_never_fills_missing_cost_from_current_stock():
     assert summary["known_cogs"] == 60
     assert summary["cogs"] is None
     assert summary["gross_profit"] is None
-    assert summary["final_profit"] is None
+    assert summary["final_profit"] == -90
     missing = report["transactions"]["historical_cost_unavailable"]
     assert len(missing) == 1
     assert missing[0]["id"] == "invoice-unknown"
     assert missing[0]["status"] == "Historical Cost Unavailable"
-    assert report["daily"][1]["final_profit"] is None
+    assert "final_profit" not in report["daily"][1]
 
 
 def test_full_cost_rejects_partial_or_missing_batch_allocation():
@@ -384,9 +389,9 @@ def test_full_cost_rejects_partial_or_missing_batch_allocation():
                                "batch_allocations": [{"quantity": 1, "unit_cost": 3}]}],
     }
     report = server.build_financial_report(date(2026, 10, 26), date(2026, 11, 1), "full_production_cost", **inputs)
-    assert report["summary"]["final_profit"] is None
+    assert report["summary"]["final_profit"] == 0
     assert report["summary"]["historical_cost_unavailable_count"] == 1
-    assert full["summary"]["final_profit"] is None
+    assert full["summary"]["final_profit"] == -90
 
 
 def test_fifo_stock_cost_allocation_uses_receipt_cost_not_current_stock_cost():
@@ -510,4 +515,4 @@ def test_edited_invoice_cogs_nets_returned_batch_allocations():
         ],
     )
     assert report["summary"]["cogs"] == 30
-    assert report["summary"]["final_profit"] == 70
+    assert report["summary"]["final_profit"] == 0

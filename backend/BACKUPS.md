@@ -8,7 +8,7 @@ The Backups tab in Settings is available to the primary owner. Automated snapsho
 - A monthly snapshot is retained for the first successful daily run of each month, for 12 months. This gives a selectable historical copy from each month.
 - The primary owner can also create a manual snapshot from Settings.
 - Restoring a snapshot creates new, separately named MongoDB databases. It does not replace or delete the live databases.
-- The current application does not store uploaded documents outside MongoDB, so these snapshots cover the database records only.
+- Scope: only the `invoices`, `payments`, `customers` and `deleted_customers` collections of all three company databases. Invoice PDFs are generated from invoice data and are not stored as files.
 
 ## Cloudflare R2 setup
 

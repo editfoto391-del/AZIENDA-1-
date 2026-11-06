@@ -53,12 +53,16 @@ from workflow_engine import (
     validate_event_payload,
 )
 from backup_service import (
+    BackupBusyError,
     backup_configuration,
+    backup_job_lock,
     create_snapshot,
     delete_expired_snapshots,
     list_snapshots,
+    mongo_tools_status,
     restore_snapshot_to_copy,
     scheduled_backup_loop,
+    verify_snapshot_object,
 )
 
 mongo_url = os.environ['MONGO_URL']
@@ -180,6 +184,25 @@ def company_role(user, company_id):
     ):
         return "admin"
     return (user.get("company_roles") or {}).get(company_id)
+
+
+def worker_restrictions_apply(user):
+    return user.get("is_worker") and user.get("_active_role") not in ("admin", "owner")
+
+
+def can_view_stock_costs(user):
+    return user.get("role") == "owner" or user.get("_active_role") == "owner"
+
+
+def can_view_invoice_audit(user):
+    return user.get("role") == "owner" or user.get("_active_role") == "owner"
+
+
+def invoice_for_user(invoice, user):
+    if invoice and not can_view_invoice_audit(user):
+        invoice.pop("audit", None)
+    return invoice
+
 
 def allowed_company_ids(user):
     if user.get("role") == "owner" or (
@@ -342,9 +365,18 @@ class PurchaseOrderReceiptLock:
 
 async def log_audit(entity, eid, action, user, before=None, after=None, reason=""):
     strip = lambda d: {k: v for k, v in (d or {}).items() if k not in ("_id", "password_hash", "audit")} if isinstance(d, dict) else d
+    actor = user if isinstance(user, dict) else {}
+    actor_email = actor.get("email") or ""
+    actor_username = actor.get("username") or ""
+    actor_id = actor.get("id") or ""
+    actor_name = actor.get("name") or actor_username or actor_email or actor_id or "System"
+    actor_identity = actor_email or actor_username or actor_id or "system"
     await db.audit_log.insert_one({"id": new_id(), "entity": entity, "entity_id": eid, "action": action,
                                    "before": strip(before), "after": strip(after), "reason": reason or "",
-                                   "user": (user or {}).get("email", "system"), "at": now_iso()})
+                                   "user": actor_identity,
+                                   "user_id": actor_id,
+                                   "user_name": actor_name,
+                                   "at": now_iso()})
 
 # ---------------- Auth ----------------
 def hash_pw(p): return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
@@ -516,7 +548,7 @@ def worker_section_for_request(path, user):
     )
 
 def enforce_worker_api_access(request, user):
-    if not user.get("is_worker"):
+    if not worker_restrictions_apply(user):
         return
     path = request.url.path.removeprefix("/api/").strip("/")
     method = request.method.upper()
@@ -685,27 +717,28 @@ def is_delegated_company_owner(user):
 def is_delegated_company_admin(user):
     return (
         user.get("role") != "owner"
-        and not user.get("is_worker")
         and any(role in ("owner", "admin") for role in (user.get("company_roles") or {}).values())
     )
 
 def can_skip_supervisor_approval(user):
-    if user.get("role") == "owner" and not user.get("is_worker"):
+    if user.get("role") == "owner" and not worker_restrictions_apply(user):
         return True
     return (
         user.get("role") != "owner"
-        and not user.get("is_worker")
+        and not worker_restrictions_apply(user)
         and (user.get("company_roles") or {}).get(WHOLESALERS_COMPANY_ID) == "admin"
         and user.get("_active_company_id") == "iqfoam-manufactoring"
     )
 
 def can_edit_invoice_without_supervisor(user):
-    if user.get("role") == "owner" or user.get("_active_role") == "owner":
+    if user.get("_active_role") in ("owner", "admin") or (
+        user.get("role") == "owner" and not worker_restrictions_apply(user)
+    ):
         return True
-    if user.get("is_worker"):
+    if worker_restrictions_apply(user):
         permission = worker_write_permission(user, "/api/invoices/invoice-id", "PUT")
         return bool(permission and permission[2] == "allow")
-    return user.get("_active_role") == "admin"
+    return False
 
 def is_supervisor_password_endpoint(path):
     return (
@@ -741,7 +774,7 @@ async def require_supervisor_for_company_write(request, user):
         return
 
     action = None
-    if user.get("is_worker"):
+    if worker_restrictions_apply(user):
         write_permission = worker_write_permission(user, request.url.path, request.method)
         is_invoice_delete = (
             request.url.path == "/api/invoices/bulk-delete"
@@ -983,7 +1016,17 @@ class SupervisorWriteAuthorizationIn(BaseModel):
     action: Optional[str] = None
 
 class BackupRestoreIn(BaseModel):
-    key: str
+    key: str = Field(min_length=12, max_length=50)
+
+    @field_validator("key")
+    @classmethod
+    def valid_backup_key(cls, value):
+        if not re.fullmatch(
+            r"(?:daily/\d{4}-\d{2}-\d{2}|monthly/\d{4}-\d{2}|manual/\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{6}Z)\.zip",
+            value,
+        ):
+            raise ValueError("Invalid backup selection")
+        return value
 
 class SwitchCompanyIn(BaseModel):
     company_id: str
@@ -1012,11 +1055,22 @@ class WorkflowApprovalDecisionIn(BaseModel):
 def public_user(u):
     company_id = u.get("_active_company_id") or DEFAULT_COMPANY_ID
     role = u.get("_active_role") or company_role(u, company_id) or u.get("role", "user")
+    is_worker_account = bool(u.get("is_worker"))
+    is_worker = is_worker_account and role not in ("admin", "owner")
     admin_company_ids = [
         managed_company_id
         for managed_company_id in allowed_company_ids(u)
         if company_role(u, managed_company_id) in ("owner", "admin")
     ]
+    owner_company_ids = (
+        [profile["id"] for profile in COMPANY_PROFILES]
+        if u.get("role") == "owner"
+        else [
+            managed_company_id
+            for managed_company_id, assigned_role in (u.get("company_roles") or {}).items()
+            if assigned_role == "owner"
+        ]
+    )
     is_company_owner = (
         u.get("role") != "owner"
         and not u.get("is_worker")
@@ -1041,15 +1095,17 @@ def public_user(u):
             "can_skip_supervisor_approval": can_skip_supervisor_approval(u),
             "can_edit_invoices_without_supervisor": can_edit_invoice_without_supervisor(u),
             "is_primary_owner": canonical_email(u.get("email")) == canonical_email(os.environ["ADMIN_EMAIL"]),
-            "is_worker": u.get("is_worker", False),
-            "is_stock_only_worker": u.get("is_worker", False) and u.get("worker_stock_only", False),
-            "worker_role": u.get("worker_role", ""),
-            "is_supervisor": u.get("is_worker", False) and u.get("worker_is_supervisor", False),
-            "warehouse_ids": worker_warehouse_ids(u),
-            "allowed_sections": u.get("worker_allowed_sections", []),
-            "write_permissions": u.get("worker_write_permissions", {}),
-            "can_edit_invoice_prices": u.get("worker_can_edit_invoice_prices", False),
+            "is_worker": is_worker,
+            "is_worker_account": is_worker_account,
+            "is_stock_only_worker": is_worker and u.get("worker_stock_only", False),
+            "worker_role": u.get("worker_role", "") if is_worker else "",
+            "is_supervisor": is_worker and u.get("worker_is_supervisor", False),
+            "warehouse_ids": worker_warehouse_ids(u) if is_worker else [],
+            "allowed_sections": u.get("worker_allowed_sections", []) if is_worker else [],
+            "write_permissions": u.get("worker_write_permissions", {}) if is_worker else {},
+            "can_edit_invoice_prices": u.get("worker_can_edit_invoice_prices", False) if is_worker else False,
             "admin_company_ids": admin_company_ids,
+            "owner_company_ids": owner_company_ids,
             "company_id": company_id, "company_ids": allowed_company_ids(u), "picture": u.get("picture", "")}
 
 def require_owner(user):
@@ -1909,7 +1965,9 @@ async def switch_company(body: SwitchCompanyIn, user=Depends(get_current_user)):
             )
         )
     )
-    if not has_company_owner_access and not is_delegated_company_admin(user):
+    if user.get("is_worker") or (
+        not has_company_owner_access and not is_delegated_company_admin(user)
+    ):
         raise HTTPException(403, "Company admin access required")
     selected = await authorize_company(user, body.company_id, user.get("_session_id"))
     session_id = user.get("_session_id") or new_id()
@@ -1947,7 +2005,7 @@ def require_price_list_owner(user):
 def require_invoice_delete_access(user):
     if user.get("_active_role") in ("owner", "admin"):
         return
-    if user.get("is_worker"):
+    if worker_restrictions_apply(user):
         permission = worker_write_permission(user, "/api/invoices/invoice-id", "DELETE")
         if (
             "invoices" in set(user.get("worker_allowed_sections") or [])
@@ -1956,11 +2014,20 @@ def require_invoice_delete_access(user):
             return
     raise HTTPException(403, "Invoice deletion requires administrator access or an enabled worker permission")
 
+
+def require_worker_management_owner(company_id, user):
+    if user.get("is_worker"):
+        raise HTTPException(403, "Only company owners can manage worker accounts")
+    if user.get("role") == "owner":
+        return
+    if (user.get("company_roles") or {}).get(company_id) != "owner":
+        raise HTTPException(403, "Only company owners can manage worker accounts")
+
+
 @api.get("/access/workers")
 async def get_workers(company_id: str = "", user=Depends(get_current_user)):
     company_id = company_id or user["_active_company_id"]
-    if company_role(user, company_id) not in ("owner", "admin"):
-        raise HTTPException(403, "Administrator access required for this company")
+    require_worker_management_owner(company_id, user)
     workers = await base_db.users.find(
         {"is_worker": True, f"company_roles.{company_id}": {"$in": ["user", "admin", "owner"]}},
         {"_id": 0, "password_hash": 0},
@@ -1983,8 +2050,7 @@ async def get_workers(company_id: str = "", user=Depends(get_current_user)):
     } for worker in workers]
 
 async def worker_access_details(worker_id, company_id, user):
-    if company_role(user, company_id) not in ("owner", "admin"):
-        raise HTTPException(403, "You can only manage workers in a company you administer")
+    require_worker_management_owner(company_id, user)
     worker = await base_db.users.find_one({
         "id": worker_id, "is_worker": True,
         f"company_roles.{company_id}": {"$in": ["user", "admin", "owner"]},
@@ -2107,8 +2173,7 @@ async def update_worker_password(
     worker_id: str, company_id: str, body: ProfilePasswordIn,
     user=Depends(get_current_user),
 ):
-    if company_role(user, company_id) not in ("owner", "admin"):
-        raise HTTPException(403, "You can only manage workers in a company you administer")
+    require_worker_management_owner(company_id, user)
     if len(body.password) < 8:
         raise HTTPException(400, "Password must contain at least 8 characters")
     worker = await base_db.users.find_one({
@@ -2151,8 +2216,7 @@ async def worker_access_link_info(token: str, response: Response):
 @api.post("/access/workers")
 async def create_worker(body: CreateWorkerIn, user=Depends(get_current_user)):
     company_id = body.company_id
-    if company_role(user, company_id) not in ("owner", "admin"):
-        raise HTTPException(403, "You can only add workers to a company you administer")
+    require_worker_management_owner(company_id, user)
     if not await base_db.companies.find_one({"id": company_id, "active": True}, {"_id": 0}):
         raise HTTPException(400, "Selected company is unavailable")
     username = body.username.strip()
@@ -2253,8 +2317,7 @@ async def update_worker_access(
     worker_id: str, body: WorkerAccessUpdateIn, company_id: str,
     user=Depends(get_current_user),
 ):
-    if company_role(user, company_id) not in ("owner", "admin"):
-        raise HTTPException(403, "You can only manage workers in a company you administer")
+    require_worker_management_owner(company_id, user)
     worker = await base_db.users.find_one({
         "id": worker_id, "is_worker": True, f"company_roles.{company_id}": {"$in": ["user", "admin"]},
     }, {"_id": 0})
@@ -2351,8 +2414,7 @@ async def update_worker_access(
 
 @api.delete("/access/workers/{worker_id}")
 async def remove_worker(worker_id: str, company_id: str, user=Depends(get_current_user)):
-    if company_role(user, company_id) not in ("owner", "admin"):
-        raise HTTPException(403, "You can only manage workers in a company you administer")
+    require_worker_management_owner(company_id, user)
     worker = await base_db.users.find_one({
         "id": worker_id, "is_worker": True, f"company_roles.{company_id}": {"$in": ["user", "admin"]},
     }, {"_id": 0})
@@ -2952,7 +3014,7 @@ class WarehouseCReportIn(BaseModel):
 def require_warehouse_report_access(user, warehouse_id):
     if user.get("_active_company_id") != MANUFACTURING_COMPANY_ID:
         raise HTTPException(403, "Warehouse reports are only available in IQFOAM Manufacturing")
-    if user.get("is_worker") and (
+    if worker_restrictions_apply(user) and (
         not {
             "warehouses",
             f"warehouse-{warehouse_id.lower()}",
@@ -3035,7 +3097,7 @@ def require_chemical_access(user):
         if company_id == MANUFACTURING_COMPANY_ID
         else {"chemical-usage-log", "chemicals-quantity"}
     )
-    if user.get("is_worker") and not company_sections.union({"warehouses"}).intersection(
+    if worker_restrictions_apply(user) and not company_sections.union({"warehouses"}).intersection(
         user.get("worker_allowed_sections", [])
     ):
         raise HTTPException(403, "This worker account cannot access the Chemical section")
@@ -3121,7 +3183,7 @@ def _convert_production_quantity(quantity, source_unit, target_unit):
 def _require_block_production_access(user):
     if user.get("_active_company_id") != MANUFACTURING_COMPANY_ID:
         raise HTTPException(403, "Block production recipes are only available in IQFOAM Manufacturing")
-    if user.get("is_worker") and (
+    if worker_restrictions_apply(user) and (
         not user.get("worker_is_supervisor")
         or not {"production", "warehouses"}.issubset(set(user.get("worker_allowed_sections") or []))
     ):
@@ -3157,7 +3219,7 @@ async def get_production_block_recipes(user=Depends(get_current_user)):
 
 
 def _require_recipe_manager(user):
-    if user.get("is_worker") or not is_company_admin(user):
+    if worker_restrictions_apply(user) or not is_company_admin(user):
         raise HTTPException(403, "Only a company administrator can manage saved recipes")
 
 
@@ -3875,7 +3937,7 @@ async def get_chemical_inventory(user=Depends(get_current_user)):
 @api.put("/warehouses/chemical/inventory/minimum")
 async def set_chemical_minimum_stock(body: ChemicalMinimumStockIn, user=Depends(get_current_user)):
     require_chemical_access(user)
-    if user.get("is_worker"):
+    if worker_restrictions_apply(user):
         if not user.get("worker_is_supervisor"):
             raise HTTPException(403, "Only a designated worker supervisor can change minimum stock levels")
     elif not is_company_admin(user):
@@ -4057,7 +4119,7 @@ def company_inventory_low_stock_threshold(item, reference_quantity=None):
 
 
 def require_company_inventory_access(user, read_only=False):
-    if user.get("is_worker") and (
+    if worker_restrictions_apply(user) and (
         not read_only or "stock" not in (user.get("worker_allowed_sections") or [])
     ):
         raise HTTPException(403, "This worker account cannot access Company Inventory")
@@ -4640,7 +4702,13 @@ async def customer_summary(
         listall("deliveries", {"customer_id": cid, "archived": {"$ne": True}}, ("created_at", -1)),
     )
     if express_only or invoice_type:
-        invoice_ids = [invoice["id"] for invoice in invs]
+        history_invoice_query = {"customer_id": cid}
+        if express_only or invoice_type == "express":
+            history_invoice_query["invoice_type"] = "express"
+        elif invoice_type == "standard":
+            history_invoice_query["invoice_type"] = {"$ne": "express"}
+        history_invoices = await listall("invoices", history_invoice_query, limit=10000)
+        invoice_ids = [invoice["id"] for invoice in history_invoices]
         payment_records = await listall(
             "payments",
             {"customer_id": cid, "invoice_id": {"$in": invoice_ids}},
@@ -4648,17 +4716,17 @@ async def customer_summary(
         ) if invoice_ids else []
     for i in invs:
         i["status"] = derive_status(i)
+        invoice_for_user(i, user)
     valid = [i for i in invs if i["status"] not in ("void", "draft")]
     other_balance_history = [
         p for p in await listall(
-            "payments", {"customer_id": cid, "other_balance_payment": True, "archived": {"$ne": True}},
+            "payments", {"customer_id": cid, "other_balance_payment": True},
             ("created_at", -1),
         )
         if bool(p.get("express")) == express_only
     ]
-    customer_payments = [p for p in payment_records
-                         if not p.get("archived") and not p.get("other_balance_payment")]
-    pays = [p for p in customer_payments if not p.get("reversed")]
+    customer_payments = [p for p in payment_records if not p.get("other_balance_payment")]
+    pays = [p for p in customer_payments if not p.get("reversed") and not p.get("archived")]
     other_balance_record = await db.customers.find_one({"id": cid}, {"_id": 0, "other_balance": 1})
     other_balance = (other_balance_record or {}).get("other_balance") or 0
     invoices_outstanding = dsum(i.get("outstanding", 0) for i in valid)
@@ -5035,6 +5103,16 @@ def invoice_changes(old, new):
         ch.append({"field": "items", "old": "; ".join(ol), "new": "; ".join(nl)})
     return ch
 
+
+INVOICE_AUDIT_FIELDS = (
+    "customer_id", "customer_name", "date", "due_date", "zone", "payment_terms",
+    "reference", "destination", "order_ids", "notes", "items", "discount",
+    "extra_charges", "delivery_fee", "made_by", "client_number",
+    "assigned_driver_id", "assigned_driver_name", "tax_enabled", "tax_rate",
+    "status", "total", "cod_amount_due", "cod_amount_collected", "opening_balance",
+)
+
+
 def invoice_numbering_year(invoice_date=None):
     year_match = re.match(r"^(\d{4})", str(invoice_date or ""))
     return int(year_match.group(1)) if year_match else local_now().year
@@ -5217,6 +5295,7 @@ async def get_invoices(
     for i in invs:
         i["status"] = derive_status(i)
         i["has_share_link"] = i["id"] in shared_invoice_ids
+        invoice_for_user(i, user)
     if page is not None:
         page_result["items"] = invs
         return page_result
@@ -5234,7 +5313,7 @@ async def get_invoice(iid: str, user=Depends(get_current_user)):
     inv["status"] = derive_status(inv)
     inv["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
     inv["has_share_link"] = bool(await db.invoice_share_links.find_one({"invoice_id": iid}, {"_id": 1}))
-    return inv
+    return invoice_for_user(inv, user)
 
 async def issue_invoice_share_link(iid, user):
     invoice = await db.invoices.find_one({"id": iid}, {"_id": 0})
@@ -5382,6 +5461,8 @@ async def create_invoice_action_authorization(iid, action, password, user, targe
     if inv.get("archived") or inv.get("status") == "void":
         raise HTTPException(400, "This invoice cannot be changed")
     if action in {"reverse_payment", "delete_payment"}:
+        if action == "delete_payment":
+            raise HTTPException(409, "Payment history is permanent and cannot be deleted")
         payment = await db.payments.find_one({
             "id": target_id, "invoice_id": iid, "archived": {"$ne": True},
             **({"reversed": {"$ne": True}} if action == "reverse_payment" else {}),
@@ -5444,9 +5525,9 @@ async def authorize_invoice_edit(iid: str, body: InvoiceEditAuthorizationIn, use
 
 @api.post("/invoices/{iid}/authorize-action")
 async def authorize_invoice_action(iid: str, body: InvoiceActionAuthorizationIn, user=Depends(get_current_user)):
-    if body.action not in {"void", "reverse_payment", "delete_payment"}:
+    if body.action not in {"void", "reverse_payment"}:
         raise HTTPException(400, "Unsupported supervisor action")
-    if body.action in {"reverse_payment", "delete_payment"} and not body.target_id:
+    if body.action == "reverse_payment" and not body.target_id:
         raise HTTPException(400, "A payment is required for this action")
     if body.action == "void" and body.target_id:
         raise HTTPException(400, "This action does not accept a target")
@@ -5495,10 +5576,6 @@ async def _archive_invoice(iid, user, reason="", restore_stock=False):
         "archived_at": now_iso(),
         "archived_by": user.get("id"),
     })
-    await db.payments.update_many(
-        {"invoice_id": iid, "archived": {"$ne": True}},
-        {"$set": {"archived": True, "archived_at": now_iso(), "archived_by": user.get("id")}},
-    )
     await log_audit("invoice", iid, "archived", user, reason=reason, before=inv)
     return True
 
@@ -5517,10 +5594,11 @@ async def permanently_delete_invoice(iid: str, user=Depends(get_current_user)):
         raise HTTPException(404, "Invoice not found")
     if not inv.get("archived"):
         raise HTTPException(409, "Archive the invoice before permanently deleting it")
+    if await db.payments.count_documents({"invoice_id": iid}):
+        raise HTTPException(409, "Invoices with payment history cannot be permanently deleted")
     await log_audit("invoice", iid, "permanently_deleted", user,
                     before={"number": inv.get("number"), "customer_name": inv.get("customer_name"),
                             "total": inv.get("total"), "status": derive_status(inv)})
-    await db.payments.delete_many({"invoice_id": iid})
     await db.invoice_share_links.delete_one({"invoice_id": iid})
     await db.invoices.delete_one({"id": iid, "archived": True})
     return {"ok": True, "deleted": True}
@@ -5539,6 +5617,8 @@ async def bulk_permanently_delete_invoices(body: BulkPermanentDeleteIn, user=Dep
             raise HTTPException(404, "Invoice not found")
         if not invoice.get("archived"):
             raise HTTPException(409, "Archive every selected invoice before permanently deleting them")
+        if await db.payments.count_documents({"invoice_id": iid}):
+            raise HTTPException(409, "Invoices with payment history cannot be permanently deleted")
         invoices.append(invoice)
 
     for invoice in invoices:
@@ -5552,7 +5632,6 @@ async def bulk_permanently_delete_invoices(body: BulkPermanentDeleteIn, user=Dep
                 "status": derive_status(invoice),
             },
         )
-        await db.payments.delete_many({"invoice_id": iid})
         await db.invoice_share_links.delete_one({"invoice_id": iid})
         await db.invoices.delete_one({"id": iid, "archived": True})
     return {"deleted": len(invoices)}
@@ -5624,7 +5703,7 @@ async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
     submitted_client_number = (body.client_number or "").strip()
     can_edit_client_number = bool(
         user and (
-            not user.get("is_worker")
+            not worker_restrictions_apply(user)
             or "customers" in (user.get("worker_allowed_sections") or [])
         )
     )
@@ -5679,12 +5758,14 @@ def invoice_item_price_key(item, zone):
     )
 
 async def validate_invoice_item_price_edits(body, existing, user):
-    if user.get("is_worker"):
+    if user.get("role") == "owner" or user.get("_active_role") in ("owner", "admin"):
+        return
+    if worker_restrictions_apply(user):
         if user.get("worker_can_edit_invoice_prices"):
             return
-    elif user.get("_active_role") != "admin":
+    else:
         return
-    restricted_role = "Workers" if user.get("is_worker") else "Administrators"
+    restricted_role = "Workers"
     zone = 1 if uses_unified_price_list(active_company_id.get()) else body.zone
     previous_items = {}
     for item in (existing or {}).get("items", []):
@@ -5730,7 +5811,7 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
         if existing_submission:
             if existing_submission.get("submission_payload_hash") != submission_hash:
                 raise HTTPException(409, "This invoice submission key was already used for different invoice data")
-            return existing_submission
+            return invoice_for_user(existing_submission, user)
         inv["idempotency_key"] = body.idempotency_key
         inv["submission_payload_hash"] = submission_hash
     inv["previous_invoices_pending"] = await previous_invoice_balances(
@@ -5763,11 +5844,15 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
                 raise
             if existing_submission.get("submission_payload_hash") != invoice_submission_hash(body):
                 raise HTTPException(409, "This invoice submission key was already used for different invoice data") from error
-            return existing_submission
+            return invoice_for_user(existing_submission, user)
         await emit_workflow_event("invoice.created", record)
         if record.get("status") != "draft":
             await emit_workflow_event("invoice.issued", record)
-        return record
+        await log_audit(
+            "invoice", record["id"], "invoice_created", user,
+            after={field: record.get(field) for field in INVOICE_AUDIT_FIELDS if field in record},
+        )
+        return invoice_for_user(record, user)
     deductions = await invoice_stock_deductions(inv)
     async with StockLock([item["stock_id"] for item in deductions]):
         await validate_invoice_stock(deductions, body.allow_negative_stock)
@@ -5783,13 +5868,17 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
                 raise
             if existing_submission.get("submission_payload_hash") != invoice_submission_hash(body):
                 raise HTTPException(409, "This invoice submission key was already used for different invoice data") from error
-            return existing_submission
+            return invoice_for_user(existing_submission, user)
         await post_invoice_stock_deductions(rec, deductions, user)
         rec = await update_doc("invoices", rec["id"], {"stock_deducted": True})
     await emit_workflow_event("invoice.created", rec)
     if rec.get("status") != "draft":
         await emit_workflow_event("invoice.issued", rec)
-    return rec
+    await log_audit(
+        "invoice", rec["id"], "invoice_created", user,
+        after={field: rec.get(field) for field in INVOICE_AUDIT_FIELDS if field in rec},
+    )
+    return invoice_for_user(rec, user)
 
 @api.put("/invoices/{iid}")
 async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_user)):
@@ -5859,16 +5948,97 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
     if "opening_balance" in existing and body.opening_balance is False:
         await db.invoices.update_one({"id": iid}, {"$unset": {"opening_balance": ""}})
         rec.pop("opening_balance", None)
-    if existing.get("number"):
-        await log_audit("invoice", iid, "issued_invoice_edited", user,
-                        before={"items": existing.get("items"), "total": existing.get("total")},
-                        after={"items": rec.get("items"), "total": rec.get("total")}, reason=reason)
+    await log_audit(
+        "invoice", iid, "invoice_edited", user,
+        before={field: existing.get(field) for field in INVOICE_AUDIT_FIELDS if field in existing},
+        after={field: rec.get(field) for field in INVOICE_AUDIT_FIELDS if field in rec},
+        reason=reason,
+    )
     await emit_workflow_event("invoice.updated", rec)
     if existing.get("status") == "draft" and rec.get("status") != "draft":
         await emit_workflow_event("invoice.issued", rec)
     rec["status"] = derive_status(rec)
     rec["payment_records"] = await listall("payments", {"invoice_id": iid}, ("created_at", -1))
-    return rec
+    return invoice_for_user(rec, user)
+
+
+@api.get("/invoices/{iid}/audit")
+async def get_invoice_audit(iid: str, user=Depends(get_current_user)):
+    require_profile_owner(user)
+    if not await db.invoices.find_one({"id": iid}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Invoice not found")
+    history = await db.audit_log.find(
+        {
+            "entity": "invoice",
+            "entity_id": iid,
+            "action": {"$in": ["invoice_created", "invoice_edited", "invoice_issued", "invoice_voided"]},
+        },
+        {"_id": 0},
+    ).sort("at", -1).to_list(500)
+    needs_actor_lookup = [
+        entry for entry in history
+        if entry.get("user") != "system"
+        and (
+            not entry.get("user_name")
+            or "@" in str(entry.get("user_name") or "")
+            or "@" in str(entry.get("user") or "")
+        )
+    ]
+    if needs_actor_lookup:
+        user_ids = list({entry.get("user_id") for entry in needs_actor_lookup if entry.get("user_id")})
+        emails = list({
+            identity
+            for entry in needs_actor_lookup
+            for identity in (entry.get("user"), entry.get("user_name"))
+            if identity and "@" in str(identity)
+        })
+        usernames = list({
+            identity
+            for entry in needs_actor_lookup
+            for identity in (entry.get("user"), entry.get("user_name"))
+            if identity and "@" not in str(identity) and identity != "system"
+        })
+        selectors = []
+        if user_ids:
+            selectors.append({"id": {"$in": user_ids}})
+        if emails:
+            selectors.append({"email": {"$in": emails}})
+        if usernames:
+            selectors.append({"username": {"$in": usernames}})
+        if selectors:
+            actors = await base_db.users.find(
+                {"$or": selectors}, {"_id": 0, "id": 1, "email": 1, "name": 1, "username": 1},
+            ).to_list(None)
+            actors_by_id = {actor["id"]: actor for actor in actors if actor.get("id")}
+            actors_by_email = {
+                actor["email"].casefold(): actor
+                for actor in actors if actor.get("email")
+            }
+            actors_by_username = {
+                actor["username"].casefold(): actor
+                for actor in actors if actor.get("username")
+            }
+            for entry in needs_actor_lookup:
+                identities = (entry.get("user"), entry.get("user_name"))
+                actor = actors_by_id.get(entry.get("user_id"))
+                if not actor:
+                    actor = next(
+                        (
+                            actors_by_email.get(str(identity).casefold())
+                            or actors_by_username.get(str(identity).casefold())
+                            for identity in identities if identity
+                        ),
+                        None,
+                    )
+                if actor:
+                    entry["user_name"] = actor.get("name") or actor.get("username") or actor.get("email")
+    for entry in history:
+        if not entry.get("user_name"):
+            entry["user_name"] = (
+                "System" if entry.get("user") == "system"
+                else entry.get("user") or "Historical actor not recorded"
+            )
+    return history
 
 @api.post("/invoices/{iid}/issue")
 async def issue_invoice(iid: str, body: InvoiceIssueIn = InvoiceIssueIn(), user=Depends(get_current_user)):
@@ -5907,7 +6077,12 @@ async def issue_invoice(iid: str, body: InvoiceIssueIn = InvoiceIssueIn(), user=
             await post_invoice_stock_deductions(rec, deductions, user)
             rec = await update_doc("invoices", iid, {"stock_deducted": True})
     await emit_workflow_event("invoice.issued", rec)
-    return rec
+    await log_audit(
+        "invoice", iid, "invoice_issued", user,
+        before={field: inv.get(field) for field in INVOICE_AUDIT_FIELDS if field in inv},
+        after={field: rec.get(field) for field in INVOICE_AUDIT_FIELDS if field in rec},
+    )
+    return invoice_for_user(rec, user)
 
 class ReasonIn(BaseModel):
     reason: str
@@ -5928,9 +6103,14 @@ async def void_invoice(iid: str, body: ReasonIn, user=Depends(get_current_user))
     audit = inv.get("audit", [])
     audit.append({"action": "voided", "reason": body.reason, "at": now_iso(), "by": user["email"]})
     rec = await update_doc("invoices", iid, {"status": "void", "void_reason": body.reason, "audit": audit})
-    await log_audit("invoice", iid, "voided", user, before={"status": inv.get("status")}, after={"status": "void"}, reason=body.reason)
+    await log_audit(
+        "invoice", iid, "invoice_voided", user,
+        before={"status": inv.get("status"), "void_reason": inv.get("void_reason")},
+        after={"status": "void", "void_reason": body.reason},
+        reason=body.reason,
+    )
     await emit_workflow_event("invoice.voided", rec)
-    return rec
+    return invoice_for_user(rec, user)
 
 # ---------------- Payments ----------------
 class PaymentIn(BaseModel):
@@ -6031,76 +6211,80 @@ async def reverse_payment(pid: str, body: ReasonIn, user=Depends(get_current_use
 
 @api.delete("/payments/{pid}")
 async def delete_invoice_payment(pid: str, body: ReasonIn, user=Depends(get_current_user)):
-    if not body.reason.strip():
-        raise HTTPException(400, "A reason is required to delete a payment")
-    payment = await db.payments.find_one({
-        "id": pid, "other_balance_payment": {"$ne": True}, "archived": {"$ne": True},
-    }, {"_id": 0})
-    if not payment:
-        raise HTTPException(404, "Invoice payment not found")
-    await consume_invoice_action_authorization(
-        body.supervisor_authorization, payment["invoice_id"], "delete_payment", user, pid,
-    )
-    deleted = await db.payments.find_one_and_delete({
-        "id": pid, "invoice_id": payment["invoice_id"], "other_balance_payment": {"$ne": True},
-        "archived": {"$ne": True},
-    }, projection={"_id": 0})
-    if not deleted:
-        raise HTTPException(404, "Invoice payment not found")
-    await recalc_invoice_payments(payment["invoice_id"])
-    await log_audit("payment", pid, "deleted", user, before=deleted, after=None, reason=body.reason)
-    return {"ok": True, "deleted": True}
+    raise HTTPException(409, "Payment history is permanent and cannot be deleted")
 
 @api.delete("/payments/{pid}/other-balance")
 async def delete_other_balance_payment(pid: str, user=Depends(get_current_user)):
-    payment = await db.payments.find_one({"id": pid, "other_balance_payment": True}, {"_id": 0})
-    has_payment_record = payment is not None
-    if not payment:
-        customer = await db.customers.find_one(
-            {"other_balance_payments.payment_id": pid}, {"_id": 0},
-        )
-        history = (customer or {}).get("other_balance_payments") or []
-        entry = next((item for item in history if item.get("payment_id") == pid), None)
-        if not customer or not entry:
-            raise HTTPException(404, "Other balance payment not found")
-        payment = {**entry, "id": pid, "customer_id": customer["id"]}
-    await db.customers.update_one(
-        {"id": payment["customer_id"]}, {"$pull": {"other_balance_payments": {"payment_id": pid}}},
-    )
-    if has_payment_record:
-        await db.payments.delete_one({"id": pid})
-    await log_audit("payment", pid, "deleted", user, before=payment, after=None)
-    return {"ok": True, "deleted": True}
+    raise HTTPException(409, "Payment history is permanent and cannot be deleted")
 
 @api.delete("/customers/{cid}/other-balance-history/{index}")
 async def delete_legacy_other_balance_history(cid: str, index: int, user=Depends(get_current_user)):
-    customer = await db.customers.find_one({"id": cid}, {"_id": 0})
-    if not customer:
-        raise HTTPException(404, "Customer not found")
-    history = customer.get("other_balance_payments") or []
-    if index < 0 or index >= len(history):
-        raise HTTPException(404, "Other balance payment history entry not found")
-    entry = history[index]
-    if entry.get("id") or entry.get("payment_id"):
-        raise HTTPException(409, "Payment history changed; refresh and try again")
-
-    updated_history = history[:index] + history[index + 1:]
-    result = await db.customers.update_one(
-        {"id": cid, "other_balance_payments": history},
-        {"$set": {"other_balance_payments": updated_history}},
-    )
-    if not result.matched_count:
-        raise HTTPException(409, "Payment history changed; refresh and try again")
-    await log_audit(
-        "customer", cid, "other_balance_payment_history_deleted", user,
-        before={"entry": entry}, after={"other_balance_payments": updated_history},
-    )
-    return {"ok": True, "deleted": True}
+    raise HTTPException(409, "Payment history is permanent and cannot be deleted")
 
 @api.get("/payments")
 async def get_payments(include_archived: bool = False, user=Depends(get_current_user)):
-    flt = {} if include_archived else {"archived": {"$ne": True}}
-    return await listall("payments", flt, sort=("created_at", -1))
+    return await listall("payments", sort=("created_at", -1))
+
+
+@api.get("/payments/summary")
+async def get_payments_summary(payment_date: str, user=Depends(get_current_user)):
+    try:
+        selected_date = date.fromisoformat(payment_date).isoformat()
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Payment date must be a valid YYYY-MM-DD date")
+    if selected_date != payment_date:
+        raise HTTPException(422, "Payment date must use YYYY-MM-DD format")
+
+    payments = await daily_report_records(
+        "payments",
+        selected_date,
+        {"archived": {"$ne": True}, "reversed": {"$ne": True}},
+        "created_at",
+    )
+    other_balance_rows = [
+        {
+            "id": payment.get("id"), "invoice_id": None, "date": payment.get("date"),
+            "amount": r2(payment.get("amount", 0)), "method": payment.get("method") or "",
+            "receiving_on": payment.get("receiving_on") or "", "reference": payment.get("reference") or "",
+            "notes": payment.get("notes") or "", "invoice_number": "Other balance",
+            "customer_name": payment.get("customer_name") or "",
+        }
+        for payment in payments
+        if payment.get("other_balance_payment") and not payment.get("express")
+    ]
+    invoice_ids = list({
+        payment.get("invoice_id")
+        for payment in payments
+        if payment.get("invoice_id") and not payment.get("other_balance_payment")
+    })
+    if not invoice_ids:
+        return other_balance_rows
+    invoices = await db.invoices.find(
+        {
+            "id": {"$in": invoice_ids},
+            "invoice_type": {"$ne": "express"},
+            "archived": {"$ne": True},
+        },
+        {"_id": 0, "id": 1, "number": 1, "customer_name": 1},
+    ).to_list(None)
+    invoice_by_id = {invoice["id"]: invoice for invoice in invoices}
+    return other_balance_rows + [
+        {
+            "id": payment.get("id"),
+            "invoice_id": payment.get("invoice_id"),
+            "date": payment.get("date"),
+            "amount": r2(payment.get("amount", 0)),
+            "method": payment.get("method") or "",
+            "receiving_on": payment.get("receiving_on") or "",
+            "reference": payment.get("reference") or "",
+            "notes": payment.get("notes") or "",
+            "invoice_number": payment.get("invoice_number") or invoice_by_id[payment["invoice_id"]].get("number") or "",
+            "customer_name": payment.get("customer_name") or invoice_by_id[payment["invoice_id"]].get("customer_name") or "",
+        }
+        for payment in payments
+        if payment.get("invoice_id") in invoice_by_id
+    ]
+
 
 @api.get("/express-payments")
 async def get_express_payments(payment_date: str, user=Depends(get_current_user)):
@@ -6795,9 +6979,27 @@ def apply_stock_movements(stock, movements):
     s["last_movement"] = max([m["created_at"] for m in movs], default=None)
     return s
 
+STOCK_COST_FIELDS = {
+    "unit_cost", "purchase_cost", "cost_status", "total_cost", "cost_per_unit",
+    "material_cost", "stock_value",
+}
+
+
+def redact_stock_costs(value):
+    if isinstance(value, dict):
+        return {
+            key: redact_stock_costs(item)
+            for key, item in value.items()
+            if key not in STOCK_COST_FIELDS
+        }
+    if isinstance(value, list):
+        return [redact_stock_costs(item) for item in value]
+    return value
+
+
 def stock_for_user(stock, user):
-    if user.get("is_worker"):
-        stock.pop("unit_cost", None)
+    if not can_view_stock_costs(user):
+        return redact_stock_costs(stock)
     return stock
 
 async def post_movement(stock, mtype, qty, user, reason="", reference="", notes="", dedupe_key=None, direction=None, allow_negative=False, extra=None, session=None):
@@ -7173,8 +7375,7 @@ async def get_stock(user=Depends(get_current_user)):
     movements_by_stock = await stock_movements_for_stock_ids([item["id"] for item in items])
     for s in items:
         apply_stock_movements(s, movements_by_stock.get(s["id"], []))
-        stock_for_user(s, user)
-    return items
+    return [stock_for_user(item, user) for item in items]
 
 
 @api.post("/stock")
@@ -7189,9 +7390,8 @@ async def add_stock(body: StockIn, user=Depends(get_current_user)):
     data["size"] = data["size"].strip()
     if not data["product"] or not data["size"]:
         raise HTTPException(400, "Product and size are required")
-    if user.get("is_worker"):
+    if not can_view_stock_costs(user):
         data.pop("unit_cost", None)
-        selling_price = None
     for item in await listall("stock"):
         if (str(item.get("product", "")).strip().casefold() == data["product"].casefold()
                 and str(item.get("size", "")).strip().casefold() == data["size"].casefold()):
@@ -7273,7 +7473,7 @@ async def edit_stock(sid: str, body: StockIn, user=Depends(get_current_user)):
     }, {"_id": 0})
     if clash and clash.get("id") != sid:
         raise HTTPException(400, "This product and size already exist in stock")
-    if user.get("is_worker"):
+    if not can_view_stock_costs(user):
         d.pop("unit_cost", None)
     if r2(d["opening"]) != r2(before.get("opening", 0)) and await db.stock_movements.count_documents({"stock_id": sid}):
         raise HTTPException(400, "Opening balance cannot change after movements exist. Use a manual adjustment instead")
@@ -7327,7 +7527,8 @@ async def reverse_movement(mid: str, body: ReasonIn, user=Depends(get_current_us
 
 @api.get("/stock/movements")
 async def get_movements(user=Depends(get_current_user)):
-    return await listall("stock_movements", sort=("created_at", -1))
+    movements = await listall("stock_movements", sort=("created_at", -1))
+    return movements if can_view_stock_costs(user) else redact_stock_costs(movements)
 
 # ---------------- Production ----------------
 PROD_STATUSES = ["Planned", "In Production", "Resting", "Ready for Cutting", "Completed", "Cancelled"]
@@ -7860,6 +8061,40 @@ class AttendanceIn(BaseModel):
     end_time: Optional[str] = None
     notes: Optional[str] = ""
 
+
+async def _save_employee_day_record(collection_name, employee_id, work_date, data):
+    collection = db[collection_name]
+    key = {"employee_id": employee_id, "date": work_date}
+    timestamp = now_iso()
+    fields = {
+        key: value
+        for key, value in data.items()
+        if key not in ("id", "_id", "created_at", "updated_at")
+    }
+    fields["updated_at"] = timestamp
+    update = {
+        "$set": fields,
+        "$setOnInsert": {"id": new_id(), "created_at": timestamp},
+    }
+    try:
+        previous = await collection.find_one_and_update(
+            key, update, upsert=True, return_document=ReturnDocument.BEFORE,
+            projection={"_id": 0},
+        )
+    except DuplicateKeyError as error:
+        previous = await collection.find_one_and_update(
+            key, {"$set": fields}, upsert=False,
+            return_document=ReturnDocument.BEFORE, projection={"_id": 0},
+        )
+        if previous is None:
+            raise error
+
+    saved = await collection.find_one(key, {"_id": 0})
+    if saved is None:
+        raise RuntimeError(f"Could not read saved {collection_name} record")
+    return previous, clean(saved)
+
+
 @api.get("/attendance")
 async def get_attendance(date_filter: Optional[str] = Query(None, alias="date"), user=Depends(get_current_user)):
     if date_filter:
@@ -7905,10 +8140,9 @@ async def add_attendance(body: AttendanceIn, user=Depends(get_current_user)):
             raise HTTPException(400, "Start and end times must be different")
     data["employee_name"] = emp["name"]
     data["department"] = emp.get("department", "")
-    if existing:
-        record = await update_doc("attendance", existing["id"], data)
-    else:
-        record = await insert("attendance", data)
+    _, record = await _save_employee_day_record(
+        "attendance", body.employee_id, body.date, data,
+    )
     await emit_workflow_event("attendance.recorded", record)
     return record
 
@@ -7975,7 +8209,6 @@ async def save_piece_production(body: PieceProductionIn, user=Depends(get_curren
     if not is_piece_paid_employee(employee):
         raise HTTPException(400, "Piece production is only available for piece-paid employees")
     data = {**body.model_dump(), "employee_name": employee.get("name", "")}
-    existing = await db.piece_production.find_one({"employee_id": body.employee_id, "date": body.date}, {"_id": 0})
     work_date = date.fromisoformat(body.date)
     previous_calculation = await piecework_week_snapshot(body.employee_id, work_date, employee.get("name", ""))
     audit_reason = (
@@ -7983,26 +8216,25 @@ async def save_piece_production(body: PieceProductionIn, user=Depends(get_curren
         if work_date < local_today()
         else "Production change records the weekly calculation before and after the change."
     )
+    existing, saved = await _save_employee_day_record(
+        "piece_production", body.employee_id, body.date, data,
+    )
+    next_calculation = await piecework_week_snapshot(body.employee_id, work_date, employee.get("name", ""))
     if existing:
-        updated = await update_doc("piece_production", existing["id"], data)
-        next_calculation = await piecework_week_snapshot(body.employee_id, work_date, employee.get("name", ""))
         await log_audit(
             "piece_production", existing["id"], "updated_weekly_payroll_recalculated", user,
             before={"record": existing, "weekly_calculation": previous_calculation},
-            after={"record": updated, "weekly_calculation": next_calculation},
+            after={"record": saved, "weekly_calculation": next_calculation},
             reason=audit_reason,
         )
-        await emit_workflow_event("piece_production.saved", updated)
-        return updated
-    created = await insert("piece_production", data)
-    next_calculation = await piecework_week_snapshot(body.employee_id, work_date, employee.get("name", ""))
-    await log_audit(
-        "piece_production", created["id"], "created_weekly_payroll_calculated", user,
-        before={"weekly_calculation": previous_calculation},
-        after={"record": created, "weekly_calculation": next_calculation},
-    )
-    await emit_workflow_event("piece_production.saved", created)
-    return created
+    else:
+        await log_audit(
+            "piece_production", saved["id"], "created_weekly_payroll_calculated", user,
+            before={"weekly_calculation": previous_calculation},
+            after={"record": saved, "weekly_calculation": next_calculation},
+        )
+    await emit_workflow_event("piece_production.saved", saved)
+    return saved
 
 
 @api.delete("/piece-production/{record_id}")
@@ -8180,6 +8412,33 @@ async def salary_report(start_date, end_date):
             "cut": cut, "net_salary": r2(gross - cut),
         })
     return {"start_date": start_date, "end_date": end_date, "employees": result}
+
+
+async def salary_cost_for_period(start_date, end_date):
+    period_start = date.fromisoformat(str(start_date)[:10])
+    period_end = date.fromisoformat(str(end_date)[:10])
+    report = await salary_report(period_start.isoformat(), period_end.isoformat())
+    total = Decimal("0")
+    for employee in report["employees"]:
+        if employee.get("pay_frequency") != "monthly_fixed" or employee.get("monthly_salary") is None:
+            total += D(employee.get("gross_salary", 0))
+            continue
+        month_start = period_start.replace(day=1)
+        while month_start <= period_end:
+            month_end = month_start.replace(
+                day=calendar.monthrange(month_start.year, month_start.month)[1],
+            )
+            overlap_start = max(period_start, month_start)
+            overlap_end = min(period_end, month_end)
+            if overlap_start <= overlap_end:
+                total += (
+                    D(employee["monthly_salary"])
+                    * D((overlap_end - overlap_start).days + 1)
+                    / D((month_end - month_start).days + 1)
+                )
+            month_start = (month_end + timedelta(days=1)).replace(day=1)
+    return r2(total)
+
 
 @api.get("/salaries")
 async def get_salaries(start_date: str, end_date: str, user=Depends(get_current_user)):
@@ -8666,7 +8925,7 @@ class IntercompanyCreateInvoiceIn(BaseModel):
 def require_intercompany_company_access(user, company_id, *, administrator=False):
     if company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
         raise HTTPException(404, "Company not found")
-    if user.get("is_worker"):
+    if worker_restrictions_apply(user):
         if company_id != user.get("_active_company_id") or not {"orders", "invoices"}.intersection(
             user.get("worker_allowed_sections") or []
         ):
@@ -9401,6 +9660,7 @@ async def get_intercompany_request_invoice(request_id: str, user=Depends(get_cur
     )
     if not invoice:
         raise HTTPException(404, "Linked invoice not found")
+    invoice.pop("audit", None)
     payments = await supplier_db.payments.find(
         {
             "invoice_id": invoice["id"],
@@ -9945,8 +10205,26 @@ def backup_runtime_status():
         "storage_provider": "S3-compatible object storage",
         "schedule": "Daily at 02:00 Africa/Johannesburg",
         "retention": "Daily snapshots for 30 days; monthly snapshots for 12 months",
-        "scope": "All three company databases; uploaded files are not included",
+        "scope": "Invoices, payments and customers of all three companies (invoice PDFs are generated from this data)",
     }
+
+def backup_schedule_info():
+    now = datetime.now(TZ)
+    next_run = now.replace(hour=2, minute=0, second=0, microsecond=0)
+    if next_run <= now:
+        next_run += timedelta(days=1)
+    return next_run.isoformat()
+
+async def backup_history_summary():
+    async def last(status):
+        return await base_db.backup_operations.find_one({"status": status}, {"_id": 0}, sort=[("created_at", -1)])
+    return {"last_success": await last("success"), "last_failure": await last("failed"), "next_scheduled": backup_schedule_info()}
+
+async def record_backup_operation(entry):
+    try:
+        await base_db.backup_operations.insert_one({"created_at": datetime.now(timezone.utc).isoformat(), **entry})
+    except Exception:
+        logging.exception("Could not record backup history")
 
 @api.get("/backups/status")
 async def get_backup_status(user=Depends(get_current_user)):
@@ -9956,15 +10234,30 @@ async def get_backup_status(user=Depends(get_current_user)):
 @api.get("/backups")
 async def get_backups(user=Depends(get_current_user)):
     require_primary_owner(user)
-    status = backup_runtime_status()
+    status = {**backup_runtime_status(), **(await backup_history_summary())}
     if not status["configured"] or not status["tools_available"]:
         return {"snapshots": [], "status": status}
     try:
-        snapshots = await list_snapshots(backup_configuration(), local_today())
-        return {"snapshots": snapshots, "status": status}
+        listing = await list_snapshots(backup_configuration(), local_today())
+        status["r2_connected"] = True
+        return {"snapshots": listing["snapshots"], "storage_usage_bytes": listing["storage_usage_bytes"],
+                "counts": listing["counts"], "status": status}
     except Exception:
         logging.exception("Could not list external backups")
         raise HTTPException(502, "Could not read the backup archive")
+
+@api.post("/backups/verify")
+async def verify_backup(body: BackupRestoreIn, user=Depends(get_current_user)):
+    require_primary_owner(user)
+    status = backup_runtime_status()
+    if not status["configured"]:
+        raise HTTPException(503, "Configure the external backup archive first")
+    try:
+        result = await verify_snapshot_object(configuration=backup_configuration(), snapshot_key_value=body.key)
+        return {"key": body.key, "verification_status": "verified", **{k: v for k, v in (result or {}).items() if k in ("size_bytes", "sha256", "database_count", "file_count")}}
+    except Exception:
+        logging.exception("Backup verification failed")
+        raise HTTPException(502, "Backup verification FAILED: the archive is missing, damaged or incomplete")
 
 @api.post("/backups")
 async def create_manual_backup(user=Depends(get_current_user)):
@@ -9986,9 +10279,13 @@ async def create_manual_backup(user=Depends(get_current_user)):
         except Exception:
             logging.exception("Backup succeeded but expired-backup cleanup failed")
             result["retention_cleanup_ok"] = False
+        await record_backup_operation({"kind": "manual", "status": "success", "key": result.get("key"),
+                                       "size_bytes": result.get("size_bytes"), "verification_status": result.get("verification_status")})
         return result
     except Exception:
         logging.exception("Manual backup failed")
+        await record_backup_operation({"kind": "manual", "status": "failed", "verification_status": "failed",
+                                       "error": "Manual backup failed; inspect backend logs."})
         raise HTTPException(502, "Backup failed; no success was reported. Check server logs and archive configuration")
 
 @api.post("/backups/restore")
@@ -10022,7 +10319,7 @@ async def authorize_supervisor_company_change(
     body: SupervisorWriteAuthorizationIn,
     user=Depends(get_current_user),
 ):
-    if user.get("is_worker"):
+    if worker_restrictions_apply(user):
         action = body.action
         generic_action = None
         if isinstance(action, str) and ":" in action:
@@ -10308,7 +10605,7 @@ async def dashboard(
         if vehicle_is_free(vehicle, unavailable_vehicle_ids)
     ]
     fleet_alerts_visible = (
-        not user.get("is_worker")
+        not worker_restrictions_apply(user)
         or "fleet" in (user.get("worker_allowed_sections") or [])
     )
     licence_alerts = (
@@ -10622,6 +10919,7 @@ class PurchaseOrderIn(BaseModel):
 class GRVLineIn(BaseModel):
     stock_id: Optional[str] = ""
     product_code: Optional[str] = ""
+    new_product: bool = False
     product: str = ""
     size: Optional[str] = ""
     purchase_order_item_index: Optional[int] = None
@@ -10634,9 +10932,18 @@ class GRVLineIn(BaseModel):
     damaged_quantity: float = 0
     unit_cost: float = 0
     total_value: float = 0
+    sale_price_zone_1: Optional[float] = None
+    sale_price_zone_2: Optional[float] = None
     category: Optional[str] = ""
     unit: Optional[str] = ""
     container_type: Optional[str] = ""
+
+    @field_validator("sale_price_zone_1", "sale_price_zone_2")
+    @classmethod
+    def sale_prices_not_negative(cls, value):
+        if value is not None and (not math.isfinite(value) or value < 0):
+            raise ValueError("Sale prices must be finite and non-negative")
+        return value
 
 class GRVIn(BaseModel):
     purpose: str = "selling"
@@ -11038,6 +11345,80 @@ def _grv_purpose(body):
         raise HTTPException(400, "GRV type must be selling or raw_material")
     return purpose
 
+def _grv_sale_price_updates(items, user):
+    company_id = active_company_id.get() or user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    is_superiqfoam = company_id == DEFAULT_COMPANY_ID
+    updates = {}
+    for line in items:
+        if not is_superiqfoam and line.get("sale_price_zone_2") is not None:
+            raise HTTPException(400, "Zone 2 sale price is available only for SUPERIQFOAM")
+        if float(line.get("accepted_quantity", 0) or 0) <= 0:
+            continue
+        zone_prices = [(1, line.get("sale_price_zone_1"))]
+        if is_superiqfoam:
+            zone_prices.append((2, line.get("sale_price_zone_2")))
+        if line.get("new_product") and any(value is None for _, value in zone_prices):
+            raise HTTPException(400, "Enter a sale price for every zone before adding a new product")
+
+        for zone, sale_price in zone_prices:
+            if sale_price is None:
+                continue
+            category = price_category(zone, line.get("product"))
+            size = str(line.get("size") or "").strip()
+            if not category or not size:
+                raise HTTPException(400, "Product name and size are required to update the sale price list")
+            key = (zone, category, canonical_price_size(size))
+            price_value = r2(sale_price)
+            if key in updates and updates[key]["price"] != price_value:
+                raise HTTPException(400, "A GRV cannot set different sale prices for the same product and zone")
+            updates[key] = {
+                "zone": zone,
+                "category": category,
+                "size": size,
+                "price": price_value,
+            }
+
+    return list(updates.values())
+
+async def _apply_grv_sale_prices(price_updates, user, grv):
+    if not price_updates:
+        return
+
+    prices = await listall("prices")
+    for update in price_updates:
+        aliases = {alias.casefold() for alias in price_category_aliases(update["category"])}
+        size = canonical_price_size(update["size"])
+        existing = next((
+            price for price in prices
+            if int(price.get("zone", 0)) == update["zone"]
+            and str(price.get("category") or "").strip().casefold() in aliases
+            and canonical_price_size(price.get("size")) == size
+        ), None)
+        values = {
+            "price": update["price"],
+            "active": True,
+            "confirmed": True,
+            "archived": False,
+            "archived_at": None,
+            "archived_by": None,
+        }
+        if existing:
+            if all(existing.get(key) == value for key, value in values.items()):
+                continue
+            changed = await update_doc("prices", existing["id"], values)
+            await log_audit(
+                "price", existing["id"], "updated_from_grv", user,
+                before=existing, after=changed, reason=grv.get("grv_number", ""),
+            )
+            prices[prices.index(existing)] = changed
+        else:
+            created = await insert("prices", {**update, **values})
+            await log_audit(
+                "price", created["id"], "created_from_grv", user,
+                after=created, reason=grv.get("grv_number", ""),
+            )
+            prices.append(created)
+
 def _raw_grv_items(requested_items, is_chemical):
     if not requested_items:
         raise HTTPException(400, "Add at least one product to the GRV")
@@ -11180,11 +11561,14 @@ async def _grv_items_from_request(requested_items, purchase_order=None):
         raise HTTPException(400, "Add at least one product to the GRV")
 
     result = []
+    new_product_keys = set()
     for line in requested_items:
         data = line.model_dump() if isinstance(line, GRVLineIn) else dict(line)
         po_index = data.get("purchase_order_item_index")
         po_item = None
         if purchase_order:
+            if data.get("new_product"):
+                raise HTTPException(400, "New products cannot be added to a purchase-order GRV")
             if po_index is None or not 0 <= po_index < len(purchase_order.get("items", [])):
                 raise HTTPException(400, "Each GRV line must identify its purchase-order line")
             po_item = purchase_order["items"][po_index]
@@ -11200,26 +11584,46 @@ async def _grv_items_from_request(requested_items, purchase_order=None):
             ordered_quantity = po_item["quantity"]
             previously_received = po_item.get("received_quantity", 0)
         else:
+            is_new_product = bool(data.get("new_product"))
+            product = (data.get("product") or "").strip()
+            size = (data.get("size") or "").strip()
             stock_id = (data.get("stock_id") or "").strip()
-            stock = await db.stock.find_one({"id": stock_id}, {"_id": 0}) if stock_id else None
-            if not stock and (data.get("product") or "").strip() and (data.get("size") or "").strip():
+            stock = None
+            if is_new_product and (not product or not size):
+                raise HTTPException(400, "Enter a category/product name and size for every new product")
+            if is_new_product:
+                new_product_key = (product.casefold(), canonical_price_size(size).casefold())
+                if new_product_key in new_product_keys:
+                    raise HTTPException(400, "A new product and size can appear only once in the GRV")
+                new_product_keys.add(new_product_key)
                 stock = await db.stock.find_one({
-                    "product": {"$regex": f"^{re.escape(data['product'].strip())}$", "$options": "i"},
-                    "size": {"$regex": f"^{re.escape(data['size'].strip())}$", "$options": "i"},
+                    "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+                    "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
                 }, {"_id": 0})
-            if not stock:
+                if stock:
+                    raise HTTPException(400, "This product and size already exist in stock; select the existing product")
+            else:
+                stock = await db.stock.find_one({"id": stock_id}, {"_id": 0}) if stock_id else None
+            if not is_new_product and not stock and product and size:
+                stock = await db.stock.find_one({
+                    "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+                    "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
+                }, {"_id": 0})
+            if not is_new_product and not stock:
                 raise HTTPException(400, "Select a valid stock product for every GRV line")
-            stock_id = stock["id"]
-            product = stock["product"]
-            size = stock.get("size", "")
+            if stock:
+                stock_id = stock["id"]
+                product = stock["product"]
+                size = stock.get("size", "")
             unit_cost = data.get("unit_cost", 0)
             ordered_quantity = data.get("ordered_quantity", 0)
             previously_received = data.get("previously_received_quantity", 0)
             remaining = data.get("remaining_quantity", 0)
 
-        stock = await db.stock.find_one({"id": stock_id}, {"_id": 0}) if stock_id else None
-        if not stock:
-            raise HTTPException(409, f"Stock item is missing for {product} {size}")
+        if not (not purchase_order and data.get("new_product")):
+            stock = await db.stock.find_one({"id": stock_id}, {"_id": 0}) if stock_id else None
+            if not stock:
+                raise HTTPException(409, f"Stock item is missing for {product} {size}")
         quantity_values = {
             "actual_received_quantity": data.get("actual_received_quantity", 0),
             "accepted_quantity": data.get("accepted_quantity", 0),
@@ -11235,16 +11639,70 @@ async def _grv_items_from_request(requested_items, purchase_order=None):
             raise HTTPException(400, str(error))
         result.append({
             "stock_id": stock_id,
-            "product_code": data.get("product_code") or stock.get("code") or stock_id,
+            "product_code": (
+                data.get("product_code") or (stock or {}).get("code") or stock_id
+            ),
+            "new_product": bool(data.get("new_product")),
             "product": product,
             "size": size,
             "purchase_order_item_index": po_index,
             "ordered_quantity": float(ordered_quantity or 0),
             "previously_received_quantity": float(previously_received or 0),
             "remaining_quantity": float(remaining or 0),
+            "sale_price_zone_1": data.get("sale_price_zone_1"),
+            "sale_price_zone_2": data.get("sale_price_zone_2"),
             **calculated,
         })
     return result
+
+async def _materialize_grv_new_products(grv, user):
+    items = [dict(line) for line in grv.get("items", [])]
+    changed = False
+    for index, line in enumerate(items):
+        if not line.get("new_product"):
+            continue
+        product = (line.get("product") or "").strip()
+        size = (line.get("size") or "").strip()
+        if not product or not size:
+            raise HTTPException(400, "Enter a category/product name and size for every new product")
+        existing = await db.stock.find_one(
+            {"created_from_grv_id": grv["id"], "created_from_grv_line": index},
+            {"_id": 0},
+        )
+        if not existing:
+            duplicate = await db.stock.find_one({
+                "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+                "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
+            }, {"_id": 0})
+            if duplicate:
+                raise HTTPException(
+                    409,
+                    f"{product} {size} already exists in stock; edit this GRV to select the existing product",
+                )
+            existing = await insert("stock", {
+                "product": product,
+                "size": size,
+                "unit_cost": float(line.get("unit_cost", 0) or 0),
+                "threshold": 5,
+                "created_from_grv_id": grv["id"],
+                "created_from_grv_line": index,
+            })
+        await ensure_product_identification(
+            existing, user.get("_active_company_id") or DEFAULT_COMPANY_ID,
+        )
+        line["stock_id"] = existing["id"]
+        line["product_code"] = existing.get("code") or existing.get("product_id") or existing["id"]
+        changed = True
+
+    if changed:
+        saved = await db.grvs.update_one(
+            {"id": grv["id"], "status": "confirming"},
+            {"$set": {"items": items, "edited_by": user["email"]}},
+        )
+        if not saved.matched_count:
+            raise HTTPException(409, "GRV confirmation state changed; reload and retry")
+        grv["items"] = items
+    return items
 
 def _validate_grv_date(value):
     try:
@@ -11476,6 +11934,25 @@ async def confirm_grv(grv_id: str, user=Depends(get_current_user)):
         raise HTTPException(404, "GRV not found")
     if grv.get("status") in ("completed", "partially_received", "discrepancy", "cancelled"):
         raise HTTPException(409, "This GRV has already been confirmed or cancelled")
+    _validate_grv_date(grv["received_date"])
+    price_check_items = []
+    for line in grv.get("items", []):
+        try:
+            calculated = validate_grv_line_quantities(
+                line,
+                remaining=line.get("remaining_quantity") if grv.get("purchase_order_id") else None,
+            )
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, str(error))
+        price_check_items.append({**line, **calculated})
+    price_updates = (
+        _grv_sale_price_updates(price_check_items, user)
+        if grv.get("purpose") != "raw_material" else []
+    )
+    if price_updates:
+        if worker_restrictions_apply(user):
+            raise HTTPException(403, "A company owner must confirm GRVs that change the price list")
+        require_price_list_owner(user)
     if grv.get("status") in ("draft", "pending_inspection"):
         grv = await db.grvs.find_one_and_update(
             {"id": grv_id, "status": {"$in": ["draft", "pending_inspection"]}},
@@ -11485,8 +11962,8 @@ async def confirm_grv(grv_id: str, user=Depends(get_current_user)):
         if not grv:
             raise HTTPException(409, "GRV confirmation is already in progress")
 
-    _validate_grv_date(grv["received_date"])
     try:
+        await _materialize_grv_new_products(grv, user)
         normalized_items = []
         po = None
         if grv.get("purchase_order_id"):
@@ -11642,6 +12119,7 @@ async def confirm_grv(grv_id: str, user=Depends(get_current_user)):
                 status = grv_confirmation_status(
                     normalized_items, po_complete if po else True,
                 )
+                await _apply_grv_sale_prices(price_updates, user, grv)
                 audit = grv.get("audit", []) + [{
                     "action": "confirmed", "by": user["email"], "at": now_iso(),
                 }]
@@ -12427,9 +12905,23 @@ def _financial_transaction(record, category, amount, description=None, supplier=
         "source_record": record,
     }
 
+
+GRV_CONFIRMED_STATUSES = ("completed", "partially_received", "discrepancy")
+
+
+def grv_accepted_value(grv):
+    return dsum(
+        line.get(
+            "total_value",
+            D(line.get("accepted_quantity", 0)) * D(line.get("unit_cost", 0)),
+        )
+        for line in grv.get("items", [])
+    )
+
+
 def build_financial_report(start, end, mode, *, invoices, payments, linked_payments,
                            expenses, vehicle_records, buyings, grvs, invoice_movements,
-                           payment_invoices=None):
+                           payment_invoices=None, salary_rows=()):
     invoices = unique_financial_records(invoices)
     payments = unique_financial_records(payments)
     linked_payments = unique_financial_records(linked_payments)
@@ -12616,12 +13108,9 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
     ]
     grv_rows = []
     for grv in grvs:
-        if grv.get("status") not in ("completed", "partially_received", "discrepancy"):
+        if grv.get("status") not in GRV_CONFIRMED_STATUSES:
             continue
-        amount = dsum(
-            line.get("total_value", D(line.get("accepted_quantity", 0)) * D(line.get("unit_cost", 0)))
-            for line in grv.get("items", [])
-        )
+        amount = grv_accepted_value(grv)
         grv_rows.append(_financial_transaction(
             grv, "GRV · Inventory received", amount,
             description=grv.get("grv_number") or "",
@@ -12629,6 +13118,19 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
             reference=grv.get("delivery_note_number") or grv.get("purchase_order_reference") or "",
         ) | {"grv_number": grv.get("grv_number", ""),
              "status": grv.get("status"), "items": grv.get("items") or []})
+    salary_rows = [
+        {
+            "id": row.get("employee_id"),
+            "date": end.isoformat(),
+            "category": "Salary",
+            "description": row.get("name") or "",
+            "supplier": row.get("department") or "",
+            "amount": r2(row.get("gross_salary", 0)),
+            "reference": "",
+            "status": "Calculated",
+        }
+        for row in salary_rows if D(row.get("gross_salary", 0)) > 0
+    ]
 
     movements_by_invoice = {}
     for movement in invoice_movements:
@@ -12737,18 +13239,16 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
     expense_total = dsum(row["amount"] for row in expense_rows)
     buying_total = dsum(row["amount"] for row in buying_rows)
     grv_total = dsum(row["amount"] for row in grv_rows)
+    salary_total = dsum(row["amount"] for row in salary_rows)
     cogs_total = dsum(cogs_values)
+    cash_result = r2(
+        D(payment_total) - D(expense_total) - D(buying_total)
+        - D(salary_total) - D(grv_total)
+    )
     cogs_complete = not unavailable_rows
     gross_profit = r2(D(revenue) - D(cogs_total)) if cogs_complete else None
-    if mode == "expenses_only":
-        final_profit = r2(D(revenue) - D(expense_total))
-        profit_status = "Expenses-only result; COGS and inventory purchases are excluded."
-    elif cogs_complete:
-        final_profit = r2(D(revenue) - D(cogs_total) - D(expense_total))
-        profit_status = "Verified from recorded historical batch allocations and eligible expenses."
-    else:
-        final_profit = None
-        profit_status = "Unverified: historical cost is unavailable for one or more issued invoices."
+    final_profit = cash_result
+    profit_status = "Payments received less recorded expenses, Buyings, calculated salaries, and accepted GRV costs."
 
     daily = {}
     for offset in range((end - start).days + 1):
@@ -12778,12 +13278,6 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
             if str(row.get("date", ""))[:10] == day["date"]
         )
         day["cogs"] = r2(known_cost) if cogs_complete or mode == "expenses_only" else None
-        day["final_profit"] = (
-            r2(D(day["sales_revenue"]) - D(day["expenses"]))
-            if mode == "expenses_only"
-            else r2(D(day["sales_revenue"]) - known_cost - D(day["expenses"]))
-            if cogs_complete else None
-        )
 
     return {
         "start": start.isoformat(), "end": end.isoformat(), "mode": mode,
@@ -12798,12 +13292,15 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
             "buying_count": len(buying_rows), "buyings": buying_total,
             "expense_count": len(expense_rows), "expenses": expense_total,
             "grv_count": len(grv_rows), "grv": grv_total,
+            "salary_count": len(salary_rows), "salaries": salary_total,
+            "cash_result": cash_result,
             "final_profit": final_profit, "profit_status": profit_status,
             "historical_cost_unavailable_count": len(unavailable_rows),
         },
         "accounting_notes": [
-            "Buyings and confirmed GRVs are shown as purchasing/inventory movements and are not deducted as operating expenses.",
-            "Purchases already represented in an allocated batch cost are never subtracted a second time.",
+            "Buyings and confirmed GRVs are deducted separately as stock purchases, not included in recorded operating expenses.",
+            "This payments-based estimate does not also deduct COGS, so inventory purchases are not counted twice.",
+            "Company profit is based on payments received minus recorded expenses, Buyings, calculated gross salaries, and accepted GRV costs.",
             "Only issued, non-void invoices count as sales; payments are reported by payment date and are not added to sales revenue.",
         ],
         "transactions": {
@@ -12811,6 +13308,7 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
             "pending_payments": pending_rows, "cogs": cogs_rows,
             "historical_cost_unavailable": unavailable_rows,
             "expenses": expense_rows, "buyings": buying_rows, "grvs": grv_rows,
+            "salaries": salary_rows,
         },
         "daily": list(daily.values()),
     }
@@ -12828,13 +13326,14 @@ async def get_financial_report(
     company_context = active_company_id.set(report_company_id)
 
     async def load_period(period_start, period_end):
-        invoices, payments, expenses, vehicle_records, buyings, grvs = await asyncio.gather(
+        invoices, payments, expenses, vehicle_records, buyings, grvs, salary_data = await asyncio.gather(
             financial_period_records("invoices", period_start, period_end, conditions={"archived": {"$ne": True}}),
             financial_period_records("payments", period_start, period_end, conditions={"archived": {"$ne": True}}),
             financial_period_records("expenses", period_start, period_end, conditions={"archived": {"$ne": True}}),
             financial_period_records("vehicle_records", period_start, period_end),
             financial_period_records("buyings", period_start, period_end, conditions={"archived": {"$ne": True}}),
             financial_period_records("grvs", period_start, period_end, date_field="received_date"),
+            salary_report(period_start.isoformat(), period_end.isoformat()),
         )
         invoice_ids = [invoice["id"] for invoice in invoices if invoice.get("id")]
         payment_invoice_ids = list({
@@ -12861,6 +13360,7 @@ async def get_financial_report(
             expenses=expenses, vehicle_records=vehicle_records, buyings=buyings,
             grvs=grvs, invoice_movements=invoice_movements,
             payment_invoices=payment_invoices,
+            salary_rows=salary_data["employees"],
         )
 
     try:
@@ -13045,7 +13545,7 @@ def unique_financial_records(records):
         result.append(record)
     return result
 
-def dashboard_financial_totals(start, end, *, invoices, payments, expenses, vehicle_records, buyings):
+def dashboard_financial_totals(start, end, *, invoices, payments, expenses, vehicle_records, buyings, grvs=(), salaries=0):
     start_date = date.fromisoformat(str(start)[:10])
     end_date = date.fromisoformat(str(end)[:10])
     valid_invoices = unique_financial_records(invoices)
@@ -13067,6 +13567,8 @@ def dashboard_financial_totals(start, end, *, invoices, payments, expenses, vehi
         expenses=expenses,
         vehicle_records=vehicle_records,
         buyings=buyings,
+        grvs=grvs,
+        salaries=salaries,
     )
     return {"total_invoiced": issued_total, **totals}
 
@@ -13079,7 +13581,7 @@ def invoice_outstanding_amount(invoice, paid):
         return 0
     return r2(max(D(invoice.get("total", 0)) - D(paid), Decimal("0")))
 
-def profit_from_records(since, until=None, *, payments, expenses, vehicle_records, buyings):
+def profit_from_records(since, until=None, *, payments, expenses, vehicle_records, buyings, grvs=(), salaries=0):
     start_date = date.fromisoformat(str(since)[:10])
     end_date = date.fromisoformat(str(until)[:10]) if until else None
 
@@ -13115,13 +13617,21 @@ def profit_from_records(since, until=None, *, payments, expenses, vehicle_record
         for buying in unique_financial_records(buyings)
         if not buying.get("voided") and not buying.get("archived") and in_period(buying)
     )
+    grv_total = dsum(
+        grv_accepted_value(grv)
+        for grv in unique_financial_records(grvs)
+        if grv.get("status") in GRV_CONFIRMED_STATUSES
+        and in_period({**grv, "date": grv.get("received_date") or grv.get("date")})
+    )
     return {
         "revenue": revenue,
         "expenses": expense_total,
         "buyings": buying_total,
-        "profit": r2(D(revenue) - D(expense_total) - D(buying_total)),
-        "label": "Estimated result — payments received minus recorded expenses and buyings",
-        "basis": "payment dates, expense dates & buying dates",
+        "grv_expenses": grv_total,
+        "salaries": r2(salaries),
+        "profit": r2(D(revenue) - D(expense_total) - D(buying_total) - D(grv_total) - D(salaries)),
+        "label": "Estimated result — payments received minus recorded expenses, buyings, salaries and GRV costs",
+        "basis": "payment dates, expense dates, buying dates, salary period & GRV receipt dates",
     }
 
 async def dashboard_vehicle_licence_alerts(today):
@@ -13320,12 +13830,12 @@ async def dashboard_invoice_outstanding_by_id(invoices):
     return balances
 
 async def dashboard_financial_periods(periods):
-    unique_periods = {tuple(period) for period in periods}
+    unique_periods = sorted({tuple(period) for period in periods})
     starts = [date.fromisoformat(bounds[0]) for bounds in unique_periods]
     ends = [date.fromisoformat(bounds[1]) for bounds in unique_periods]
     start, end = min(starts), max(ends)
     bounds = (start, end)
-    invoices, payments, expenses, vehicle_records, buyings = await asyncio.gather(
+    invoices, payments, expenses, vehicle_records, buyings, grvs = await asyncio.gather(
         financial_period_records(
             "invoices", *bounds,
             conditions={
@@ -13351,19 +13861,30 @@ async def dashboard_financial_periods(periods):
             "buyings", *bounds,
             conditions={"voided": {"$ne": True}, "archived": {"$ne": True}},
         ),
+        financial_period_records(
+            "grvs", *bounds, date_field="received_date",
+            conditions={"status": {"$in": list(GRV_CONFIRMED_STATUSES)}},
+        ),
     )
+    salary_costs = await asyncio.gather(*(
+        salary_cost_for_period(period[0], period[1])
+        for period in unique_periods
+    ))
+    salaries_by_period = dict(zip(unique_periods, salary_costs))
     records_by_type = {
         "invoices": invoices,
         "payments": payments,
         "expenses": expenses,
         "vehicle_records": vehicle_records,
         "buyings": buyings,
+        "grvs": grvs,
     }
     return {
         period: dashboard_financial_totals(
             period[0],
             period[1],
             **records_by_type,
+            salaries=salaries_by_period[period],
         )
         for period in unique_periods
     }
@@ -13378,7 +13899,7 @@ async def dashboard_completed_orders_in_period(start, end):
 
 async def dashboard_financial_period(start, end):
     bounds = date.fromisoformat(str(start)[:10]), date.fromisoformat(str(end)[:10])
-    invoices, payments, expenses, vehicle_records, buyings = await asyncio.gather(
+    invoices, payments, expenses, vehicle_records, buyings, grvs, salaries = await asyncio.gather(
         financial_period_records(
             "invoices", *bounds,
             conditions={
@@ -13404,6 +13925,11 @@ async def dashboard_financial_period(start, end):
             "buyings", *bounds,
             conditions={"voided": {"$ne": True}, "archived": {"$ne": True}},
         ),
+        financial_period_records(
+            "grvs", *bounds, date_field="received_date",
+            conditions={"status": {"$in": list(GRV_CONFIRMED_STATUSES)}},
+        ),
+        salary_cost_for_period(start, end),
     )
     return dashboard_financial_totals(
         start,
@@ -13413,6 +13939,8 @@ async def dashboard_financial_period(start, end):
         expenses=expenses,
         vehicle_records=vehicle_records,
         buyings=buyings,
+        grvs=grvs,
+        salaries=salaries,
     )
 
 async def load_profit_records():
@@ -13421,10 +13949,12 @@ async def load_profit_records():
         listall("expenses", {"voided": {"$ne": True}, "archived": {"$ne": True}}),
         listall("vehicle_records"),
         listall("buyings", {"voided": {"$ne": True}, "archived": {"$ne": True}}),
+        listall("grvs", {"status": {"$in": list(GRV_CONFIRMED_STATUSES)}}),
     )
 
 async def profit_for(since, until=None):
-    payments, expenses, vehicle_records, buyings = await load_profit_records()
+    payments, expenses, vehicle_records, buyings, grvs = await load_profit_records()
+    salaries = await salary_cost_for_period(since, until or today_str())
     return profit_from_records(
         since,
         until,
@@ -13432,6 +13962,8 @@ async def profit_for(since, until=None):
         expenses=expenses,
         vehicle_records=vehicle_records,
         buyings=buyings,
+        grvs=grvs,
+        salaries=salaries,
     )
 
 @api.get("/dashboard/compare")
@@ -13479,22 +14011,31 @@ async def compare_dashboard_periods(kind: str, first: str, second: str, user=Dep
 async def profit_report(user=Depends(get_current_user)):
     week, month = period_starts()
     t = today_str()
-    (payments, expenses, vehicle_records, buyings), vehicles = await asyncio.gather(
+    (payments, expenses, vehicle_records, buyings, grvs), vehicles, salary_costs = await asyncio.gather(
         load_profit_records(),
         listall("vehicles"),
+        asyncio.gather(
+            salary_cost_for_period(t, t),
+            salary_cost_for_period(week, t),
+            salary_cost_for_period(month, t),
+        ),
     )
+    today_salaries, week_salaries, month_salaries = salary_costs
     return {
         "today": profit_from_records(
             t, t, payments=payments, expenses=expenses,
-            vehicle_records=vehicle_records, buyings=buyings,
+            vehicle_records=vehicle_records, buyings=buyings, grvs=grvs,
+            salaries=today_salaries,
         ),
         "week": profit_from_records(
             week, payments=payments, expenses=expenses,
-            vehicle_records=vehicle_records, buyings=buyings,
+            vehicle_records=vehicle_records, buyings=buyings, grvs=grvs,
+            salaries=week_salaries,
         ),
         "month": profit_from_records(
             month, payments=payments, expenses=expenses,
-            vehicle_records=vehicle_records, buyings=buyings,
+            vehicle_records=vehicle_records, buyings=buyings, grvs=grvs,
+            salaries=month_salaries,
         ),
         "total_expenses": dsum(
             row["amount"] for row in cost_ledger_from_records(expenses, vehicles, vehicle_records)
@@ -13955,7 +14496,7 @@ STRICT OPERATING RULES
 3) For non-business / general questions (weather, fuel prices, news, current market, regulations, suppliers, general advice, personal questions, unrelated topics), respond: "This is outside the ERP data. I can help with business questions only." You may use web search only for genuine current-events or general business info that is relevant to the factory/business. If you do use web search, you MUST end with a "Sources:" list of URLs.
 4) Keep answers concise, practical and business-focused. Prefer short bullets, brief summary tables, and action-led responses.
 5) Always use South African Rand formatting, e.g. R 1,234.56.
-6) If discussing profit, explicitly say: "Estimated result = payments received minus recorded expenses; it is not accounting profit because not all costs are recorded."
+6) If discussing profit, explain that total invoiced is not the same as collected revenue. Estimated result = payments received minus recorded expenses, Buyings, calculated salaries, and accepted GRV costs; note that it is an estimate based on records in the ERP.
 7) You cannot create, edit, delete, or change data. You can only explain what exists and tell the user which ERP page to use for the action.
 8) If the user asks for a number but the ERP does not contain it, say: "I don't have enough data in the ERP to confirm this." Do not answer from memory.
 9) If the question is ambiguous, ask one short clarifying question instead of guessing.
@@ -14052,6 +14593,10 @@ async def assistant_chat(body: AssistantIn, user=Depends(get_current_user)):
 @api.get("/audit")
 async def get_audit(entity: Optional[str] = None, entity_id: Optional[str] = None, user=Depends(get_current_user)):
     flt = {k: v for k, v in {"entity": entity, "entity_id": entity_id}.items() if v}
+    if not can_view_invoice_audit(user):
+        if entity == "invoice":
+            raise HTTPException(403, "Invoice audit history is restricted to company owners")
+        flt["entity"] = {"$ne": "invoice"}
     return await db.audit_log.find(flt, {"_id": 0}).sort("at", -1).to_list(500)
 
 # ---------------- Orders to send ----------------
@@ -14684,7 +15229,7 @@ async def plan_trip(body: TripPlanIn, user=Depends(get_current_user)):
 @api.get("/attendance/summary")
 async def attendance_summary(user=Depends(get_current_user)):
     week, month = period_starts()
-    recs = await listall("attendance")
+    recs = await listall("attendance", {"date": {"$gte": min(week, month)}})
     emps = await listall("employees", {"active": True}, ("name", 1))
     return summarize_attendance_records(recs, emps, week, month, today_str())
 

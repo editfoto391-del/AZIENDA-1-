@@ -74,11 +74,14 @@ export default function ClientPayments({ express = false }) {
   useEffect(() => { loadCustomers(); }, [express]);
 
   useEffect(() => {
-    if (!express || !expressPaymentsSummaryOpen) return undefined;
+    if (!expressPaymentsSummaryOpen) return undefined;
     let active = true;
     setExpressPaymentsLoading(true);
     setExpressPaymentsError("");
-    api.getUncached("/express-payments", { payment_date: expressPaymentsDate })
+    api.getUncached(
+      express ? "/express-payments" : "/payments/summary",
+      { payment_date: expressPaymentsDate },
+    )
       .then((records) => {
         if (active) setExpressPayments(records);
       })
@@ -166,44 +169,26 @@ export default function ClientPayments({ express = false }) {
     } catch (error) { toast.error(apiError(error)); }
   };
 
-  const deleteOtherBalancePayment = async (record) => {
-    if (!window.confirm(`Delete this payment from the history? The balance will NOT change.`)) return;
+  const performInvoicePaymentAction = async (record, reason, supervisorAuthorization) => {
     try {
-      await api.del(`/payments/${record.id}/other-balance`);
-      toast.success("Payment deleted");
-      await Promise.all([refreshProfile(), loadCustomers()]);
-    } catch (error) { toast.error(apiError(error)); }
-  };
-
-  const performInvoicePaymentAction = async (action, record, reason, supervisorAuthorization) => {
-    try {
-      if (action === "delete_payment") {
-        await api.delWithData(`/payments/${record.id}`, {
-          reason,
-          supervisor_authorization: supervisorAuthorization,
-        });
-      } else {
-        await api.post(`/payments/${record.id}/reverse`, {
-          reason,
-          supervisor_authorization: supervisorAuthorization,
-        });
-      }
+      await api.post(`/payments/${record.id}/reverse`, {
+        reason,
+        supervisor_authorization: supervisorAuthorization,
+      });
       setPendingPaymentReverse(null);
       setSupervisorPassword("");
-      toast.success(action === "delete_payment" ? "Payment deleted" : "Payment reversed");
+      toast.success("Payment reversed");
       await Promise.all([refreshProfile(), loadCustomers()]);
     } catch (error) { toast.error(apiError(error)); }
   };
 
-  const requestInvoicePaymentAction = (action, record) => {
-    if (action === "delete_payment" && !window.confirm(`Permanently delete this payment of ${fmtMoney(record.amount)}? Its invoice balance will be recalculated.`)) return;
-    const verb = action === "delete_payment" ? "Delete" : "Reverse";
-    const reason = window.prompt(`${verb} payment of ${fmtMoney(record.amount)}? Enter a reason:`);
+  const requestInvoicePaymentAction = (record) => {
+    const reason = window.prompt(`Reverse payment of ${fmtMoney(record.amount)}? Enter a reason:`);
     if (reason === null) return;
     if (!reason.trim()) return toast.error("A reason is required");
-    const pendingAction = { action, record, reason: reason.trim() };
+    const pendingAction = { record, reason: reason.trim() };
     if (user?.can_skip_supervisor_approval) {
-      performInvoicePaymentAction(action, record, pendingAction.reason);
+      performInvoicePaymentAction(record, pendingAction.reason);
     } else {
       setPendingPaymentReverse(pendingAction);
     }
@@ -214,13 +199,15 @@ export default function ClientPayments({ express = false }) {
     if (!pendingPaymentReverse || !supervisorPassword || authorizingReverse) return;
     setAuthorizingReverse(true);
     try {
-      const { action, record } = pendingPaymentReverse;
+      const { record } = pendingPaymentReverse;
       const approval = await api.post(`/invoices/${record.invoice_id}/authorize-action`, {
         password: supervisorPassword,
-        action,
+        action: "reverse_payment",
         target_id: record.id,
       });
-      await performInvoicePaymentAction(action, record, pendingPaymentReverse.reason, approval.authorization_id);
+      await performInvoicePaymentAction(
+        record, pendingPaymentReverse.reason, approval.authorization_id,
+      );
     } catch (error) {
       toast.error(apiError(error));
     } finally {
@@ -302,16 +289,16 @@ export default function ClientPayments({ express = false }) {
   return (
     <div>
       <PageHeader title={express ? "Express Website Payments and Balances" : "Clients Payments and Balances"} subtitle={loading ? "Loading clients..." : `${customers.length} clients`}>
-        {express && <Btn
+        <Btn
           variant="outline"
           onClick={() => {
             setExpressPaymentsDate(today());
             setExpressPaymentsSummaryOpen(true);
           }}
-          data-testid="express-payments-summary-open"
+          data-testid={express ? "express-payments-summary-open" : "payments-summary-open"}
         >
-          <ReceiptText size={16} /> Payments summary
-        </Btn>}
+          <ReceiptText size={16} /> Payment Summary
+        </Btn>
       </PageHeader>
 
       <Card className="p-4 mb-4">
@@ -507,7 +494,6 @@ export default function ClientPayments({ express = false }) {
                       <div className="flex items-center gap-3">
                         <span className={`font-mono font-semibold ${record.reversed ? "line-through text-slate-400" : "text-emerald-600"}`}>{fmtMoney(record.amount)}</span>
                         {!record.reversed && <button type="button" onClick={() => reverseOtherBalancePayment(record)} className="text-xs text-red-500 hover:underline" data-testid={`reverse-other-balance-${record.id}`}>Reverse</button>}
-                        <button type="button" onClick={() => deleteOtherBalancePayment(record)} className="text-xs text-red-600 hover:underline" data-testid={`delete-other-balance-${record.id}`}>Delete</button>
                       </div>
                     </div>
                   ))}
@@ -525,21 +511,16 @@ export default function ClientPayments({ express = false }) {
                         {fmtDate(record.date)} · {record.method} · {record.invoice_number || "Invoice"}
                         {record.customer_deleted && <Badge cls="ml-2 border-red-200 bg-red-50 text-red-700">Deleted customer</Badge>}
                         {record.reversed && <span className="ml-2 font-semibold text-red-600">Reversed</span>}
+                        {record.archived && <span className="ml-2 font-semibold text-slate-500">Archived invoice</span>}
                       </span>
                       <div className="flex items-center gap-2">
                         <span className={`font-mono font-semibold ${record.reversed ? "line-through text-slate-400" : "text-emerald-600"}`}>{fmtMoney(record.amount)}</span>
                         {!record.reversed && <button
                           type="button"
-                          onClick={() => requestInvoicePaymentAction("reverse_payment", record)}
+                          onClick={() => requestInvoicePaymentAction(record)}
                           className="text-xs text-red-500 hover:underline"
                           data-testid={`reverse-payment-${record.id}`}
                         >Reverse</button>}
-                        <button
-                          type="button"
-                          onClick={() => requestInvoicePaymentAction("delete_payment", record)}
-                          className="text-xs text-red-700 hover:underline"
-                          data-testid={`delete-payment-${record.id}`}
-                        >Delete</button>
                         <button
                           type="button"
                           onClick={() => setViewPayment(record)}
@@ -560,10 +541,10 @@ export default function ClientPayments({ express = false }) {
         )}
       </Modal>
 
-      {express && <Modal
+      <Modal
         open={expressPaymentsSummaryOpen}
         onClose={() => setExpressPaymentsSummaryOpen(false)}
-        title="Express Website Payments Summary"
+        title={express ? "Express Website Payments Summary" : "Payments Summary"}
         wide
       >
         <div className="space-y-4">
@@ -573,17 +554,17 @@ export default function ClientPayments({ express = false }) {
               type="date"
               value={expressPaymentsDate}
               onChange={(event) => setExpressPaymentsDate(event.target.value || today())}
-              data-testid="express-payments-summary-date"
+              data-testid={express ? "express-payments-summary-date" : "payments-summary-date"}
             />
             <div className="flex flex-wrap gap-3">
               <div className="rounded-lg bg-emerald-50 px-4 py-2">
                 <p className="text-xs text-slate-500">Payments on this date</p>
-                <p className="font-mono font-bold text-emerald-700" data-testid="express-payments-summary-total">{fmtMoney(expressPaymentsTotal)}</p>
+                <p className="font-mono font-bold text-emerald-700" data-testid={express ? "express-payments-summary-total" : "payments-summary-total"}>{fmtMoney(expressPaymentsTotal)}</p>
               </div>
-              <div className="rounded-lg bg-blue-50 px-4 py-2">
+              {express && <div className="rounded-lg bg-blue-50 px-4 py-2">
                 <p className="text-xs text-slate-500">Selected for Daily Report</p>
                 <p className="font-mono font-bold text-blue-700" data-testid="express-payments-report-total">{fmtMoney(expressPaymentsReportTotal)}</p>
-              </div>
+              </div>}
             </div>
           </div>
 
@@ -591,7 +572,7 @@ export default function ClientPayments({ express = false }) {
           {expressPaymentsLoading ? (
             <p className="py-8 text-center text-sm text-slate-400" role="status">Loading payments...</p>
           ) : expressPayments.length === 0 ? (
-            <Empty title="No Express Website payments on this date" />
+            <Empty title={`No ${express ? "Express Website " : ""}payments on this date`} />
           ) : (
             <div className="overflow-x-auto rounded-lg border border-border">
               <table className="w-full text-sm">
@@ -602,7 +583,7 @@ export default function ClientPayments({ express = false }) {
                     <th className="px-3 py-2">Method</th>
                     <th className="px-3 py-2">Reference / notes</th>
                     <th className="px-3 py-2 text-right">Amount</th>
-                    <th className="px-3 py-2 text-center">Daily Report</th>
+                    {express && <th className="px-3 py-2 text-center">Daily Report</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -613,7 +594,7 @@ export default function ClientPayments({ express = false }) {
                       <td className="px-3 py-2">{record.method || "—"}</td>
                       <td className="px-3 py-2 text-slate-500">{[record.reference, record.notes].filter(Boolean).join(" · ") || "—"}</td>
                       <td className="whitespace-nowrap px-3 py-2 text-right font-mono font-semibold text-emerald-700">{fmtMoney(record.amount)}</td>
-                      <td className="px-3 py-2 text-center">
+                      {express && <td className="px-3 py-2 text-center">
                         <input
                           type="checkbox"
                           checked={!!record.include_on_daily_report}
@@ -623,7 +604,7 @@ export default function ClientPayments({ express = false }) {
                           data-testid={`express-payment-daily-report-${record.id}`}
                           className="h-4 w-4 accent-emerald-600"
                         />
-                      </td>
+                      </td>}
                     </tr>
                   ))}
                 </tbody>
@@ -631,7 +612,7 @@ export default function ClientPayments({ express = false }) {
             </div>
           )}
         </div>
-      </Modal>}
+      </Modal>
 
       <Modal open={!!viewPayment} onClose={() => setViewPayment(null)} title="Payment Details" wide>
         {viewPayment && (
@@ -662,7 +643,7 @@ export default function ClientPayments({ express = false }) {
         title="Supervisor approval required"
       >
         <form onSubmit={authorizePaymentReverse} className="space-y-4" data-testid="payment-action-authorization-form">
-          <p className="text-sm text-slate-600">Enter the supervisor password to {pendingPaymentReverse?.action === "delete_payment" ? "delete" : "reverse"} this payment. This approval is required for every user role.</p>
+          <p className="text-sm text-slate-600">Enter the supervisor password to reverse this payment. This approval is required for every user role.</p>
           <Input
             label="Supervisor password"
             type="password"

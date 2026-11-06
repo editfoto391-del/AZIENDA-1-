@@ -8,7 +8,7 @@ function storage(values = {}) {
   };
 }
 
-test("worker access uses a tab-scoped session without replacing the company profile token", () => {
+test("worker access uses only its tab-scoped token", () => {
   const companyToken = "company-profile-token";
   const workerToken = "worker-session-token";
 
@@ -19,5 +19,9 @@ test("worker access uses a tab-scoped session without replacing the company prof
       "erp-worker-session-token": workerToken,
     }),
   ), workerToken);
+  assert.equal(activeAuthToken(
+    storage({ token: companyToken }),
+    storage({ "erp-worker-access-session": "true" }),
+  ), "");
   assert.equal(activeAuthToken(storage({ token: companyToken }), storage({})), companyToken);
 });

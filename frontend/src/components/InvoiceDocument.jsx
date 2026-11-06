@@ -35,7 +35,7 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({ inv, totals
         /iq\s*[- ]?foam/i.test(companyName) ? { blue: "IQFOAM", black: "" } : { blue: "", black: companyName };
   const L = ({ k, v }) => (v ? <p className="leading-5"><span className="font-semibold text-slate-900">{k}</span> <span className="text-slate-800">{v}</span></p> : null);
   return (
-    <div ref={ref} className="bg-white text-slate-950 p-6 text-[14px]" style={{ width: 794, fontFamily: "Arial, sans-serif" }} data-testid="invoice-document">
+    <div ref={ref} className="invoice-document bg-white text-slate-950 p-6 text-[14px]" style={{ width: 794, fontFamily: "Arial, sans-serif" }} data-testid="invoice-document">
       <div className="flex items-center gap-2">
         <Logo />
         <div>

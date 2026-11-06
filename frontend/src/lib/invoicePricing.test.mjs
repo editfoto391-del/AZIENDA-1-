@@ -6,6 +6,7 @@ import {
   canonicalInvoiceCategory,
   invoiceCategoriesFor,
   invoicePriceCategory,
+  invoiceStockLinesChanged,
   invoiceSizesFor,
   isManualInvoicePrice,
   lookupInvoicePrice,
@@ -38,6 +39,35 @@ test("numeric dimension formats match while other size labels remain literal", (
   assert.equal(canonicalInvoiceSize("910 x 100 x 50"), "910x100x50");
   assert.equal(canonicalInvoiceSize("Unit"), "Unit");
   assert.equal(canonicalInvoiceSize("910/100"), "910/100");
+});
+
+test("invoice stock lines only change when stock product, size or quantity changes", () => {
+  const original = [
+    { category: "Simple", size: "910x100", qty: 2 },
+    { category: "Ribbon", size: "760x50", qty: 1 },
+  ];
+
+  assert.equal(invoiceStockLinesChanged(original, [
+    { category: "Standard", size: "910 × 100", qty: "2" },
+    { category: "Ribbon Pink", size: "760 X 50", qty: 1 },
+  ]), false);
+  assert.equal(invoiceStockLinesChanged(original, [...original].reverse()), false);
+  assert.equal(invoiceStockLinesChanged(original, [
+    { ...original[0], qty: 3 },
+    original[1],
+  ]), true);
+  assert.equal(invoiceStockLinesChanged(original, [
+    { ...original[0], category: "Ribbon Black" },
+    original[1],
+  ]), true);
+  assert.equal(invoiceStockLinesChanged(original, [
+    { ...original[0], size: "910x150" },
+    original[1],
+  ]), true);
+  assert.equal(invoiceStockLinesChanged(
+    [{ description: "Manual note", qty: 1 }],
+    [{ description: "Updated note", qty: 1 }],
+  ), false);
 });
 
 test("category and size lists include canonical aliases without crossing zones", () => {
@@ -198,4 +228,23 @@ test("a case-variant existing stock price does not block invoice issue", () => {
     }]),
     { unitPrice: 275, needsConfig: false },
   );
+});
+
+test("a GRV-created category, size, and prices are selectable on invoices in both zones", () => {
+  const prices = [
+    { zone: 1, category: "Premium Foam", size: "600x100", price: 60, active: true, confirmed: true },
+    { zone: 2, category: "Premium Foam", size: "600x100", price: 70, active: true, confirmed: true },
+  ];
+  const stock = [{ product: "Premium Foam", size: "600x100" }];
+
+  assert.ok(invoiceCategoriesFor(1, false, prices, stock).includes("Premium Foam"));
+  assert.ok(invoiceCategoriesFor(2, false, prices, stock).includes("Premium Foam"));
+  assert.deepEqual(invoiceSizesFor(1, "Premium Foam", false, prices, stock), ["600x100"]);
+  assert.deepEqual(invoiceSizesFor(2, "Premium Foam", false, prices, stock), ["600x100"]);
+  assert.deepEqual(lookupInvoicePrice(1, "Premium Foam", "600x100", false, prices), {
+    price: 60, needsConfig: false,
+  });
+  assert.deepEqual(lookupInvoicePrice(2, "Premium Foam", "600x100", false, prices), {
+    price: 70, needsConfig: false,
+  });
 });

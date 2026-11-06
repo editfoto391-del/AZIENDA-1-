@@ -69,6 +69,7 @@ const normalizeReportValue = (value) => String(value || "").toLowerCase().replac
 
 export default function Stock() {
   const { user } = useAuth();
+  const canViewStockCosts = user?.is_owner || user?.is_company_owner || user?.role === "owner";
   const isSuperIqFoam = user?.company_id === "superiqfoam";
   const reduceMotion = useReducedMotion();
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
@@ -509,7 +510,7 @@ export default function Stock() {
                     <p className="text-xs text-slate-500 font-semibold">Strong Boy Total</p>
                     <p className="text-lg font-mono font-bold text-slate-800">{getTotalsByCategory()["Strong Boy"] || 0}</p>
                   </div>
-                  {!user?.is_worker && (() => {
+                  {canViewStockCosts && (() => {
                     const value = getStockValueTotal(valueZone);
                     return (
                       <div className="col-span-2 bg-white rounded-md p-3 border border-slate-300 border-2">
@@ -536,9 +537,9 @@ export default function Stock() {
       <Card className="overflow-hidden">
         {list === null ? <p className="p-6 text-sm text-slate-400">Loading stock...</p> : filteredList.length === 0 ? <Empty icon={Boxes} title={stockSearch.trim() ? "No stock matches your search" : category ? "No stock items in this category" : "No stock records"} /> : (
           <div className="overflow-x-auto">
-            <table className={`w-full text-sm ${user?.is_worker ? "min-w-[900px]" : "min-w-[1180px]"}`}>
+            <table className={`w-full text-sm ${canViewStockCosts ? "min-w-[1180px]" : "min-w-[900px]"}`}>
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                <th className="sticky left-0 z-20 bg-slate-50 px-3 py-3 font-semibold">Adjust</th><th className="px-4 py-3 font-semibold">Size</th><th className="px-4 font-semibold">Product</th><th className="px-4 font-semibold text-right">Other</th><th className="px-4 font-semibold text-right">Invoiced</th><th className="px-4 font-semibold text-right">Current Stock</th>{!user?.is_worker && <th className="px-4 font-semibold text-right">Cost (R)</th>}{unifiedPriceList ? <><th className="px-4 font-semibold text-right">Selling Price</th>{!user?.is_worker && <th className="px-4 font-semibold text-right">Stock Value</th>}</> : <><th className="px-4 font-semibold text-right">Sell Zone 1</th>{!user?.is_worker && <th className="px-4 font-semibold text-right">Stock Value Zone 1</th>}<th className="px-4 font-semibold text-right">Sell Zone 2</th>{!user?.is_worker && <th className="px-4 font-semibold text-right">Stock Value Zone 2</th>}</>}<th className="sticky right-0 z-20 bg-slate-50 px-4 font-semibold text-right">Actions</th>
+                <th className="sticky left-0 z-20 bg-slate-50 px-3 py-3 font-semibold">Adjust</th><th className="px-4 py-3 font-semibold">Size</th><th className="px-4 font-semibold">Product</th><th className="px-4 font-semibold text-right">Other</th><th className="px-4 font-semibold text-right">Invoiced</th><th className="px-4 font-semibold text-right">Current Stock</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Cost (R)</th>}{unifiedPriceList ? <><th className="px-4 font-semibold text-right">Selling Price</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Stock Value</th>}</> : <><th className="px-4 font-semibold text-right">Sell Zone 1</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Stock Value Zone 1</th>}<th className="px-4 font-semibold text-right">Sell Zone 2</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Stock Value Zone 2</th>}</>}<th className="sticky right-0 z-20 bg-slate-50 px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{filteredList.map((s) => (
                 <tr key={s.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`stock-row-${s.id}`}>
@@ -550,15 +551,15 @@ export default function Stock() {
                   <td className="px-4 text-right font-mono text-slate-500">{s.adjustments || 0}</td>
                   <td className="px-4 text-right font-mono text-red-500">{s.invoiced ? `-${s.invoiced}` : 0}</td>
                   <td className="px-4 text-right"><span className={`font-mono font-bold ${s.current < s.threshold ? "text-red-600" : "text-slate-800"}`} data-testid={`stock-current-${s.id}`}>{s.current}</span>{s.current < s.threshold && <Badge cls="bg-red-50 text-red-700 border-red-200 ml-2">Low</Badge>}</td>
-                  {!user?.is_worker && <td className="px-4">
+                  {canViewStockCosts && <td className="px-4">
                     <div className="flex items-center justify-end gap-2">
                       <Input aria-label={`Cost for ${s.product} ${s.size}`} type="number" min="0" step="0.01" value={costDrafts[s.id] ?? (s.unit_cost ?? "")} onChange={(e) => setCostDrafts((current) => ({ ...current, [s.id]: e.target.value }))} className="w-32 min-w-[8rem] max-w-none shrink-0 px-2 py-1.5 text-right tabular-nums" data-testid={`stock-cost-${s.id}`} />
                       <button type="button" onClick={() => saveCost(s)} disabled={busy} className="text-primary hover:underline text-xs font-semibold disabled:opacity-50" data-testid={`save-stock-cost-${s.id}`}>Save</button>
                     </div>
                   </td>}
                   {unifiedPriceList
-                    ? <><td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td>{!user?.is_worker && <td className="px-4 text-right font-mono" data-testid={`stock-value-${s.id}`}>{getStockValue(s, 1)}</td>}</>
-                    : <><td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td>{!user?.is_worker && <td className="px-4 text-right font-mono" data-testid={`stock-value-zone-1-${s.id}`}>{getStockValue(s, 1)}</td>}<td className="px-4 text-right font-mono">{getSellingPrice(s, 2)}</td>{!user?.is_worker && <td className="px-4 text-right font-mono" data-testid={`stock-value-zone-2-${s.id}`}>{getStockValue(s, 2)}</td>}</>}
+                    ? <><td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td>{canViewStockCosts && <td className="px-4 text-right font-mono" data-testid={`stock-value-${s.id}`}>{getStockValue(s, 1)}</td>}</>
+                    : <><td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td>{canViewStockCosts && <td className="px-4 text-right font-mono" data-testid={`stock-value-zone-1-${s.id}`}>{getStockValue(s, 1)}</td>}<td className="px-4 text-right font-mono">{getSellingPrice(s, 2)}</td>{canViewStockCosts && <td className="px-4 text-right font-mono" data-testid={`stock-value-zone-2-${s.id}`}>{getStockValue(s, 2)}</td>}</>}
                   <td className="sticky right-0 z-10 bg-white px-4 text-right whitespace-nowrap">
                     {!user?.is_stock_only_worker && <button type="button" onClick={() => deleteStock(s)} disabled={busy} title="Permanently delete stock and movements" aria-label={`Permanently delete ${s.product} ${s.size}`} className="ml-2 rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50" data-testid={`delete-stock-${s.id}`}><Trash2 size={15} /></button>}
                   </td>

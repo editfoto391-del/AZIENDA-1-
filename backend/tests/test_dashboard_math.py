@@ -166,12 +166,30 @@ def test_dashboard_profit_uses_same_period_filters_and_excludes_reversed_payment
             {"date": "2026-10-12", "amount": 40},
             {"date": "2026-11-01", "amount": 60},
         ],
+        grvs=[
+            {
+                "id": "grv-accepted", "received_date": "2026-10-13",
+                "status": "partially_received",
+                "items": [{"accepted_quantity": 3, "unit_cost": 10, "total_value": 30}],
+            },
+            {
+                "id": "grv-reversed", "received_date": "2026-10-14",
+                "status": "cancelled", "items": [{"total_value": 999}],
+            },
+            {
+                "id": "grv-draft", "received_date": "2026-10-14",
+                "status": "draft", "items": [{"total_value": 999}],
+            },
+        ],
+        salaries=10,
     )
 
     assert result["revenue"] == 100
     assert result["expenses"] == 50
     assert result["buyings"] == 40
-    assert result["profit"] == 10
+    assert result["grv_expenses"] == 30
+    assert result["salaries"] == 10
+    assert result["profit"] == -30
     assert result["label"].startswith("Estimated result")
 
 
@@ -186,11 +204,24 @@ def test_dashboard_profit_filters_timestamp_records_by_local_company_date():
         expenses=[{"date": "2026-10-31T21:59:00+00:00", "amount": 25}],
         vehicle_records=[],
         buyings=[],
+        grvs=[],
     )
 
     assert result["revenue"] == 100
     assert result["expenses"] == 25
     assert result["profit"] == 75
+
+
+def test_salary_cost_for_period_prorates_monthly_fixed_pay(monkeypatch):
+    async def salary_report(start_date, end_date):
+        assert (start_date, end_date) == ("2026-01-16", "2026-01-31")
+        return {"employees": [
+            {"pay_frequency": "monthly_fixed", "monthly_salary": 3100, "gross_salary": 0},
+            {"pay_frequency": "weekly_fixed", "gross_salary": 120},
+        ]}
+
+    monkeypatch.setattr(server, "salary_report", salary_report)
+    assert asyncio.run(server.salary_cost_for_period("2026-01-16", "2026-01-31")) == 1720
 
 
 def test_dashboard_financial_totals_deduplicate_and_separate_invoices_from_cash():
@@ -232,13 +263,20 @@ def test_dashboard_financial_totals_deduplicate_and_separate_invoices_from_cash(
         expenses=expenses,
         vehicle_records=[],
         buyings=buyings,
+        grvs=[{
+            "id": "grv-1", "received_date": "2026-10-31", "status": "completed",
+            "items": [{"accepted_quantity": 2, "unit_cost": 100, "total_value": 200}],
+        }],
+        salaries=500,
     )
 
     assert totals["total_invoiced"] == 100000
     assert totals["revenue"] == 60000
     assert totals["buyings"] == 10000
+    assert totals["grv_expenses"] == 200
+    assert totals["salaries"] == 500
     assert totals["expenses"] == 5000
-    assert totals["profit"] == 45000
+    assert totals["profit"] == 44300
     invoice_balances = [
         invoice_outstanding_amount(invoices[0], 40000),
         invoice_outstanding_amount(invoices[1], 20000),
@@ -258,11 +296,14 @@ def test_dashboard_financial_totals_handle_empty_and_decimal_periods():
         expenses=[],
         vehicle_records=[],
         buyings=[],
+        grvs=[],
     )
-    assert {key: totals[key] for key in ("total_invoiced", "revenue", "buyings", "expenses", "profit")} == {
+    assert {key: totals[key] for key in ("total_invoiced", "revenue", "buyings", "grv_expenses", "salaries", "expenses", "profit")} == {
         "total_invoiced": 0,
         "revenue": 0,
         "buyings": 0,
+        "grv_expenses": 0,
+        "salaries": 0,
         "expenses": 0,
         "profit": 0,
     }
@@ -275,6 +316,7 @@ def test_dashboard_financial_totals_handle_empty_and_decimal_periods():
         expenses=[{"id": "decimal-expense", "date": "2026-10-31", "amount": 0.105}],
         vehicle_records=[],
         buyings=[{"id": "decimal-buying", "date": "2026-10-31", "amount": 0.105}],
+        grvs=[],
     )
     assert totals["total_invoiced"] == 1.01
     assert totals["revenue"] == 0.34
@@ -400,6 +442,10 @@ def test_dashboard_financial_periods_load_overlapping_periods_once(monkeypatch):
         "expenses": [],
         "vehicle_records": [],
         "buyings": [],
+        "grvs": [{
+            "id": "grv-1", "received_date": "2026-03-03", "status": "completed",
+            "items": [{"accepted_quantity": 2, "unit_cost": 6, "total_value": 12}],
+        }],
     }
 
     async def period_records(collection, start, end, date_field="date", conditions=None):
@@ -407,6 +453,10 @@ def test_dashboard_financial_periods_load_overlapping_periods_once(monkeypatch):
         return records[collection]
 
     monkeypatch.setattr(server, "financial_period_records", period_records)
+    async def salary_cost(_start, _end):
+        return 5
+
+    monkeypatch.setattr(server, "salary_cost_for_period", salary_cost)
     periods = [
         ("2026-03-02", "2026-03-04"),
         ("2026-03-01", "2026-03-04"),
@@ -417,9 +467,12 @@ def test_dashboard_financial_periods_load_overlapping_periods_once(monkeypatch):
 
     result = asyncio.run(server.dashboard_financial_periods(periods))
 
-    assert len(calls) == 5
+    assert len(calls) == 6
     assert {(call[1], call[2]) for call in calls} == {
         (date(2026, 2, 1), date(2026, 3, 4)),
     }
     assert result[("2026-03-02", "2026-03-04")]["total_invoiced"] == 100
+    assert result[("2026-03-02", "2026-03-04")]["grv_expenses"] == 12
+    assert result[("2026-03-02", "2026-03-04")]["salaries"] == 5
+    assert result[("2026-03-02", "2026-03-04")]["profit"] == 23
     assert result[("2026-02-23", "2026-02-25")]["total_invoiced"] == 0

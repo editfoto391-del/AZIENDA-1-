@@ -54,6 +54,18 @@ def test_add_stock_saves_product_and_price(env):
     assert price["confirmed"] and price["active"]
 
 
+def test_non_owner_stock_creation_keeps_selling_price_but_not_purchase_cost(env):
+    body = server.StockIn(
+        product="Foam", size="100x100", opening=1, unit_cost=40, selling_price=250,
+    )
+    asyncio.run(server.add_stock(body, {"_active_role": "admin"}))
+
+    stock = env["stock"].docs[0]
+    assert "unit_cost" not in stock
+    price = env["prices"].docs[0]
+    assert price["price"] == 250
+
+
 def test_add_stock_assigns_size_to_selected_category(env):
     body = server.StockIn(
         product="Manually entered product",

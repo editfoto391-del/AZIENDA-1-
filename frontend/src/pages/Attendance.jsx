@@ -205,6 +205,8 @@ export default function Attendance() {
   const [historyClearing, setHistoryClearing] = useState(false);
   const [advanceModal, setAdvanceModal] = useState(null);
   const loadRequest = useRef(0);
+  const attendanceSavingRef = useRef(new Set());
+  const pieceSavingRef = useRef(new Set());
 
   const load = () => {
     const requestId = ++loadRequest.current;
@@ -272,7 +274,8 @@ export default function Attendance() {
     });
   };
   const saveAttendance = async (employee, status, times) => {
-    if (attendanceSaving[employee.id]) return;
+    if (attendanceSavingRef.current.has(employee.id)) return false;
+    attendanceSavingRef.current.add(employee.id);
     const previous = records.find((item) => item.employee_id === employee.id && item.date === date);
     const next = {
       ...previous,
@@ -309,6 +312,7 @@ export default function Attendance() {
       toast.error(apiError(error));
       return false;
     } finally {
+      attendanceSavingRef.current.delete(employee.id);
       setAttendanceSaving((current) => ({ ...current, [employee.id]: false }));
     }
   };
@@ -343,9 +347,10 @@ export default function Attendance() {
   };
   const savePieceCount = async (employee) => {
     const previous = pieceRecords.find((item) => item.employee_id === employee.id && item.date === date);
-    if (pieceLoading) return;
+    if (pieceLoading || pieceSavingRef.current.has(employee.id)) return;
     const pieces = Number(pieceDraft[employee.id] ?? previous?.pieces ?? 0);
     if (!Number.isInteger(pieces) || pieces < 0) return toast.error("Pieces must be a whole number of zero or more");
+    pieceSavingRef.current.add(employee.id);
     const optimistic = {
       ...previous,
       employee_id: employee.id,
@@ -372,13 +377,15 @@ export default function Attendance() {
       });
       toast.error(apiError(error));
     } finally {
+      pieceSavingRef.current.delete(employee.id);
       setPieceSaving((current) => ({ ...current, [employee.id]: false }));
     }
   };
   const deletePieceCount = async (employee) => {
     const previous = pieceRecords.find((item) => item.employee_id === employee.id && item.date === date);
-    if (!previous || pieceLoading || pieceSaving[employee.id]) return;
+    if (!previous || pieceLoading || pieceSavingRef.current.has(employee.id)) return;
     if (!window.confirm(`Delete the ${previous.pieces}-piece production record for ${employee.name} on ${date}? The entire week’s pay will be recalculated.`)) return;
+    pieceSavingRef.current.add(employee.id);
     setPieceSaving((current) => ({ ...current, [employee.id]: true }));
     setPieceRecords((current) => current.filter((item) => item.id !== previous.id));
     try {
@@ -389,6 +396,7 @@ export default function Attendance() {
       setPieceRecords((current) => [...current, previous]);
       toast.error(apiError(error));
     } finally {
+      pieceSavingRef.current.delete(employee.id);
       setPieceSaving((current) => ({ ...current, [employee.id]: false }));
     }
   };

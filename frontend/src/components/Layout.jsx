@@ -1,11 +1,12 @@
 import { NavLink, useNavigate, Outlet, useLocation } from "react-router-dom";
 import { Suspense, useEffect, useRef, useState } from "react";
+import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import {
   LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
-  Truck, Menu, X, LogOut, Search, Bell, Layers,
+  Truck, Menu, X, LogOut, Search, Bell,
   ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart, ChevronDown, Building2, Handshake, Settings as Cog, ClipboardCheck, LockKeyhole,
-  Warehouse, FlaskConical, Boxes,
+  Warehouse, FlaskConical, Boxes, Moon, Sun,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -82,16 +83,16 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
   })).filter((group) => (!group.companyId || group.companyId === companyId) && (!group.companyIds || group.companyIds.includes(companyId)) && group.items.length);
   return (
     <>
-      <div className="erp-sidebar-brand flex items-center gap-3 px-5 h-16 border-b border-white/10">
+      <div className="erp-sidebar-brand relative z-10 flex items-center gap-3 px-5 h-16 border-b border-white/10">
         <div className="erp-sidebar-brand-icon h-10 w-10 rounded-lg border border-emerald-100/20 bg-[hsl(158_28%_15%)] flex items-center justify-center shrink-0">
-          <Layers className="erp-sidebar-brand-mark text-white" size={22} />
+            <span className="erp-sidebar-brand-mark font-display text-3xl leading-none text-white" aria-hidden="true">S</span>
         </div>
         <div>
           <div className="text-white font-bold text-base font-display leading-tight">{companyName || "SUPER IQ-FOAM"}</div>
           <div className="erp-sidebar-subtitle text-emerald-100/55 text-[10px] font-semibold uppercase tracking-[0.16em]">Business Management</div>
         </div>
       </div>
-      <nav className="erp-sidebar-nav flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
+      <nav className="erp-sidebar-nav relative z-10 flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
         {navGroups.map((group) => {
           const expanded = !!openGroups[group.label];
           const groupNavId = navigationId(group.label);
@@ -160,6 +161,7 @@ function AnimatedOutlet() {
 
 export default function Layout() {
   const { user, logout, switchCompany } = useAuth();
+  const { theme, setTheme } = useTheme();
   const reduceMotion = useReducedMotion();
   const [open, setOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
@@ -226,6 +228,11 @@ export default function Layout() {
     <div className="min-h-screen bg-background">
       {/* Desktop sidebar */}
       <aside className="erp-sidebar no-print hidden lg:flex fixed inset-y-0 left-0 w-64 flex-col border-r border-white/10 bg-[hsl(222_47%_11%)] shadow-[4px_0_18px_rgba(15,23,42,0.08)] z-30">
+        <svg className="erp-sidebar-decoration pointer-events-none absolute inset-x-0 bottom-0 h-56 w-full" viewBox="0 0 280 224" preserveAspectRatio="none" aria-hidden="true">
+          <path d="M-25 225c56-68 113-142 188-172 35-14 70-18 126-8-70 27-111 58-154 114-20 27-39 49-64 66Z" fill="#c6d2c8" fillOpacity=".035" />
+          <path d="M-24 220c73-77 132-144 197-169 39-15 76-16 116-9M-14 224c76-66 136-117 204-146 36-15 67-20 99-21M-16 211c76-56 136-99 205-123 33-12 62-17 91-18" fill="none" stroke="#c6d2c8" strokeOpacity=".24" strokeWidth="1" />
+          <path d="M95 224c43-42 81-71 125-88 30-12 55-16 80-17" fill="none" stroke="#c6d2c8" strokeOpacity=".12" strokeWidth="4" />
+        </svg>
         <SidebarContent companyName={activeBrandName} companyId={user?.company_id} user={user} />
       </aside>
 
@@ -309,6 +316,16 @@ export default function Layout() {
               </AnimatePresence>
             </div>
           )}
+          <button
+            type="button"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            data-testid="theme-toggle"
+            className="rounded-full border border-border p-2 text-slate-500 hover:bg-white/40 hover:text-slate-800"
+          >
+            {theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}
+          </button>
           <div className="relative">
             <motion.button
               type="button"
@@ -357,7 +374,7 @@ export default function Layout() {
               <div className="text-sm font-semibold text-slate-800">{user?.name || "Admin"}</div>
               <div className="text-[11px] text-slate-500">{user?.is_worker ? user.worker_role || "Worker" : user?.is_owner || user?.is_company_owner ? "Owner" : user?.is_admin || user?.role === "admin" ? "Administrator" : "Team member"}</div>
             </div>
-            {!user?.is_worker && !dedicatedDomain && (
+            {!user?.is_worker && !user?.is_worker_account && !dedicatedDomain && (
               <motion.button type="button" whileHover={reduceMotion ? undefined : { x: -1, scale: 1.04 }} whileTap={reduceMotion ? undefined : { scale: 0.97 }} transition={{ type: "spring", stiffness: 500, damping: 22 }} onClick={() => { setLoggingOut(true); logout(); }} disabled={loggingOut} aria-label="Log out" title="Log out" data-testid="logout-btn" className="inline-flex items-center gap-1.5 rounded-full px-2 py-2 text-slate-500 hover:text-red-600 hover:bg-red-50 ml-1 disabled:opacity-60">
                 <LogOut size={18} />
                 <span className="hidden text-xs font-semibold sm:inline">{loggingOut ? "Logging out…" : "Log out"}</span>

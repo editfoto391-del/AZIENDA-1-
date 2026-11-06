@@ -32,6 +32,9 @@ function ProfitPanel({ title, p, testid }) {
       <div className="space-y-1.5 text-sm">
         <div className="flex justify-between"><span className="text-slate-500">Revenue (payments)</span><span className="font-mono text-emerald-700">{fmtMoney(p?.revenue)}</span></div>
         <div className="flex justify-between"><span className="text-slate-500">Expenses</span><span className="font-mono text-orange-600">- {fmtMoney(p?.expenses)}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Buyings</span><span className="font-mono text-orange-600">- {fmtMoney(p?.buyings)}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Salaries</span><span className="font-mono text-orange-600">- {fmtMoney(p?.salaries)}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Accepted GRV costs</span><span className="font-mono text-orange-600">- {fmtMoney(p?.grv_expenses)}</span></div>
         <div className="flex justify-between border-t border-border pt-2 mt-2"><span className="font-bold text-slate-800">Estimated Result</span><span className={`font-mono font-bold ${neg ? "text-red-600" : "text-slate-900"}`}>{fmtMoney(p?.profit)}</span></div>
       </div>
     </Card>
@@ -135,7 +138,19 @@ export default function Expenses() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="expenses-design relative isolate">
+      <svg className="expenses-downward-lines pointer-events-none absolute right-0 top-0 z-0 h-[34rem] w-[min(58vw,52rem)]" viewBox="0 0 760 520" preserveAspectRatio="none" aria-hidden="true">
+        <defs>
+          <linearGradient id="expenses-line-fade" x1="0" y1="0" x2="0.8" y2="1">
+            <stop offset="0" stopColor="#cbd8ce" stopOpacity="0" />
+            <stop offset=".46" stopColor="#cbd8ce" stopOpacity=".4" />
+            <stop offset="1" stopColor="#cbd8ce" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <path d="M760-18C630 10 576 83 495 132c-78 47-148 20-219 53-89 42-118 133-276 203" fill="none" stroke="url(#expenses-line-fade)" strokeWidth="1.1" />
+        <path d="M760 8C638 37 587 108 507 153c-79 45-148 21-219 57-86 44-119 129-288 192M760 34C648 62 600 132 519 175c-78 42-145 23-215 61-85 46-123 127-304 182" fill="none" stroke="url(#expenses-line-fade)" strokeWidth="1" />
+      </svg>
+      <div className="relative z-10 space-y-6">
       <PageHeader title="Expenses" subtitle="Daily expenses and profit overview">
         <Btn onClick={() => setModal(blank())} data-testid="add-expense-btn"><Plus size={16} /> Add Expense</Btn>
       </PageHeader>
@@ -150,7 +165,7 @@ export default function Expenses() {
         <ProfitPanel title={`This week (from ${fmtDate(report?.week_start)})`} p={report?.week} testid="profit-week" />
         <ProfitPanel title={`This month (from ${fmtDate(report?.month_start)})`} p={report?.month} testid="profit-month" />
       </div>
-      <p className="text-xs text-slate-400 -mt-3">Estimated cash result — incomplete cost data. Payments received (by payment date) − expenses paid (by expense date), including fleet costs marked Done and spare-part purchases, each counted once.</p>
+      <p className="text-xs text-slate-400 -mt-3">Estimated result = payments received − recorded expenses − Buyings − calculated gross salaries − accepted GRV costs. Expenses include completed fleet costs; salary is calculated from payroll records.</p>
 
       {costs && (Object.keys(costs.by_category).length > 0) && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -253,6 +268,7 @@ export default function Expenses() {
           </div>
         </form>}
       </Modal>
+      </div>
     </div>
   );
 }

@@ -146,6 +146,45 @@ function AccessTab({ users, companies, loading, currentUserId, isPrimaryOwner, o
   );
 }
 
+const R2_FREE_BYTES = 10 * 1024 ** 3;
+const fmtWhen = (entry) => entry ? `${new Date(entry.created_at).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" })}${entry.key ? ` (${entry.key})` : ""}` : "None yet";
+
+function BackupSummary({ status, info }) {
+  const active = status.configured && status.tools_available;
+  const used = info?.storage_usage_bytes || 0;
+  const newest = info?.snapshots?.[0];
+  const estimate = newest ? newest.size_bytes * 42 : 0;
+  const rows = [
+    ["Backup system", active ? "Active" : "Not active", "backup-system-status"],
+    ["Cloudflare R2 connection", !status.configured ? "Not configured" : status.r2_connected ? "Connected" : "Not tested", "backup-r2-status"],
+    ["Last successful backup", fmtWhen(status.last_success), "backup-last-success"],
+    ["Last failed backup", fmtWhen(status.last_failure), "backup-last-failure"],
+    ["Next scheduled backup", new Date(status.next_scheduled).toLocaleString("en-ZA", { timeZone: "Africa/Johannesburg" }), "backup-next-scheduled"],
+    ["Daily / monthly backups", `${info?.counts?.daily ?? 0} / ${info?.counts?.monthly ?? 0}`, "backup-counts"],
+    ["Storage used", `${(used / 1024 ** 2).toFixed(2)} MB of 10 GB free`, "backup-storage-used"],
+    ["Latest backup size", newest ? `${(newest.size_bytes / 1024 ** 2).toFixed(2)} MB` : "-", "backup-latest-size"],
+    ["Estimated for 30 daily + 12 monthly", newest ? `${(estimate / 1024 ** 2).toFixed(2)} MB` : "-", "backup-estimate"],
+  ];
+  return (
+    <Card className="p-5 space-y-3" data-testid="backup-summary">
+      <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-2 text-sm">
+        {rows.map(([label, value, id]) => (
+          <div key={id} className="flex justify-between gap-3 border-b border-border/50 py-1">
+            <dt className="text-slate-500">{label}</dt><dd className="font-medium text-right" data-testid={id}>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {status.last_failure && (!status.last_success || status.last_failure.created_at > status.last_success.created_at) && (
+        <p className="rounded-md bg-red-50 p-3 text-sm font-semibold text-red-700" data-testid="backup-failed-alert">The most recent backup FAILED. Run "Backup now" or check the server logs.</p>
+      )}
+      {(used > R2_FREE_BYTES * 0.8 || estimate > R2_FREE_BYTES * 0.8) && (
+        <p className="rounded-md bg-amber-50 p-3 text-sm font-semibold text-amber-800" data-testid="backup-storage-warning">Backup storage is close to the 10 GB Cloudflare R2 free allowance.</p>
+      )}
+    </Card>
+  );
+}
+
+
 export default function Settings() {
   const { user } = useAuth();
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
@@ -177,6 +216,8 @@ export default function Settings() {
   const [backups, setBackups] = useState([]);
   const [backupsLoading, setBackupsLoading] = useState(false);
   const [backupAction, setBackupAction] = useState("");
+  const [backupInfo, setBackupInfo] = useState(null);
+  const [verified, setVerified] = useState({});
   const [recoveryCopy, setRecoveryCopy] = useState(null);
 
   const load = () => {
@@ -220,6 +261,7 @@ export default function Settings() {
       .then((result) => {
         setBackupStatus(result.status);
         setBackups(result.snapshots);
+        setBackupInfo(result);
       })
       .catch((error) => toast.error(apiError(error)))
       .finally(() => setBackupsLoading(false));
@@ -231,10 +273,25 @@ export default function Settings() {
       const result = await api.get("/backups");
       setBackupStatus(result.status);
       setBackups(result.snapshots);
+      setBackupInfo(result);
     } catch (error) {
       toast.error(apiError(error));
     } finally {
       setBackupsLoading(false);
+    }
+  };
+
+  const verifyBackup = async (backup) => {
+    setBackupAction(`verify:${backup.key}`);
+    try {
+      await api.post("/backups/verify", { key: backup.key });
+      setVerified((current) => ({ ...current, [backup.key]: "verified" }));
+      toast.success(`${backup.key} verified: checksum, size and contents are correct`);
+    } catch (error) {
+      setVerified((current) => ({ ...current, [backup.key]: "failed" }));
+      toast.error(apiError(error));
+    } finally {
+      setBackupAction("");
     }
   };
 
@@ -571,7 +628,7 @@ export default function Settings() {
               <div>
                 <h3 className="font-bold text-slate-800 font-display">Historical backups</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  Daily copies are kept for 30 days and one monthly copy for 12 months. Backups cover all company databases; uploaded files are not included.
+                  Daily copies are kept for 30 days and one monthly copy for 12 months. Backups cover invoices, payments and customers of all three companies. Invoice PDFs are rebuilt from this data.
                 </p>
               </div>
               <div className="flex gap-2">
@@ -605,6 +662,7 @@ export default function Settings() {
               </div>
             )}
           </Card>
+          {backupStatus && <BackupSummary status={backupStatus} info={backupInfo} />}
           <Card className="overflow-hidden">
             {backupsLoading ? <p className="p-5 text-sm text-slate-500">Loading backups...</p> : backups.length === 0 ? (
               <p className="p-5 text-sm text-slate-500">No backup snapshots are available.</p>
@@ -619,7 +677,10 @@ export default function Settings() {
                       <td className="px-4 py-3 font-mono text-xs">{backup.key}</td>
                       <td className="px-4 py-3 capitalize">{backup.kind}</td>
                       <td className="px-4 py-3">{(backup.size_bytes / (1024 * 1024)).toFixed(2)} MB</td>
-                      <td className="px-4 py-3 text-right">
+                      <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
+                        <Btn variant="outline" disabled={Boolean(backupAction)} onClick={() => verifyBackup(backup)} data-testid={`verify-backup-${backup.key}`}>
+                          <ShieldCheck size={15} /> {backupAction === `verify:${backup.key}` ? "Verifying..." : verified[backup.key] === "verified" ? "Verified" : verified[backup.key] === "failed" ? "FAILED - retry" : "Verify backup"}
+                        </Btn>
                         <Btn variant="outline" disabled={Boolean(backupAction)} onClick={() => restoreBackup(backup)} data-testid={`restore-backup-${backup.kind}`}>
                           <RotateCcw size={15} /> {backupAction === backup.key ? "Restoring..." : "Restore to copy"}
                         </Btn>

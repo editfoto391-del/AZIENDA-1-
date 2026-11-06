@@ -65,6 +65,30 @@ export const canonicalInvoiceSize = (size) => {
   return value.replace(/×/g, "x").replace(/\s+/g, "").toLowerCase();
 };
 
+const invoiceStockProductKey = (category) => {
+  const canonical = canonicalInvoiceCategory(category);
+  if (["Standard", "Simple", "Simple/Mix color"].includes(canonical)) return "simple";
+  if (canonical === "Candy") return "candy";
+  return canonical.toLowerCase();
+};
+
+export const invoiceStockLinesChanged = (previousItems = [], nextItems = []) => {
+  const quantitiesByProductAndSize = (items) => {
+    const quantities = new Map();
+    items.forEach((item) => {
+      const size = canonicalInvoiceSize(item.size);
+      const product = invoiceStockProductKey(item.category);
+      if (!product || !size) return;
+      const key = `${product}|${size.toLowerCase()}`;
+      quantities.set(key, (quantities.get(key) || 0) + (Number(item.qty) || 0));
+    });
+    return [...quantities.entries()].sort(([left], [right]) => left.localeCompare(right));
+  };
+
+  return JSON.stringify(quantitiesByProductAndSize(previousItems))
+    !== JSON.stringify(quantitiesByProductAndSize(nextItems));
+};
+
 export const isManualInvoicePrice = (category, size, unifiedPriceList) =>
   !unifiedPriceList
   && RIBBON_CATEGORIES.has(canonicalInvoiceCategory(category))
