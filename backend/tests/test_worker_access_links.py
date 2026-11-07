@@ -102,6 +102,7 @@ def test_workers_can_access_only_their_own_notification_routes(section):
         ("/api/notifications", "GET"),
         ("/api/notifications/notification-1/read", "POST"),
         ("/api/notifications/notification-1/dismiss", "POST"),
+        ("/api/notifications/dismiss-all", "POST"),
     ):
         server.enforce_worker_api_access(request(path, "unused", method), worker)
 

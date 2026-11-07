@@ -615,6 +615,7 @@ def enforce_worker_api_access(request, user):
         return
     if (
         (path == "notifications" and method == "GET")
+        or (path == "notifications/dismiss-all" and method == "POST")
         or (
             re.fullmatch(r"notifications/[^/]+/(dismiss|read)", path)
             and method == "POST"
@@ -9037,6 +9038,28 @@ async def mark_notification_read(notification_id: str, user=Depends(get_current_
     if not result.matched_count:
         raise HTTPException(404, "Notification not found")
     return {"ok": True}
+
+@api.post("/notifications/dismiss-all")
+async def dismiss_all_notifications(user=Depends(get_current_user)):
+    require_global_owner(user)
+    result = await base_db.notifications.update_many(
+        {
+            "company_id": active_company_id.get(),
+            "recipient_user_id": user["id"],
+            "archived": {"$ne": True},
+            "permanently_dismissed": {"$ne": True},
+        },
+        {
+            "$set": {
+                "read": True,
+                "permanently_dismissed": True,
+                "hidden_until": None,
+                "dismissed_at": now_iso(),
+                "dismissed_by": user["id"],
+            },
+        },
+    )
+    return {"ok": True, "dismissed_count": result.modified_count}
 
 class IntercompanyOrderLineIn(BaseModel):
     stock_id: str = Field(min_length=1, max_length=100)

@@ -172,6 +172,7 @@ export default function Layout() {
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [dismissingNotificationIds, setDismissingNotificationIds] = useState([]);
+  const [dismissingAllNotifications, setDismissingAllNotifications] = useState(false);
   const nav = useNavigate();
   const dedicatedDomain = dedicatedCompanyDomain();
 
@@ -199,6 +200,19 @@ export default function Layout() {
       toast.error(apiError(error));
     } finally {
       setDismissingNotificationIds((current) => current.filter((id) => id !== notification.id));
+    }
+  };
+  const dismissAllNotifications = async () => {
+    if (dismissingAllNotifications) return;
+    setDismissingAllNotifications(true);
+    try {
+      const result = await api.post("/notifications/dismiss-all", {});
+      await loadNotifications(true);
+      toast.success(`${result.dismissed_count} notification${result.dismissed_count === 1 ? "" : "s"} dismissed`);
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setDismissingAllNotifications(false);
     }
   };
   const openNotification = async (notification) => {
@@ -348,7 +362,10 @@ export default function Layout() {
             {notificationsOpen && <div className="absolute right-0 top-full z-50 mt-2 w-[min(24rem,calc(100vw-1.5rem))] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl" role="dialog" aria-label="Notifications">
               <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
                 <h2 className="font-bold text-slate-900">Notifications</h2>
-                <button type="button" onClick={() => setNotificationsOpen(false)} className="text-xs font-semibold text-slate-500 hover:text-slate-900">Close</button>
+                <div className="flex items-center gap-3">
+                  {user?.is_primary_owner && user?.is_owner && !user?.is_worker && <button type="button" onClick={dismissAllNotifications} disabled={dismissingAllNotifications || notifications.length === 0} className="text-xs font-semibold text-red-600 hover:text-red-800 disabled:opacity-50" data-testid="dismiss-all-notifications-btn">{dismissingAllNotifications ? "Dismissing…" : "Dismiss all"}</button>}
+                  <button type="button" onClick={() => setNotificationsOpen(false)} className="text-xs font-semibold text-slate-500 hover:text-slate-900">Close</button>
+                </div>
               </div>
               <div className="max-h-[min(65vh,28rem)] overflow-y-auto">
                 {notifications.length === 0 ? <p className="px-4 py-7 text-center text-sm text-slate-500">You are all caught up.</p> : notifications.map((notification) => (
