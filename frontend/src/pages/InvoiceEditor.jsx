@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useRef } from "react";
 import { InvoiceDocument } from "@/components/InvoiceDocument";
-import { DeliveryNote } from "@/components/DeliveryNote";
+import { DeliveryNote, orderLines } from "@/components/DeliveryNote";
 import { elementToPdf, printElement } from "@/lib/pdf";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -90,6 +90,9 @@ export default function InvoiceEditor({ express = false }) {
   const invoicesPath = express ? "/express-invoices" : "/invoices";
   const [customers, setCustomers] = useState([]);
   const [drivers, setDrivers] = useState([]);
+  const [deliveryNotes, setDeliveryNotes] = useState([]);
+  const [loadingDeliveryNotes, setLoadingDeliveryNotes] = useState(false);
+  const [selectedDeliveryNote, setSelectedDeliveryNote] = useState("");
   const [previousInvoices, setPreviousInvoices] = useState([]);
   const [loadingPreviousInvoices, setLoadingPreviousInvoices] = useState(false);
   const [prices, setPrices] = useState([]);
@@ -184,6 +187,29 @@ export default function InvoiceEditor({ express = false }) {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, user?.can_edit_invoices_without_supervisor, isInvoiceOwner, express]);
+
+  useEffect(() => {
+    if (id) {
+      setDeliveryNotes([]);
+      setSelectedDeliveryNote("");
+      return undefined;
+    }
+
+    let active = true;
+    setLoadingDeliveryNotes(true);
+    api.getUncached("/orders")
+      .then((orders) => {
+        if (active) setDeliveryNotes((orders || []).filter((order) => order.status !== "Cancelled"));
+      })
+      .catch((error) => {
+        if (active) toast.error(`Could not load delivery notes: ${apiError(error)}`);
+      })
+      .finally(() => {
+        if (active) setLoadingDeliveryNotes(false);
+      });
+
+    return () => { active = false; };
+  }, [id]);
 
   useEffect(() => {
     let active = true;
@@ -424,6 +450,46 @@ export default function InvoiceEditor({ express = false }) {
     }
     setInv({ ...inv, customer_id: cid, customer_name: c.name, client_number: c.client_number || "", payment_terms: c.payment_terms, zone: items === inv.items ? inv.zone : zone, items, destination: inv.destination || c.city || "" });
     if (!c.city) toast.info("This customer has no saved city. Please confirm the delivery destination.");
+  };
+
+  const loadDeliveryNote = (orderId) => {
+    setSelectedDeliveryNote(orderId);
+    if (!orderId) return;
+    const order = deliveryNotes.find((item) => item.id === orderId);
+    if (!order) return;
+
+    const hasInvoiceData = !!inv.customer_id || !!inv.customer_name
+      || (inv.items || []).some((item) => item.size || item.description);
+    if (hasInvoiceData && !window.confirm("Replace the current customer and products with the selected delivery note?")) {
+      setSelectedDeliveryNote("");
+      return;
+    }
+
+    const customer = customers.find((item) => item.id === order.customer_id)
+      || customers.find((item) => item.name.trim().toLowerCase() === String(order.customer_name || "").trim().toLowerCase());
+    const zone = unifiedPriceList ? 1 : Number(customer?.default_zone || inv.zone);
+    const noteItems = orderLines(order).map((item) => ({
+      ...emptyItem(["Standard", "Simple"].includes(item.category) ? "Simple/Mix color" : item.category || ""),
+      qty: Number(item.qty) || 0,
+      category: ["Standard", "Simple"].includes(item.category) ? "Simple/Mix color" : item.category || "",
+      size: item.size || "",
+      description: item.description || "",
+    }));
+    const items = noteItems.length
+      ? noteItems.map((item) => item.category ? repriceItems([item], zone)[0] : item)
+      : [emptyItem()];
+
+    setInv((current) => ({
+      ...current,
+      customer_id: customer?.id || order.customer_id || "",
+      customer_name: customer?.name || order.customer_name || "",
+      client_number: customer?.client_number || "",
+      payment_terms: customer?.payment_terms || current.payment_terms,
+      zone,
+      destination: order.destination || customer?.city || "",
+      items,
+    }));
+    toast.success(`Loaded customer and products from delivery note ${order.reference}`);
   };
 
   const setCustomerName = (name) => {
@@ -985,7 +1051,20 @@ export default function InvoiceEditor({ express = false }) {
           <fieldset disabled={locked} className="space-y-6 min-w-0" data-testid="invoice-form">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <Card className="p-5"><h3 className="font-bold text-slate-800 font-display mb-4 flex items-center gap-2">1. Customer Information</h3>
-                <div className="space-y-4"><Input label="Customer *" list="invoice-customer-options" value={inv.customer_name || ""} onChange={(e) => setCustomerName(e.target.value)} data-testid="invoice-customer-select" />
+                <div className="space-y-4">
+                {!id && <Select
+                  label="Load from Delivery Note"
+                  value={selectedDeliveryNote}
+                  onChange={(event) => loadDeliveryNote(event.target.value)}
+                  disabled={loadingDeliveryNotes}
+                  data-testid="invoice-delivery-note-select"
+                >
+                  <option value="">{loadingDeliveryNotes ? "Loading delivery notes..." : "Select a delivery note..."}</option>
+                  {deliveryNotes.map((order) => <option key={order.id} value={order.id}>
+                    {order.reference} · {order.customer_name || "Customer"}{order.expected_ship_date ? ` · ${order.expected_ship_date}` : ""}
+                  </option>)}
+                </Select>}
+                <Input label="Customer *" list="invoice-customer-options" value={inv.customer_name || ""} onChange={(e) => setCustomerName(e.target.value)} data-testid="invoice-customer-select" />
                 <datalist id="invoice-customer-options">{customers.filter((customer) => customer.active).map((customer) => <option key={customer.id} value={customer.name} />)}</datalist>
                 <div className={`grid ${unifiedPriceList ? "grid-cols-1" : "grid-cols-2"} gap-3`}>{!unifiedPriceList && <Select label="Price Zone" value={inv.zone} onChange={(e) => changeZone(Number(e.target.value))} data-testid="invoice-zone-select">
                   <option value={1}>Zone 1</option><option value={2}>Zone 2</option>

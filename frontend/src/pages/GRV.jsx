@@ -227,6 +227,7 @@ export default function GRV() {
   const [suppliers, setSuppliers] = useState([]);
   const [orders, setOrders] = useState([]);
   const [stock, setStock] = useState([]);
+  const [stockSearchByLine, setStockSearchByLine] = useState({});
   const [settings, setSettings] = useState({});
   const [filters, setFilters] = useState({ date_from: "", date_to: "", supplier_id: "", status: "" });
   const [draft, setDraft] = useState(null);
@@ -297,8 +298,22 @@ export default function GRV() {
     }));
   };
 
+  const updateStockSearch = (index, value) => {
+    setStockSearchByLine((current) => ({ ...current, [index]: value }));
+  };
+
+  const removeLine = (index) => {
+    setDraft((current) => ({ ...current, items: current.items.filter((_, row) => row !== index) }));
+    setStockSearchByLine((current) => Object.fromEntries(
+      Object.entries(current)
+        .filter(([lineIndex]) => Number(lineIndex) !== index)
+        .map(([lineIndex, value]) => [Number(lineIndex) > index ? Number(lineIndex) - 1 : Number(lineIndex), value]),
+    ));
+  };
+
   const chooseOrder = (orderId) => {
     if (!orderId) {
+      setStockSearchByLine({});
       setDraft((current) => ({ ...current, purchase_order_id: "", supplier_id: "", supplier_name: "", items: [blankLine()] }));
       return;
     }
@@ -326,9 +341,11 @@ export default function GRV() {
       supplier_name: order.supplier_name || "",
       items: lines,
     }));
+    setStockSearchByLine({});
   };
 
   const chooseStock = (index, stockId) => {
+    updateStockSearch(index, "");
     if (stockId === "__new_product__") {
       setDraft((current) => ({
         ...current,
@@ -574,10 +591,12 @@ export default function GRV() {
         <Btn variant="outline" onClick={refresh} disabled={records === null} data-testid="grv-refresh"><RefreshCw size={16} /> Refresh</Btn>
         <Btn onClick={() => {
           setScanReceivingMode(false);
+          setStockSearchByLine({});
           setDraft({ ...blankGRV(), received_by: user?.name || user?.email || "" });
         }} data-testid="grv-create"><Plus size={16} /> Create GRV</Btn>
         <Btn variant="outline" onClick={() => {
           setScanReceivingMode(true);
+          setStockSearchByLine({});
           setDraft({ ...blankGRV(), received_by: user?.name || user?.email || "" });
         }} data-testid="grv-quick-create"><ScanLine size={16} /> Quick GRV</Btn>
       </PageHeader>
@@ -698,7 +717,7 @@ export default function GRV() {
                     <td className="px-4 py-3 text-right">
                       <div className="flex flex-wrap justify-end gap-1">
                         <button type="button" onClick={() => exportPdf(grv)} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="Download GRV PDF" aria-label={`Download PDF ${grv.grv_number}`} data-testid={`grv-pdf-${grv.id}`}><Download size={16} /></button>
-                        {grv.status === "draft" && <button type="button" onClick={() => { setScanReceivingMode(false); setDraft({ ...grv, received_by: grv.received_by || "" }); }} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="Edit draft" aria-label={`Edit ${grv.grv_number}`} data-testid={`grv-edit-${grv.id}`}><Pencil size={15} /></button>}
+                        {grv.status === "draft" && <button type="button" onClick={() => { setScanReceivingMode(false); setStockSearchByLine({}); setDraft({ ...grv, received_by: grv.received_by || "" }); }} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="Edit draft" aria-label={`Edit ${grv.grv_number}`} data-testid={`grv-edit-${grv.id}`}><Pencil size={15} /></button>}
                         {grv.status === "draft" && <button type="button" onClick={() => act(grv, "inspect")} disabled={busy} className="rounded px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50" data-testid={`grv-inspect-${grv.id}`}>Inspect</button>}
                         {["draft", "pending_inspection", "confirming"].includes(grv.status) && <button type="button" onClick={() => act(grv, "confirm", `Confirm ${grv.grv_number}? Accepted quantities will be posted to Stock once.`)} disabled={busy} className="rounded px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50" data-testid={`grv-confirm-${grv.id}`}>{busy ? "Working..." : grv.status === "confirming" ? "Retry confirm" : "Confirm"}</button>}
                         {["draft", "pending_inspection"].includes(grv.status) && <button type="button" onClick={() => act(grv, "cancel")} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Cancel draft" data-testid={`grv-cancel-${grv.id}`}><Ban size={15} /></button>}
@@ -787,11 +806,52 @@ export default function GRV() {
                         <input placeholder="Size / measurement *" value={line.size} onChange={(event) => updateLine(index, "size", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-new-product-size-${index}`} />
                         <button type="button" onClick={() => chooseStock(index, "")} className="col-span-2 text-left text-xs text-primary hover:underline" data-testid={`grv-select-existing-product-${index}`}>Choose an existing stock product instead</button>
                       </div>
-                      : <Select aria-label="Stock product" value={line.stock_id} onChange={(event) => chooseStock(index, event.target.value)} data-testid={`grv-stock-${index}`}>
-                        <option value="">Select stock item</option>
-                        <option value="__new_product__">+ Create new product / category</option>
-                        {stock.map((item) => <option key={item.id} value={item.id}>{item.product} · {item.size}</option>)}
-                      </Select>
+                      : <div className="min-w-[220px] space-y-1.5" data-testid={`grv-stock-${index}`}>
+                        <input
+                          type="search"
+                          aria-label="Search stock products"
+                          placeholder="Type product, size or code..."
+                          value={stockSearchByLine[index] || ""}
+                          onChange={(event) => updateStockSearch(index, event.target.value)}
+                          className="w-full rounded border border-input px-2 py-1.5"
+                          data-testid={`grv-stock-search-${index}`}
+                        />
+                        {line.stock_id && !stockSearchByLine[index] && <span className="block text-xs text-slate-600">
+                          Selected: {line.product} · {line.size}
+                        </span>}
+                        {stockSearchByLine[index]?.trim() && (() => {
+                          const query = stockSearchByLine[index].trim().toLowerCase();
+                          const matches = stock.filter((item) =>
+                            [item.product, item.size, item.code, item.sku, item.id]
+                              .some((value) => String(value || "").toLowerCase().includes(query))
+                          );
+                          return matches.length
+                            ? <div className="max-h-40 overflow-y-auto rounded border border-border bg-white shadow-sm" role="listbox" aria-label="Stock search results">
+                              {matches.slice(0, 20).map((item) => (
+                                <button
+                                  key={item.id}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={line.stock_id === item.id}
+                                  onClick={() => chooseStock(index, item.id)}
+                                  className="block w-full border-b border-border/60 px-2 py-1.5 text-left text-xs last:border-0 hover:bg-primary/5"
+                                  data-testid={`grv-stock-result-${index}-${item.id}`}
+                                >
+                                  <span className="block font-semibold text-slate-800">{item.product} · {item.size}</span>
+                                  {(item.code || item.sku) && <span className="text-slate-500">{item.code || item.sku}</span>}
+                                </button>
+                              ))}
+                              {matches.length > 20 && <span className="block px-2 py-1 text-xs text-slate-500">Showing first 20 results. Refine your search.</span>}
+                            </div>
+                            : <span className="text-xs text-slate-500">No stock item matches that search.</span>;
+                        })()}
+                        <button
+                          type="button"
+                          onClick={() => chooseStock(index, "__new_product__")}
+                          className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-sm font-bold text-primary transition-colors hover:border-primary hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                          data-testid={`grv-create-stock-product-${index}`}
+                        ><Plus size={15} /> Create new product / category</button>
+                      </div>
                       : <><span className="block font-semibold text-slate-800">{line.product}</span><span className="text-slate-500">{line.size} · {line.product_code}</span></>}
                   </td>
                   {scanReceivingMode ? <>
@@ -827,7 +887,7 @@ export default function GRV() {
                       </td>
                     ))}
                     <td className="p-2 text-right font-mono font-semibold">{fmtMoney(lineValue(line))}</td>
-                    <td className="p-2"><button type="button" onClick={() => setDraft((current) => ({ ...current, items: current.items.filter((_, row) => row !== index) }))} className="text-xs text-red-700 hover:underline">Remove</button></td>
+                    <td className="p-2"><button type="button" onClick={() => removeLine(index)} className="text-xs text-red-700 hover:underline">Remove</button></td>
                   </> : <>
                     {[
                       ["actual_received_quantity", line.actual_received_quantity],
@@ -860,7 +920,7 @@ export default function GRV() {
                       </td>
                     ))}
                     <td className="p-2 text-right font-mono font-semibold">{fmtMoney(lineValue(line))}</td>
-                    {!draft.purchase_order_id && <td className="p-2"><button type="button" onClick={() => setDraft({ ...draft, items: draft.items.filter((_, row) => row !== index) })} className="text-xs text-red-700 hover:underline">Remove</button></td>}
+                    {!draft.purchase_order_id && <td className="p-2"><button type="button" onClick={() => removeLine(index)} className="text-xs text-red-700 hover:underline">Remove</button></td>}
                   </>}
                 </tr>
               ))}</tbody>

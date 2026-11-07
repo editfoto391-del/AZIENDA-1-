@@ -14731,6 +14731,55 @@ class OrderIn(BaseModel):
             raise ValueError("Priority must be Low, Normal, High or Urgent")
         return value
 
+class DriverDeliveryConfirmationIn(BaseModel):
+    signature_data: str = Field(min_length=30, max_length=180000)
+    driver_name: str = Field(min_length=1, max_length=100)
+    driver_confirmed: bool
+
+    @field_validator("driver_name")
+    @classmethod
+    def clean_driver_name(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("Driver name is required")
+        return value
+
+    @field_validator("driver_confirmed")
+    @classmethod
+    def require_driver_confirmation(cls, value):
+        if not value:
+            raise ValueError("Driver must confirm the loaded items")
+        return value
+
+def validate_signature_png(signature_data):
+    prefix = "data:image/png;base64,"
+    if not signature_data.startswith(prefix):
+        raise HTTPException(422, "Signature must be a PNG image")
+    try:
+        image = base64.b64decode(signature_data[len(prefix):], validate=True)
+    except (ValueError, base64.binascii.Error) as error:
+        raise HTTPException(422, "Signature image is invalid") from error
+    if len(image) > 128 * 1024:
+        raise HTTPException(413, "Signature image is too large")
+    if not image.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(422, "Signature image is invalid")
+
+def delivery_invoice_snapshot(invoice):
+    if not invoice:
+        return None
+    return {
+        "invoice_number": invoice.get("number") or invoice.get("reference") or "",
+        "items": [
+            {
+                key: item.get(key)
+                for key in ("qty", "category", "description", "size")
+                if key in item
+            }
+            for item in invoice.get("items", [])
+            if isinstance(item, dict)
+        ],
+    }
+
 @api.get("/orders")
 async def get_orders(
     include_archived: bool = False,
@@ -14829,7 +14878,11 @@ async def get_orders(
             "items": items, "total": total, "page": page, "page_size": page_size,
             "status_counts": status_counts,
         }
-    return await listall("orders", flt, sort=("created_at", -1))
+    orders = await listall("orders", flt, sort=("created_at", -1))
+    for order in orders:
+        order.pop("signature_data", None)
+        order.pop("driver_signature_data", None)
+    return orders
 
 @api.post("/orders")
 async def add_order(body: OrderIn, user=Depends(get_current_user)):
@@ -14863,6 +14916,12 @@ async def edit_order(oid: str, body: OrderIn, user=Depends(get_current_user)):
     if existing.get("archived") or existing.get("status") == "Cancelled":
         raise HTTPException(404, "Order not found")
     d = body.model_dump()
+    if existing.get("driver_signature_data") and (
+        d.get("items", []) != existing.get("items", [])
+        or d.get("products", "") != existing.get("products", "")
+        or d.get("invoice_id", "") != existing.get("invoice_id", "")
+    ):
+        raise HTTPException(409, "Order items and invoice cannot be changed after driver confirmation")
     d["reference"] = existing.get("reference")
     if d.get("status") == "Delivered":
         d["completed_at"] = (
@@ -14885,8 +14944,106 @@ async def edit_order(oid: str, body: OrderIn, user=Depends(get_current_user)):
             raise HTTPException(400, "Invoice must belong to the selected customer")
         d["invoice_number"] = invoice.get("number") or invoice.get("reference") or ""
     record = await update_doc("orders", oid, d)
+    record.pop("signature_data", None)
+    record.pop("driver_signature_data", None)
     await emit_workflow_event("order.updated", record)
     return record
+
+@api.get("/orders/{oid}/driver-confirmation")
+async def get_order_driver_confirmation(oid: str, user=Depends(get_current_user)):
+    order = await db.orders.find_one(
+        {"id": oid, "archived": {"$ne": True}, "status": {"$ne": "Cancelled"}},
+        {"_id": 0, "invoice_id": 1, "invoice_number": 1, "customer_id": 1,
+         "driver_signature_data": 1, "driver_name": 1, "driver_confirmed_at": 1,
+         "driver_confirmation_snapshot": 1},
+    )
+    if not order:
+        raise HTTPException(404, "Order not found")
+    invoice_snapshot = None
+    if order.get("driver_confirmation_snapshot"):
+        invoice_snapshot = order["driver_confirmation_snapshot"].get("invoice_snapshot")
+    elif order.get("invoice_id"):
+        invoice = await db.invoices.find_one(
+            {"id": order["invoice_id"]},
+            {"_id": 0, "number": 1, "reference": 1, "customer_id": 1, "items": 1},
+        )
+        if invoice and invoice.get("customer_id") == order.get("customer_id"):
+            invoice_snapshot = delivery_invoice_snapshot(invoice)
+    return {
+        "signature_data": order.get("driver_signature_data", ""),
+        "driver_name": order.get("driver_name", ""),
+        "confirmed_at": order.get("driver_confirmed_at", ""),
+        "confirmation_snapshot": order.get("driver_confirmation_snapshot"),
+        "invoice_snapshot": invoice_snapshot,
+    }
+
+@api.post("/orders/{oid}/driver-confirmation")
+async def save_order_driver_confirmation(oid: str, body: DriverDeliveryConfirmationIn, user=Depends(get_current_user)):
+    validate_signature_png(body.signature_data)
+    existing = await db.orders.find_one(
+        {"id": oid, "archived": {"$ne": True}, "status": {"$ne": "Cancelled"}},
+        {"_id": 0, "id": 1, "reference": 1, "invoice_id": 1, "invoice_number": 1,
+         "items": 1, "products": 1, "driver_signature_data": 1},
+    )
+    if not existing:
+        raise HTTPException(404, "Order not found")
+    if existing.get("driver_signature_data"):
+        raise HTTPException(409, "This delivery has already been confirmed by the driver")
+    invoice_snapshot = None
+    if existing.get("invoice_id"):
+        invoice = await db.invoices.find_one(
+            {"id": existing["invoice_id"]},
+            {"_id": 0, "number": 1, "reference": 1, "customer_id": 1, "items": 1},
+        )
+        if not invoice or invoice.get("customer_id") != existing.get("customer_id"):
+            raise HTTPException(409, "The linked invoice could not be verified for this order")
+        invoice_snapshot = delivery_invoice_snapshot(invoice)
+    confirmation_time = now_iso()
+    snapshot = {
+        "order_reference": existing.get("reference", ""),
+        "invoice_id": existing.get("invoice_id", ""),
+        "invoice_number": existing.get("invoice_number", ""),
+        "invoice_snapshot": invoice_snapshot,
+        "items": [
+            {
+                key: item.get(key)
+                for key in ("qty", "category", "description", "size")
+                if key in item
+            }
+            for item in existing.get("items", [])
+            if isinstance(item, dict)
+        ],
+        "products": existing.get("products", ""),
+        "driver_confirmed_items_match": True,
+    }
+    result = await db.orders.update_one(
+        {
+            "id": oid,
+            "archived": {"$ne": True},
+            "status": {"$ne": "Cancelled"},
+            "driver_signature_data": {"$in": [None, ""]},
+        },
+        {"$set": {
+            "driver_signature_data": body.signature_data,
+            "driver_name": body.driver_name,
+            "driver_confirmed_at": confirmation_time,
+            "driver_confirmation_snapshot": snapshot,
+            "updated_at": confirmation_time,
+        }},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(409, "This delivery has already been confirmed by the driver")
+    confirmation = {
+        "driver_name": body.driver_name,
+        "confirmed_at": confirmation_time,
+        "confirmation_snapshot": snapshot,
+    }
+    await log_audit(
+        "order", oid, "driver_confirmed_delivery_items", user,
+        after={key: value for key, value in confirmation.items() if key != "confirmation_snapshot"}
+        | {"confirmation_snapshot": snapshot},
+    )
+    return confirmation
 
 @api.delete("/orders/{oid}")
 async def del_order(oid: str, permanent: bool = False, user=Depends(get_current_user)):

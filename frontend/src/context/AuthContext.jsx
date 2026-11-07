@@ -94,7 +94,7 @@ export function AuthProvider({ children }) {
     const navigationType = window.performance.getEntriesByType("navigation")[0]?.type;
     const generalSiteEntry = window.location.pathname === "/" && navigationType === "navigate";
     const dedicatedDomain = dedicatedCompanyDomain();
-    api.get("/auth/me").then((authenticatedUser) => {
+    api.getUncached("/auth/me", undefined, { timeout: 10000 }).then((authenticatedUser) => {
       if (authenticatedUser.is_worker && (
         generalSiteEntry
         || window.sessionStorage.getItem("erp-worker-access-session") !== "true"

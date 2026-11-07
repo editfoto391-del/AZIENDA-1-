@@ -2,7 +2,10 @@ import axios from "axios";
 import { GET_CACHE_MS, isCacheEntryFresh, pruneExpiredCache } from "./apiCache.mjs";
 import { activeAuthToken } from "./activeAuthToken.mjs";
 
-const BASE = `${process.env.REACT_APP_BACKEND_URL}/api`;
+export const API_BASE_URL = import.meta.env.DEV
+  ? "/__api"
+  : `${process.env.REACT_APP_BACKEND_URL}/api`;
+const BASE = API_BASE_URL;
 const client = axios.create({ baseURL: BASE, withCredentials: true });
 const pendingGets = new Map();
 const cachedGets = new Map();

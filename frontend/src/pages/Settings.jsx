@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDateTime } from "@/lib/format";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader } from "@/components/common";
-import { Building2, Receipt, Tag, Truck, Save, Pencil, Plus, ShieldCheck, Fuel, MapPin, Smartphone, Trash2, UserPlus, CirclePause, CirclePlay, KeyRound, Database, RotateCcw } from "lucide-react";
+import { Building2, Receipt, Tag, Truck, Save, Pencil, Plus, ShieldCheck, Fuel, MapPin, Smartphone, Trash2, UserPlus, CirclePause, CirclePlay, KeyRound, Database, RotateCcw, Search, X } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { usesUnifiedPriceList } from "@/lib/company";
 import shop2shopQr from "@/assets/shop2shop-n29rxh.png";
@@ -194,6 +194,8 @@ export default function Settings() {
   const [dieselSaving, setDieselSaving] = useState(false);
   const [prices, setPrices] = useState([]);
   const [showUnpricedPrices, setShowUnpricedPrices] = useState(false);
+  const [showPriceSearch, setShowPriceSearch] = useState(false);
+  const [priceSearch, setPriceSearch] = useState("");
   const [drivers, setDrivers] = useState([]);
   const [accessUsers, setAccessUsers] = useState([]);
   const [companies, setCompanies] = useState([]);
@@ -487,6 +489,10 @@ export default function Settings() {
   const unpricedZonePrices = zonePrices.filter((price) => price.price == null || price.confirmed === false);
   const visibleZonePrices = showUnpricedPrices ? unpricedZonePrices : zonePrices;
   const priceProductName = (category) => ["Standard", "Simple"].includes(category) ? "Simple/Mix color" : category;
+  const filteredZonePrices = visibleZonePrices.filter((price) =>
+    !priceSearch.trim() || [priceProductName(price.category), price.category, price.size, price.price]
+      .some((value) => String(value ?? "").toLowerCase().includes(priceSearch.trim().toLowerCase()))
+  );
 
   return (
     <div>
@@ -547,8 +553,32 @@ export default function Settings() {
               {[1, 2].map((z) => <button key={z} onClick={() => setZone(z)} className={`px-4 py-2 rounded-lg text-sm font-semibold ${zone === z ? "bg-primary text-white" : "bg-white border border-border text-slate-600"}`}>Zone {z}</button>)}
               </>}
             </div>
-            <Btn onClick={() => setPModal({ zone: unifiedPriceList ? 1 : zone, category: "Simple/Mix color", size: "", price: "", active: true })} data-testid="add-price-btn"><Plus size={16} /> Add Price</Btn>
+            <div className="flex gap-2">
+              <Btn
+                variant="outline"
+                onClick={() => {
+                  setShowPriceSearch((current) => !current);
+                  setPriceSearch("");
+                }}
+                aria-expanded={showPriceSearch}
+                data-testid="toggle-price-search"
+              >
+                {showPriceSearch ? <X size={16} /> : <Search size={16} />}
+                {showPriceSearch ? "Close search" : "Search"}
+              </Btn>
+              <Btn onClick={() => setPModal({ zone: unifiedPriceList ? 1 : zone, category: "Simple/Mix color", size: "", price: "", active: true })} data-testid="add-price-btn"><Plus size={16} /> Add Price</Btn>
+            </div>
           </div>
+          {showPriceSearch && <div className="mb-4 max-w-md">
+            <Input
+              label="Search products and prices"
+              value={priceSearch}
+              onChange={(event) => setPriceSearch(event.target.value)}
+              placeholder="Type product, size or price..."
+              autoFocus
+              data-testid="price-search-input"
+            />
+          </div>}
           <p className="mb-3 text-sm text-slate-500">Add a product with a name and price to make it immediately selectable in invoice product lists.</p>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4">
             <div>
@@ -571,11 +601,15 @@ export default function Settings() {
                 <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
                   <th className="px-4 py-3 font-semibold">Product / Category</th><th className="px-4 font-semibold">Size / Unit</th><th className="px-4 font-semibold text-right">Unit Price</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
                 </tr></thead>
-                <tbody>{visibleZonePrices.length === 0
+                <tbody>{filteredZonePrices.length === 0
                   ? <tr><td colSpan={5} className="px-4 py-6 text-center text-sm text-slate-500">
-                    {showUnpricedPrices ? "All measures in this zone have a confirmed price." : "No prices configured for this zone."}
+                    {priceSearch.trim()
+                      ? "No products or prices match your search."
+                      : showUnpricedPrices
+                        ? "All measures in this zone have a confirmed price."
+                        : "No prices configured for this zone."}
                   </td></tr>
-                  : visibleZonePrices.map((p) => (
+                  : filteredZonePrices.map((p) => (
                   <tr key={p.id} className="border-b border-border/60 hover:bg-slate-50">
                     <td className="px-4 py-2.5 font-semibold text-slate-700">{priceProductName(p.category)}</td>
                     <td className="px-4 font-mono text-slate-600">{p.size}</td>

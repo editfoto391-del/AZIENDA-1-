@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { api, apiError, invalidateGetCache } from "@/lib/api";
+import { API_BASE_URL, api, apiError, invalidateGetCache } from "@/lib/api";
 import { fmtDateTime } from "@/lib/format";
 import { Card, Btn, PageHeader } from "@/components/common";
 import { Sparkles, Send, Plus, Trash2, MessageSquare } from "lucide-react";
 import { listViewState, loadListRequest } from "@/lib/listRequest.mjs";
 
 const SUGGESTIONS = ["Who owes me money right now?", "What is the diesel price in Kokstad today?", "Summarise this week's expenses and estimated result", "Which orders are urgent to send?"];
-const BASE = `${process.env.REACT_APP_BACKEND_URL}/api`;
-
 function Bubble({ m, idx }) {
   const mine = m.role === "user";
   return (
@@ -92,7 +90,7 @@ export default function Assistant() {
     const append = (t) => setMessages((m) => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], content: c[c.length - 1].content + t }; return c; });
     try {
       invalidateGetCache();
-      const res = await fetch(`${BASE}/assistant/chat`, {
+      const res = await fetch(`${API_BASE_URL}/assistant/chat`, {
         method: "POST", credentials: "include",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
         body: JSON.stringify({ message: msg, session_id: sid }),

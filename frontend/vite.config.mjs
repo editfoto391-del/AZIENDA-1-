@@ -172,6 +172,13 @@ export default defineConfig(async ({ mode, command }) => {
       host: true,
       port: 3000,
       allowedHosts: true,
+      proxy: env.REACT_APP_BACKEND_URL ? {
+        "/__api": {
+          target: env.REACT_APP_BACKEND_URL,
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/__api/, "/api"),
+        },
+      } : undefined,
       headers: {
         "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
         Pragma: "no-cache",

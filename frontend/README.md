@@ -13,6 +13,10 @@ at build time via `vite.config.mjs`).
 For local setup, copy `frontend/.env.example` to `frontend/.env` and set the backend URL.
 Copy `backend/.env.example` to `backend/.env` and replace its placeholders with your local
 database connection and private credentials. Never commit the populated `.env` files.
+During Vite development, API requests use the same-origin `/__api` path and are proxied to
+`REACT_APP_BACKEND_URL`; this lets remote workspace previews reach the backend without the
+browser trying to connect to its own `localhost`. Production builds continue to use the
+configured backend URL directly.
 
 ## Scripts
 

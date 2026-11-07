@@ -3,14 +3,22 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtDateTime, fmtMoney, documentFilename } from "@/lib/format";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal, PageHeader, Empty } from "@/components/common";
-import { ClipboardList, Plus, Trash2, Pencil, ArrowRight, Eye, FileText, Printer, Download, Search } from "lucide-react";
+import { ClipboardList, Plus, Trash2, Pencil, ArrowRight, Eye, FileText, Printer, Download, Search, RotateCcw, MoreHorizontal } from "lucide-react";
 import { useRef } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { DeliveryNote, orderLines } from "@/components/DeliveryNote";
 import { elementToPdf, printElement } from "@/lib/pdf";
 import BarcodeScanner from "@/components/BarcodeScanner";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 const STATUSES = ["To Send", "Preparing", "Assigned", "Dispatched", "Delivered", "Cancelled"];
+const statusLabel = (status) => `${status}?`;
 const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
 const S_META = {
   "To Send": "bg-slate-100 text-slate-700 border-slate-200", Preparing: "bg-indigo-50 text-indigo-700 border-indigo-200",
@@ -45,22 +53,233 @@ const priceCategoriesForProduct = (product) => {
   return [product];
 };
 
+function OrderRowActions({ order, onView, onNote, onEdit, onAdvance, onCancel, onPurge, mobile = false }) {
+  const nextStatus = STATUSES[STATUSES.indexOf(order.status) + 1];
+  const canAdvance = order.status !== "Delivered" && order.status !== "Cancelled";
+  const iconButtonClass = "inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30";
+  const moreButton = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className={`${iconButtonClass} ${mobile ? "h-10 w-10 shrink-0" : ""}`}
+          aria-label={`More actions for order ${order.reference}`}
+          title="More actions"
+          data-testid={`${mobile ? "more-order-mobile" : "more-order"}-${order.id}`}
+        >
+          <MoreHorizontal size={17} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-48">
+        <DropdownMenuItem
+          onSelect={onCancel}
+          className="text-red-700 focus:text-red-700"
+          data-testid={`${mobile ? "delete-order-mobile" : "delete-order"}-${order.id}`}
+        >
+          <Trash2 size={15} /> Cancel order
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onSelect={onPurge}
+          className="text-red-700 focus:text-red-700"
+          data-testid={`${mobile ? "purge-order-mobile" : "purge-order"}-${order.id}`}
+        >
+          <Trash2 size={15} /> Delete permanently
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  if (mobile) {
+    return (
+      <div className="mt-3 space-y-2 border-t border-border pt-3">
+        <div className="grid grid-cols-3 gap-2">
+          <Btn variant="outline" className="w-full px-2 py-2" onClick={onView} data-testid={`view-order-mobile-${order.id}`}><Eye size={16} /> View</Btn>
+          <Btn variant="outline" className="w-full px-2 py-2" onClick={onNote} data-testid={`note-order-mobile-${order.id}`}><FileText size={16} /> Note</Btn>
+          <Btn variant="outline" className="w-full px-2 py-2" onClick={onEdit} data-testid={`edit-order-mobile-${order.id}`}><Pencil size={16} /> Edit</Btn>
+        </div>
+        <div className="flex items-center gap-2">
+          {canAdvance && <Btn variant="success" className="min-w-0 flex-1 px-3 py-2" onClick={onAdvance} data-testid={`advance-order-mobile-${order.id}`}>{statusLabel(nextStatus)} <ArrowRight size={14} /></Btn>}
+          {moreButton}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center justify-end gap-1.5">
+      <button type="button" onClick={onView} className={iconButtonClass} title="View order" aria-label={`View order ${order.reference}`} data-testid={`view-order-${order.id}`}><Eye size={15} /></button>
+      <button type="button" onClick={onNote} className={iconButtonClass} title="Delivery note" aria-label={`Delivery note for ${order.reference}`} data-testid={`note-order-${order.id}`}><FileText size={15} /></button>
+      <button type="button" onClick={onEdit} className={iconButtonClass} title="Edit order" aria-label={`Edit order ${order.reference}`} data-testid={`edit-order-${order.id}`}><Pencil size={15} /></button>
+      {canAdvance && <button type="button" onClick={onAdvance} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-semibold text-emerald-800 transition-colors hover:border-emerald-300 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300" data-testid={`advance-order-${order.id}`}>{statusLabel(nextStatus)}<ArrowRight size={13} /></button>}
+      {moreButton}
+    </div>
+  );
+}
+
 function NoteModal({ order, vehicleName, settings, onClose }) {
   const ref = useRef(null);
   const [lang, setLang] = useState("en");
   const [busy, setBusy] = useState(false);
+  const [signature, setSignature] = useState(null);
+  const [signatureLoading, setSignatureLoading] = useState(false);
+  const [invoiceSnapshot, setInvoiceSnapshot] = useState(null);
+  const [invoiceLoading, setInvoiceLoading] = useState(false);
+  const [invoiceError, setInvoiceError] = useState(false);
+  useEffect(() => {
+    if (!order?.id) return undefined;
+    let active = true;
+    setSignature(null);
+    setInvoiceSnapshot(null);
+    setInvoiceError(false);
+    setInvoiceLoading(Boolean(order.invoice_id));
+    setSignatureLoading(true);
+    api.get(`/orders/${order.id}/driver-confirmation`)
+      .then((result) => {
+        if (!active) return;
+        setSignature(result.signature_data ? result : null);
+        const savedInvoice = result.confirmation_snapshot?.invoice_snapshot;
+        const currentInvoice = savedInvoice || result.invoice_snapshot;
+        setInvoiceSnapshot(currentInvoice);
+        if (order.invoice_id && !currentInvoice) {
+          setInvoiceError(true);
+          toast.error("The linked invoice could not be verified. Driver confirmation is unavailable.");
+        }
+      })
+      .catch((error) => { if (active) toast.error(apiError(error)); })
+      .finally(() => {
+        if (!active) return;
+        setSignatureLoading(false);
+        setInvoiceLoading(false);
+      });
+    return () => { active = false; };
+  }, [order?.id]);
   const pdf = async () => { setBusy(true); try { await elementToPdf(ref.current, `${documentFilename("Delivery-note", order.customer_name || "Customer", order.reference, lang)}.pdf`); } catch (e) { toast.error(e.message); } finally { setBusy(false); } };
+  const saveDriverConfirmation = async (signatureData, driverName) => {
+    try {
+      const saved = await api.post(`/orders/${order.id}/driver-confirmation`, {
+        signature_data: signatureData,
+        driver_name: driverName,
+        driver_confirmed: true,
+      });
+      setSignature({ ...saved, signature_data: signatureData });
+      setInvoiceSnapshot(saved.confirmation_snapshot?.invoice_snapshot || null);
+      toast.success("Driver confirmation signed and saved");
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
+  const signedSnapshot = signature?.confirmation_snapshot;
+  const signedOrder = order && signedSnapshot ? {
+    ...order,
+    reference: signedSnapshot.order_reference || order.reference,
+    invoice_number: signedSnapshot.invoice_snapshot?.invoice_number || signedSnapshot.invoice_number || order.invoice_number,
+    items: signedSnapshot.items,
+    products: signedSnapshot.products,
+  } : order;
   return (
     <Modal open={!!order} onClose={onClose} title={`Delivery Note ${order?.reference || ""}`} wide>
       {order && <div className="space-y-4">
         <div className="flex flex-wrap items-end gap-3">
           <div className="w-44"><Select label="Language" value={lang} onChange={(e) => setLang(e.target.value)} data-testid="note-lang-select"><option value="en">English</option><option value="ur">Urdu (اردو)</option></Select></div>
-          <Btn variant="outline" onClick={() => printElement(ref.current, order.reference) || toast.error("Allow pop-ups to print")} data-testid="note-print-btn"><Printer size={15} /> Print</Btn>
-          <Btn disabled={busy} onClick={pdf} data-testid="note-pdf-btn"><Download size={15} /> {busy ? "Generating PDF..." : "Download PDF"}</Btn>
+          <Btn variant="outline" disabled={signatureLoading} onClick={() => printElement(ref.current, order.reference) || toast.error("Allow pop-ups to print")} data-testid="note-print-btn"><Printer size={15} /> Print</Btn>
+          <Btn disabled={busy || signatureLoading} onClick={pdf} data-testid="note-pdf-btn"><Download size={15} /> {busy ? "Generating PDF..." : "Download PDF"}</Btn>
         </div>
-        <div className="overflow-x-auto bg-slate-100 p-4 rounded-lg"><div className="shadow-md w-fit mx-auto"><DeliveryNote ref={ref} order={order} lang={lang} vehicleName={vehicleName} settings={settings} /></div></div>
+        {signatureLoading || invoiceLoading ? <p className="text-sm text-slate-500" role="status">Loading order and invoice details...</p> : invoiceError
+          ? <p className="text-sm text-red-700" role="alert">Cannot confirm delivery until the linked invoice can be verified.</p>
+          : signature
+          ? <p className="text-sm text-emerald-700">Confirmed by driver {signature.driver_name} on {new Date(signature.confirmed_at).toLocaleString()}</p>
+          : <SignatureCapture onSave={saveDriverConfirmation} />}
+        <div className="overflow-x-auto bg-slate-100 p-4 rounded-lg"><div className="shadow-md w-fit mx-auto"><DeliveryNote ref={ref} order={signedOrder} signature={signature} invoiceSnapshot={invoiceSnapshot} lang={lang} vehicleName={vehicleName} settings={settings} /></div></div>
       </div>}
     </Modal>
+  );
+}
+
+function SignatureCapture({ onSave }) {
+  const canvasRef = useRef(null);
+  const drawing = useRef(false);
+  const [driverName, setDriverName] = useState("");
+  const [hasInk, setHasInk] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const point = (event) => {
+    const canvas = canvasRef.current;
+    const bounds = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - bounds.left) * canvas.width / bounds.width,
+      y: (event.clientY - bounds.top) * canvas.height / bounds.height,
+    };
+  };
+  const startDrawing = (event) => {
+    const canvas = canvasRef.current;
+    const context = canvas.getContext("2d");
+    const { x, y } = point(event);
+    drawing.current = true;
+    canvas.setPointerCapture(event.pointerId);
+    context.beginPath();
+    context.moveTo(x, y);
+  };
+  const draw = (event) => {
+    if (!drawing.current) return;
+    const context = canvasRef.current.getContext("2d");
+    const { x, y } = point(event);
+    context.lineWidth = 3;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.strokeStyle = "#111827";
+    context.lineTo(x, y);
+    context.stroke();
+    setHasInk(true);
+  };
+  const clear = () => {
+    const canvas = canvasRef.current;
+    canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+    setHasInk(false);
+  };
+  const submit = async () => {
+    setSaving(true);
+    try {
+      await onSave(canvasRef.current.toDataURL("image/png"), driverName.trim());
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-white p-3">
+      <p className="text-sm font-semibold text-slate-800">Driver delivery confirmation</p>
+      <p className="text-sm text-slate-600">The driver must check the listed products and quantities against the order and linked invoice before signing.</p>
+      <canvas
+        ref={canvasRef}
+        width={720}
+        height={180}
+        aria-label="Draw driver signature"
+        data-testid="delivery-signature-canvas"
+        className="h-36 w-full touch-none rounded border border-dashed border-slate-400 bg-white"
+        onPointerDown={startDrawing}
+        onPointerMove={draw}
+        onPointerUp={() => { drawing.current = false; }}
+        onPointerCancel={() => { drawing.current = false; }}
+      />
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="min-w-52 flex-1"><Input label="Driver name *" value={driverName} maxLength={100} onChange={(event) => setDriverName(event.target.value)} data-testid="delivery-signature-name" /></div>
+        <Btn variant="outline" onClick={clear} disabled={!hasInk || saving}><RotateCcw size={15} /> Clear</Btn>
+        <Btn onClick={submit} disabled={!hasInk || !driverName.trim() || !confirmed || saving} data-testid="delivery-signature-save">{saving ? "Saving..." : "Confirm and sign"}</Btn>
+      </div>
+      <label className="flex items-start gap-2 text-sm text-slate-700">
+        <input
+          type="checkbox"
+          checked={confirmed}
+          onChange={(event) => setConfirmed(event.target.checked)}
+          data-testid="delivery-driver-confirmation"
+          className="mt-1"
+        />
+        <span>I confirm that the pieces loaded for this delivery are complete and that their products and quantities match this order and its linked invoice, if present.</span>
+      </label>
+      <p className="text-xs text-slate-500">The signature and confirmation are sent once when you select “Confirm and sign”.</p>
+    </div>
   );
 }
 
@@ -266,7 +485,7 @@ export default function Orders() {
 
   const advance = async (o) => {
     const next = STATUSES[STATUSES.indexOf(o.status) + 1];
-    try { await api.put(`/orders/${o.id}`, { ...o, status: next }); toast.success(`Marked ${next}`); load(); } catch (e) { toast.error(apiError(e)); }
+    try { await api.put(`/orders/${o.id}`, { ...o, status: next }); toast.success(`Marked ${statusLabel(next)}`); load(); } catch (e) { toast.error(apiError(e)); }
   };
 
   const remove = async (o) => {
@@ -290,7 +509,7 @@ export default function Orders() {
         {tabs.map((t) => (
           <button key={t} onClick={() => { setFilter(t); setPage(1); }} data-testid={`order-filter-${t.toLowerCase().replace(/\s/g, "-")}`}
             className={`px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${filter === t ? "bg-primary text-white border-primary" : "bg-white text-slate-600 border-border hover:border-primary"}`}>
-            {t === "open" ? "Open" : t === "all" ? "All" : t} <span className="opacity-70 ml-1">{loading ? "..." : count(t)}</span>
+            {t === "open" ? "Open" : t === "all" ? "All" : statusLabel(t)} <span className="opacity-70 ml-1">{loading ? "..." : count(t)}</span>
           </button>
         ))}
         <div className="ml-auto w-48"><Input label="Order date" type="date" value={orderDate} onChange={(event) => { setOrderDate(event.target.value); setPage(1); }} data-testid="order-date-filter" /></div>
@@ -304,7 +523,57 @@ export default function Orders() {
       </Card>
       <Card className="overflow-hidden">
         {loading ? <p className="p-6 text-sm text-slate-400" role="status">Loading orders...</p> : shown.length === 0 ? <Empty icon={ClipboardList} title="No orders here" hint="Create an order to start tracking shipments." /> : (
-          <div className="overflow-x-auto">
+          <>
+            <div className="space-y-3 p-3 sm:hidden">
+              {shown.map((o) => (
+                <article key={o.id} className="rounded-lg border border-border bg-white p-3 shadow-sm" data-testid={`order-card-${o.id}`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="break-all font-mono text-sm font-bold text-slate-800">{o.reference}</p>
+                      {o.invoice_number && <p className="mt-0.5 text-xs text-slate-500">Invoice {o.invoice_number}</p>}
+                    </div>
+                    <Badge cls={S_META[o.status]}>{statusLabel(o.status)}</Badge>
+                  </div>
+                  <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                    <div className="col-span-2 min-w-0">
+                      <dt className="text-xs font-medium text-slate-500">Customer</dt>
+                      <dd className="break-words font-semibold text-slate-800">{o.customer_name || "-"}</dd>
+                    </div>
+                    <div className="col-span-2 min-w-0">
+                      <dt className="text-xs font-medium text-slate-500">Products</dt>
+                      <dd className="whitespace-pre-line break-words text-slate-700">{orderLines(o).map((line) => `${line.qty} × ${[line.category, line.size].filter(Boolean).join(" ")}`).join("\n") || "-"}</dd>
+                    </div>
+                    <div className="min-w-0">
+                      <dt className="text-xs font-medium text-slate-500">Destination</dt>
+                      <dd className="break-words text-slate-700">{o.destination || "-"}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs font-medium text-slate-500">Ship date</dt>
+                      <dd className="text-slate-700">{o.expected_ship_date ? fmtDate(o.expected_ship_date) : "-"}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs font-medium text-slate-500">Priority</dt>
+                      <dd className="mt-0.5"><Badge cls={P_META[o.priority]}>{o.priority}</Badge></dd>
+                    </div>
+                    <div className="min-w-0">
+                      <dt className="text-xs font-medium text-slate-500">Vehicle</dt>
+                      <dd className="break-words text-slate-700">{vName(o.vehicle_id) || "-"}</dd>
+                    </div>
+                  </dl>
+                  <OrderRowActions
+                    order={o}
+                    onView={() => { setVisibleInvoiceItems(50); void openOrder(o); }}
+                    onNote={() => setNote(o)}
+                    onEdit={() => setModal({ ...o, items: o.items?.length ? o.items : [{ qty: "", category: "", size: "" }], expected_ship_date: o.expected_ship_date || "" })}
+                    onAdvance={() => advance(o)}
+                    onCancel={() => remove(o)}
+                    onPurge={() => purge(o)}
+                    mobile
+                  />
+                </article>
+              ))}
+            </div>
+            <div className="hidden overflow-x-auto sm:block">
             <table className="w-full text-sm min-w-[960px]">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
                 <th className="px-4 py-3 font-semibold">Ref</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">City</th><th className="px-4 font-semibold">Products</th><th className="px-4 font-semibold">Priority</th><th className="px-4 font-semibold">Status</th><th className="px-4 font-semibold">Ship Date</th><th className="px-4 font-semibold">Vehicle</th><th className="px-4 font-semibold text-right">Actions</th>
@@ -316,23 +585,24 @@ export default function Orders() {
                   <td className="px-4 py-3 text-slate-500">{o.destination}</td>
                   <td className="px-4 py-3 text-slate-600 max-w-[240px] whitespace-pre-line">{orderLines(o).map((l) => `${l.qty} × ${[l.category, l.size].filter(Boolean).join(" ")}`).join("\n") || "-"}</td>
                   <td className="px-4 py-3"><Badge cls={P_META[o.priority]}>{o.priority}</Badge></td>
-                  <td className="px-4 py-3"><Badge cls={S_META[o.status]}>{o.status}</Badge></td>
+                  <td className="px-4 py-3"><Badge cls={S_META[o.status]}>{statusLabel(o.status)}</Badge></td>
                   <td className="px-4 py-3 text-slate-500 whitespace-nowrap">{o.expected_ship_date ? fmtDate(o.expected_ship_date) : "-"}</td>
                   <td className="px-4 py-3 text-slate-500">{vName(o.vehicle_id) || "-"}</td>
-                  <td className="px-4 py-3 text-right whitespace-nowrap">
-                    <button onClick={() => { setVisibleInvoiceItems(50); void openOrder(o); }} className="text-slate-400 hover:text-primary mr-3" title="View order" aria-label={`View order ${o.reference}`} data-testid={`view-order-${o.id}`}><Eye size={15} /></button>
-                    {o.status !== "Delivered" && o.status !== "Cancelled" && (
-                      <button onClick={() => advance(o)} className="inline-flex items-center gap-1 text-emerald-600 hover:underline text-xs font-semibold mr-3" data-testid={`advance-order-${o.id}`}>
-                        {STATUSES[STATUSES.indexOf(o.status) + 1]} <ArrowRight size={12} />
-                      </button>)}
-                    <button onClick={() => setNote(o)} className="text-slate-400 hover:text-primary mr-3" title="Delivery note" data-testid={`note-order-${o.id}`}><FileText size={15} /></button>
-                    <button onClick={() => setModal({ ...o, items: o.items?.length ? o.items : [{ qty: "", category: "", size: "" }], expected_ship_date: o.expected_ship_date || "" })} className="text-slate-400 hover:text-primary mr-3" data-testid={`edit-order-${o.id}`}><Pencil size={15} /></button>
-                    <button onClick={() => remove(o)} className="text-slate-400 hover:text-red-600" data-testid={`delete-order-${o.id}`}><Trash2 size={15} /></button>
-                    <button onClick={() => purge(o)} className="text-xs font-semibold text-red-600 hover:underline" title="Delete permanently" data-testid={`purge-order-${o.id}`}>Delete permanently</button>
+                  <td className="px-3 py-2 align-middle">
+                    <OrderRowActions
+                      order={o}
+                      onView={() => { setVisibleInvoiceItems(50); void openOrder(o); }}
+                      onNote={() => setNote(o)}
+                      onEdit={() => setModal({ ...o, items: o.items?.length ? o.items : [{ qty: "", category: "", size: "" }], expected_ship_date: o.expected_ship_date || "" })}
+                      onAdvance={() => advance(o)}
+                      onCancel={() => remove(o)}
+                      onPurge={() => purge(o)}
+                    />
                   </td>
                 </tr>))}</tbody>
             </table>
-          </div>
+            </div>
+          </>
         )}
       </Card>
       <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-500">
@@ -357,7 +627,7 @@ export default function Orders() {
               ["Destination", viewOrder.destination],
               ["Ship Date", viewOrder.expected_ship_date ? fmtDate(viewOrder.expected_ship_date) : ""],
               ["Priority", viewOrder.priority],
-              ["Status", viewOrder.status],
+              ["Status", statusLabel(viewOrder.status)],
               ["Vehicle", vName(viewOrder.vehicle_id)],
               ["Created", viewOrder.created_at ? fmtDateTime(viewOrder.created_at) : ""],
             ].filter(([, value]) => value !== undefined && value !== null && value !== "").map(([label, value]) => (
@@ -420,7 +690,7 @@ export default function Orders() {
               {PRIORITIES.map((p) => <option key={p}>{p}</option>)}
             </Select>
             <Select label="Status" value={modal.status} onChange={(e) => setModal({ ...modal, status: e.target.value })} data-testid="order-status-select">
-              {STATUSES.map((s) => <option key={s}>{s}</option>)}
+              {STATUSES.map((s) => <option key={s} value={s}>{statusLabel(s)}</option>)}
             </Select>
             <Input label="Expected Ship Date" type="date" value={modal.expected_ship_date} onChange={(e) => setModal({ ...modal, expected_ship_date: e.target.value })} data-testid="order-ship-date-input" />
             <Select label="Assigned Vehicle" value={modal.vehicle_id} onChange={(e) => setModal({ ...modal, vehicle_id: e.target.value })} data-testid="order-vehicle-select">

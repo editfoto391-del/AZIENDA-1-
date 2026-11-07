@@ -3,10 +3,10 @@ import { COMPANY } from "@/components/InvoiceDocument";
 import { companyDisplayName } from "@/lib/company";
 
 const T = {
-  en: { title: "DELIVERY NOTE", date: "Date", no: "Delivery Note No.", deliverTo: "Deliver To", details: "Details", qty: "Quantity", product: "Product", size: "Size", total: "Total quantity", phone: "Phone", email: "Email",
-    priority: "Priority", ship: "Ship date", vehicle: "Vehicle", notes: "Notes", received: "Received in good condition by", sign: "Signature", name: "Name", driver: "Driver" },
-  ur: { title: "ڈلیوری نوٹ", date: "تاریخ", no: "نوٹ نمبر", deliverTo: "ترسیل برائے", details: "تفصیلات", qty: "مقدار", product: "پروڈکٹ", size: "سائز / پیمائش", total: "کل تعداد", phone: "فون", email: "ای میل",
-    priority: "ترجیح", ship: "روانگی کی تاریخ", vehicle: "گاڑی", notes: "نوٹس", received: "سامان درست حالت میں وصول کیا", sign: "دستخط", name: "نام", driver: "ڈرائیور" },
+  en: { title: "DELIVERY NOTE", date: "Date", no: "Delivery Note No.", invoice: "Invoice No.", deliverTo: "Deliver To", details: "Details", qty: "Quantity", product: "Product", size: "Size", total: "Total quantity", phone: "Phone", email: "Email",
+    priority: "Priority", ship: "Ship date", vehicle: "Vehicle", notes: "Notes", invoiceItems: "Items on linked invoice", loadedBy: "Loaded items confirmed by driver", sign: "Driver signature", driver: "Driver", signedBy: "Driver", signedAt: "Confirmed at", confirmation: "The driver confirms the loaded pieces are complete and match the products and quantities listed for this order and linked invoice." },
+  ur: { title: "ڈلیوری نوٹ", date: "تاریخ", no: "نوٹ نمبر", invoice: "انوائس نمبر", deliverTo: "ترسیل برائے", details: "تفصیلات", qty: "مقدار", product: "پروڈکٹ", size: "سائز / پیمائش", total: "کل تعداد", phone: "فون", email: "ای میل",
+    priority: "ترجیح", ship: "روانگی کی تاریخ", vehicle: "گاڑی", notes: "نوٹس", invoiceItems: "منسلک انوائس کی اشیاء", loadedBy: "ڈرائیور نے لوڈ شدہ سامان کی تصدیق کی", sign: "ڈرائیور کے دستخط", driver: "ڈرائیور", signedBy: "ڈرائیور", signedAt: "تصدیق کا وقت", confirmation: "ڈرائیور تصدیق کرتا ہے کہ لوڈ شدہ سامان مکمل ہے اور اس آرڈر اور منسلک انوائس میں درج مصنوعات اور مقدار سے میل کھاتا ہے۔" },
 };
 const UR_PRODUCTS = { Simple: "سادہ", Standard: "سادہ", "Simple/Mix color": "سادہ / مکس رنگ", "Ribbon Black": "ربن کالا", "Ribbon Pink": "ربن گلابی", "Strong Boy": "سٹرانگ بوائے", Uncovered: "بغیر کور", Candy: "کینڈی", "Uncovered Blue 16 Density": "بغیر کور نیلا 16 ڈینسٹی" };
 const UR_PRIORITY = { Low: "کم", Normal: "عام", High: "زیادہ", Urgent: "فوری" };
@@ -21,7 +21,7 @@ export function orderLines(order) {
   });
 }
 
-export const DeliveryNote = forwardRef(function DeliveryNote({ order, lang = "en", vehicleName = "", settings = {} }, ref) {
+export const DeliveryNote = forwardRef(function DeliveryNote({ order, signature = null, invoiceSnapshot = null, lang = "en", vehicleName = "", settings = {} }, ref) {
   const t = T[lang]; const ur = lang === "ur";
   const lines = orderLines(order);
   const total = lines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
@@ -42,6 +42,7 @@ export const DeliveryNote = forwardRef(function DeliveryNote({ order, lang = "en
             <thead><tr className="bg-slate-100"><th className={cell}>{t.date}</th><th className={cell}>{t.no}</th></tr></thead>
             <tbody><tr><td className={cell} dir="ltr">{order.expected_ship_date || new Date().toISOString().slice(0, 10)}</td><td className={`${cell} font-mono`} dir="ltr">{order.reference}</td></tr></tbody>
           </table>
+          {order.invoice_number && <p className="mt-2 text-sm"><b>{t.invoice}:</b> <span dir="ltr">{order.invoice_number}</span></p>}
         </div>
       </div>
       <div className="grid grid-cols-2 gap-6 mt-6">
@@ -72,9 +73,35 @@ export const DeliveryNote = forwardRef(function DeliveryNote({ order, lang = "en
           <tr className="bg-slate-100"><td className={cell} /><td className={`${cell} text-right font-bold`}>{t.total}</td><td className={`${cell} text-center text-[20px] font-extrabold`} dir="ltr">{total}</td></tr>
         </tbody>
       </table>
+      {invoiceSnapshot && <div className="mt-5">
+        <p className="mb-2 font-bold">{t.invoiceItems} {invoiceSnapshot.invoice_number && <span dir="ltr">({invoiceSnapshot.invoice_number})</span>}</p>
+        <table className="w-full border border-slate-800 text-sm">
+          <thead><tr className="bg-slate-100">
+            <th className={`${cell} w-1/4 text-left`}>{t.size}</th>
+            <th className={`${cell} w-1/2 text-left`}>{t.product}</th>
+            <th className={`${cell} w-1/4 text-center`}>{t.qty}</th>
+          </tr></thead>
+          <tbody>{invoiceSnapshot.items.map((item, index) => (
+            <tr key={index}>
+              <td className={`${cell} text-center`} dir="ltr">{item.size || "-"}</td>
+              <td className={cell}>{prod(item.category || item.description) || "-"}</td>
+              <td className={`${cell} text-center`} dir="ltr">{item.qty}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>}
       {order.notes && <p className="mt-4"><b>{t.notes}:</b> {order.notes}</p>}
-      <div className="grid grid-cols-3 gap-8 mt-16">
-        {[t.received, t.name, t.driver].map((x) => <div key={x}><div className="border-b border-slate-800 h-10" /><p className="mt-1">{x} / {t.sign}</p></div>)}
+      <div className="mt-12 border-t border-slate-300 pt-4">
+        <p className="font-semibold">{t.loadedBy}</p>
+        <p className="mt-1 text-sm">{t.confirmation}</p>
+        <div className="mt-3 flex min-h-20 items-end gap-4">
+          {signature?.signature_data && <img src={signature.signature_data} alt={t.sign} className="max-h-16 max-w-56 object-contain" />}
+          <div className="min-w-52 flex-1 border-b border-slate-800 pb-1 text-sm">
+            {signature?.driver_name && <span>{t.signedBy}: {signature.driver_name}</span>}
+          </div>
+        </div>
+        <p className="mt-1">{t.sign}</p>
+        {signature?.confirmed_at && <p className="mt-1 text-xs">{t.signedAt}: {new Date(signature.confirmed_at).toLocaleString()}</p>}
       </div>
     </div>
   );
