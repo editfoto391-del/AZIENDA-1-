@@ -7,16 +7,16 @@ react-router-dom, axios, TanStack Query (`QueryClientProvider` mounted in `src/i
 
 Same conventions as the classic `shadcn` (fastapi_react_mongo_shadcn) template: JSX lives in `.js` files (`src/index.js`,
 `src/App.js`), the `@/*` alias maps to `src/*`, and the frontend reads
-`process.env.REACT_APP_BACKEND_URL` from `frontend/.env` (Vite inlines every `REACT_APP_*` key
-at build time via `vite.config.mjs`).
+`REACT_APP_BACKEND_URL` from `frontend/.env` as the development proxy target.
 
 For local setup, copy `frontend/.env.example` to `frontend/.env` and set the backend URL.
 Copy `backend/.env.example` to `backend/.env` and replace its placeholders with your local
 database connection and private credentials. Never commit the populated `.env` files.
 During Vite development, API requests use the same-origin `/__api` path and are proxied to
 `REACT_APP_BACKEND_URL`; this lets remote workspace previews reach the backend without the
-browser trying to connect to its own `localhost`. Production builds continue to use the
-configured backend URL directly.
+browser trying to connect to its own `localhost`. Production builds use the same-origin `/api`
+route, which the deployed host proxies to the backend; they do not embed a machine-local backend
+URL in browser assets.
 
 ## Scripts
 
