@@ -34,8 +34,10 @@ from salary_math import (
     STANDARD_WEEKLY_HOURS,
     calculate_salary_hours,
 )
-YASEEN_UNCLE_WEEKLY_SALARY = 5300
-YASEEN_UNCLE_WEEKLY_PERIOD_START = date(2026, 11, 2)
+YASEEN_UNCLE_NOVEMBER_MONTHLY_SALARY = 6500
+YASEEN_UNCLE_NOVEMBER_BALANCE_CUT = 1200
+YASEEN_UNCLE_NOVEMBER_START = date(2026, 11, 1)
+YASEEN_UNCLE_NOVEMBER_END = date(2026, 11, 30)
 from grv_math import (
     aggregate_accepted_stock_lines,
     grv_confirmation_status,
@@ -7897,16 +7899,12 @@ def is_monthly_fixed_salary_employee(employee):
         "UNCLE" in tokens and bool(tokens & {"YASEEN", "YASSEN", "YASSINE", "YASIN"})
     )
 
-def is_yaseen_uncle_weekly_period(employee, start_date, end_date):
+def is_yaseen_uncle_employee(employee):
     normalized_name = " ".join(
         "".join(character if character.isalnum() else " " for character in (employee.get("name") or "")).split()
     ).upper()
     tokens = set(normalized_name.split())
-    if "UNCLE" not in tokens or not tokens & {"YASEEN", "YASSEN", "YASSINE", "YASIN"}:
-        return False
-    start = date.fromisoformat(start_date)
-    end = date.fromisoformat(end_date)
-    return start == YASEEN_UNCLE_WEEKLY_PERIOD_START and end == start + timedelta(days=5)
+    return "UNCLE" in tokens and bool(tokens & {"YASEEN", "YASSEN", "YASSINE", "YASIN"})
 
 def piecework_includes_sunday(employee_name):
     normalized_name = " ".join((employee_name or "").split()).upper()
@@ -8363,15 +8361,21 @@ async def salary_report(start_date, end_date):
     for employee in employees:
         hourly_rate = float(employee.get("hourly_rate") or 20)
         is_piece_paid = is_piece_paid_employee(employee)
-        is_yaseen_uncle_weekly = is_yaseen_uncle_weekly_period(employee, start_date, end_date)
-        is_monthly_fixed = is_monthly_fixed_salary_employee(employee) and not is_piece_paid and not is_yaseen_uncle_weekly
-        monthly_salary = employee.get("monthly_salary") if is_monthly_fixed else None
-        if is_yaseen_uncle_weekly:
-            weekly_salary = YASEEN_UNCLE_WEEKLY_SALARY
-        elif not is_piece_paid and not is_monthly_fixed:
-            weekly_salary = employee.get("weekly_salary")
-        else:
-            weekly_salary = None
+        is_yaseen_uncle = is_yaseen_uncle_employee(employee)
+        is_monthly_fixed = is_monthly_fixed_salary_employee(employee) and not is_piece_paid
+        report_start = date.fromisoformat(start_date)
+        report_end = date.fromisoformat(end_date)
+        is_yaseen_november_period = (
+            is_yaseen_uncle
+            and report_start <= YASEEN_UNCLE_NOVEMBER_END
+            and report_end >= YASEEN_UNCLE_NOVEMBER_START
+        )
+        monthly_salary = (
+            YASEEN_UNCLE_NOVEMBER_MONTHLY_SALARY
+            if is_monthly_fixed and is_yaseen_november_period
+            else employee.get("monthly_salary") if is_monthly_fixed else None
+        )
+        weekly_salary = employee.get("weekly_salary") if not is_piece_paid and not is_monthly_fixed else None
         hours_per_week = STANDARD_WEEKLY_HOURS
         work_days_per_week = 6
         if weekly_salary is None and not is_piece_paid and not is_monthly_fixed:
@@ -8404,13 +8408,49 @@ async def salary_report(start_date, end_date):
             day["pay"] = r2(D(day["regular_pay"]) + D(day["overtime_pay"]))
         employee_advances = [item for item in advances if item.get("employee_id") == employee["id"]]
         employee_cuts = [item for item in cuts if item.get("employee_id") == employee["id"]]
+        november_yaseen_cut_total = sum(
+            (
+                D(item.get("amount", 0))
+                for item in employee_cuts
+                if YASEEN_UNCLE_NOVEMBER_START.isoformat() <= item.get("end_date", "") <= YASEEN_UNCLE_NOVEMBER_END.isoformat()
+            ),
+            Decimal("0"),
+        )
+        november_yaseen_opening_balance = sum(
+            (D(item.get("amount", 0)) for item in employee_advances if item.get("date", "") < YASEEN_UNCLE_NOVEMBER_START.isoformat()),
+            Decimal("0"),
+        ) - sum(
+            (D(item.get("amount", 0)) for item in employee_cuts if item.get("end_date", "") < YASEEN_UNCLE_NOVEMBER_START.isoformat()),
+            Decimal("0"),
+        )
+        system_november_cut = max(
+            Decimal("0"),
+            D(YASEEN_UNCLE_NOVEMBER_BALANCE_CUT) - november_yaseen_cut_total,
+        )
+        system_november_cut = min(system_november_cut, max(november_yaseen_opening_balance, Decimal("0")))
+        if (
+            is_yaseen_uncle
+            and report_end >= YASEEN_UNCLE_NOVEMBER_END
+            and system_november_cut > 0
+        ):
+            employee_cuts.append({
+                "id": "system-yaseen-uncle-november-2026-balance-cut",
+                "start_date": YASEEN_UNCLE_NOVEMBER_START.isoformat(),
+                "end_date": YASEEN_UNCLE_NOVEMBER_END.isoformat(),
+                "amount": float(system_november_cut),
+                "notes": "November 2026 balance deduction",
+            })
         all_advance_total = sum((D(item.get("amount", 0)) for item in employee_advances), Decimal("0"))
         all_cut_total = sum((D(item.get("amount", 0)) for item in employee_cuts), Decimal("0"))
         period_cut = r2(sum(
             (
                 D(item.get("amount", 0))
                 for item in employee_cuts
-                if item.get("start_date") == start_date and item.get("end_date") == end_date
+                if (
+                    item.get("start_date") == start_date and item.get("end_date") == end_date
+                    or full_month_period and is_yaseen_november_period
+                    and YASEEN_UNCLE_NOVEMBER_START.isoformat() <= item.get("end_date", "") <= YASEEN_UNCLE_NOVEMBER_END.isoformat()
+                )
             ),
             Decimal("0"),
         ))
@@ -8618,12 +8658,35 @@ async def save_salary_cut(body: SalaryCutIn, user=Depends(get_current_user)):
     before = await db.salary_cuts.find_one({
         "employee_id": body.employee_id, "start_date": body.start_date, "end_date": body.end_date,
     }, {"_id": 0})
+    stored_cut_amount = body.amount
+    if (
+        employee["pay_frequency"] == "monthly_fixed"
+        and is_yaseen_uncle_employee(employee)
+        and body.start_date == YASEEN_UNCLE_NOVEMBER_START.isoformat()
+        and body.end_date == YASEEN_UNCLE_NOVEMBER_END.isoformat()
+    ):
+        existing_november_cuts = await listall("salary_cuts", {
+            "employee_id": body.employee_id,
+            "voided": {"$ne": True},
+        })
+        other_november_cuts = sum(
+            (
+                D(item.get("amount", 0))
+                for item in existing_november_cuts
+                if item.get("id") != (before or {}).get("id")
+                and YASEEN_UNCLE_NOVEMBER_START.isoformat() <= item.get("end_date", "") <= YASEEN_UNCLE_NOVEMBER_END.isoformat()
+            ),
+            Decimal("0"),
+        )
+        stored_cut_amount = float(D(body.amount) - other_november_cuts)
+        if stored_cut_amount < 0:
+            raise HTTPException(400, "The November balance cut cannot be lower than cuts already recorded for that month")
     available_balance = employee["available_balance"]
     if body.amount > available_balance:
         raise HTTPException(400, f"Cut exceeds the outstanding balance of R {available_balance:.2f}")
     if body.amount > employee["gross_salary"]:
         raise HTTPException(400, f"Cut exceeds this period's gross salary of R {employee['gross_salary']:.2f}")
-    if body.amount == 0:
+    if stored_cut_amount == 0:
         if before:
             await update_doc("salary_cuts", before["id"], {
                 "voided": True, "voided_at": now_iso(), "voided_by": user.get("id"),
@@ -8631,6 +8694,7 @@ async def save_salary_cut(body: SalaryCutIn, user=Depends(get_current_user)):
             await log_audit("salary_cut", before["id"], "voided", user, before=before)
         return {"ok": True, "amount": 0}
     data = body.model_dump()
+    data["amount"] = stored_cut_amount
     data["voided"] = False
     data["voided_at"] = None
     data["voided_by"] = None

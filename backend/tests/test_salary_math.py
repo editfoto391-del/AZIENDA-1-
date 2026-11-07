@@ -296,7 +296,7 @@ def test_monthly_fixed_salary_is_not_repeated_in_a_partial_month(monkeypatch):
     assert report["employees"][0]["is_full_month_period"] is False
 
 
-def test_yaseen_uncle_has_5300_fixed_salary_for_monday_to_saturday_period(monkeypatch):
+def test_yaseen_uncle_gets_november_monthly_salary_after_balance_cut(monkeypatch):
     employee = {
         "id": "employee-yaseen",
         "name": "Yassine Uncle",
@@ -305,14 +305,63 @@ def test_yaseen_uncle_has_5300_fixed_salary_for_monday_to_saturday_period(monkey
     }
     records = {
         "employees": [employee],
-        "attendance": [
-            {
-                "employee_id": employee["id"],
-                "date": (date(2026, 11, 2) + timedelta(days=offset)).isoformat(),
-                "status": "Present",
-            }
-            for offset in range(6)
-        ],
+        "attendance": [],
+        "piece_production": [],
+        "salary_advances": [{
+            "employee_id": employee["id"],
+            "date": "2026-10-31",
+            "amount": 1200,
+        }],
+        "salary_cuts": [],
+    }
+
+    async def fake_listall(collection, *_args, **_kwargs):
+        return records[collection]
+
+    monkeypatch.setattr(server, "listall", fake_listall)
+
+    report = asyncio.run(server.salary_report("2026-11-01", "2026-11-30"))
+    result = report["employees"][0]
+
+    assert result["pay_frequency"] == "monthly_fixed"
+    assert result["monthly_salary"] == 6500
+    assert result["gross_salary"] == 6500
+    assert result["cut"] == 1200
+    assert result["net_salary"] == 5300
+    assert result["balance_before_period"] == 1200
+    assert result["balance_after_period"] == 0
+
+
+def test_yaseen_uncle_november_cut_fills_only_the_remaining_amount(monkeypatch):
+    employee = {"id": "employee-yaseen", "name": "Yaseen Uncle", "monthly_salary": 18000}
+    records = {
+        "employees": [employee],
+        "attendance": [],
+        "piece_production": [],
+        "salary_advances": [{"employee_id": employee["id"], "date": "2026-10-31", "amount": 1200}],
+        "salary_cuts": [{
+            "employee_id": employee["id"], "start_date": "2026-11-02", "end_date": "2026-11-07",
+            "amount": 400,
+        }],
+    }
+
+    async def fake_listall(collection, *_args, **_kwargs):
+        return records[collection]
+
+    monkeypatch.setattr(server, "listall", fake_listall)
+
+    result = asyncio.run(server.salary_report("2026-11-01", "2026-11-30"))["employees"][0]
+
+    assert result["monthly_salary"] == 6500
+    assert result["cut"] == 1200
+    assert result["balance_after_period"] == 0
+
+
+def test_yaseen_uncle_is_not_paid_monthly_in_a_partial_november_period(monkeypatch):
+    employee = {"id": "employee-yaseen", "name": "Yaseen Uncle", "monthly_salary": 18000}
+    records = {
+        "employees": [employee],
+        "attendance": [],
         "piece_production": [],
         "salary_advances": [],
         "salary_cuts": [],
@@ -323,13 +372,12 @@ def test_yaseen_uncle_has_5300_fixed_salary_for_monday_to_saturday_period(monkey
 
     monkeypatch.setattr(server, "listall", fake_listall)
 
-    report = asyncio.run(server.salary_report("2026-11-02", "2026-11-07"))
-    result = report["employees"][0]
+    result = asyncio.run(server.salary_report("2026-11-02", "2026-11-07"))["employees"][0]
 
-    assert result["pay_frequency"] == "weekly_fixed"
-    assert result["weekly_salary"] == 5300
-    assert result["gross_salary"] == 5300
-    assert not server.is_yaseen_uncle_weekly_period(employee, "2026-11-09", "2026-11-14")
+    assert result["pay_frequency"] == "monthly_fixed"
+    assert result["monthly_salary"] == 6500
+    assert result["gross_salary"] == 0
+    assert result["cut"] == 0
 
 
 def test_salary_report_sums_duplicate_cuts_for_the_selected_period(monkeypatch):

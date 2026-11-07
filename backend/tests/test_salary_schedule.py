@@ -120,3 +120,61 @@ def test_monthly_fixed_salary_cut_requires_a_complete_month(monkeypatch):
         assert error.status_code == 400
     else:
         raise AssertionError("Expected a monthly salary cut to require a complete month")
+
+
+def test_yaseen_november_balance_cut_saves_only_the_remaining_monthly_target(monkeypatch):
+    existing_cut = {
+        "id": "existing-cut",
+        "employee_id": "employee-yaseen",
+        "start_date": "2026-11-02",
+        "end_date": "2026-11-07",
+        "amount": 400,
+    }
+
+    async def monthly_employee_report(_start_date, _end_date):
+        return {"employees": [{
+            "employee_id": "employee-yaseen",
+            "name": "Yassine Uncle",
+            "pay_frequency": "monthly_fixed",
+            "is_full_month_period": True,
+            "available_balance": 1200,
+            "gross_salary": 6500,
+        }]}
+
+    async def find_one(_query, _projection=None):
+        return None
+
+    async def existing_cuts(_collection, _query=None, _sort=None, _limit=5000, _session=None):
+        return [existing_cut]
+
+    inserted = {}
+
+    async def capture_insert(_collection, data):
+        inserted.update(data)
+        return {"id": "new-cut", **data}
+
+    async def no_audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(server, "require_admin", lambda _user: None)
+    monkeypatch.setattr(server, "salary_report", monthly_employee_report)
+    monkeypatch.setattr(server, "listall", existing_cuts)
+    monkeypatch.setattr(server, "insert", capture_insert)
+    monkeypatch.setattr(server, "log_audit", no_audit)
+    monkeypatch.setattr(
+        server,
+        "db",
+        type("MockDB", (), {"salary_cuts": type("MockCuts", (), {"find_one": staticmethod(find_one)})()})(),
+    )
+
+    asyncio.run(server.save_salary_cut(
+        server.SalaryCutIn(
+            employee_id="employee-yaseen",
+            start_date="2026-11-01",
+            end_date="2026-11-30",
+            amount=1200,
+        ),
+        user={"role": "admin"},
+    ))
+
+    assert inserted["amount"] == 800
