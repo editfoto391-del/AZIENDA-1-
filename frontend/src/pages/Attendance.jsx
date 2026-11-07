@@ -23,7 +23,7 @@ const weekPeriod = (offset = 0) => {
   const daysSinceMonday = (start.getUTCDay() + 6) % 7;
   start.setUTCDate(start.getUTCDate() - daysSinceMonday + offset * 7);
   const end = new Date(start);
-  end.setUTCDate(end.getUTCDate() + 6);
+  end.setUTCDate(end.getUTCDate() + 5);
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 };
 
@@ -191,8 +191,8 @@ export default function Attendance() {
   const [workTimeDraft, setWorkTimeDraft] = useState({});
   const [shiftModeDraft, setShiftModeDraft] = useState({});
   const [workTimeSaving, setWorkTimeSaving] = useState({});
-  const [salaryStart, setSalaryStart] = useState(() => monthPeriod().start);
-  const [salaryEnd, setSalaryEnd] = useState(() => monthPeriod().end);
+  const [salaryStart, setSalaryStart] = useState(() => weekPeriod().start);
+  const [salaryEnd, setSalaryEnd] = useState(() => weekPeriod().end);
   const [salarySearch, setSalarySearch] = useState("");
   const [salaryDepartment, setSalaryDepartment] = useState("");
   const [salaryReport, setSalaryReport] = useState(null);
@@ -205,6 +205,7 @@ export default function Attendance() {
   const [historyClearing, setHistoryClearing] = useState(false);
   const [advanceModal, setAdvanceModal] = useState(null);
   const loadRequest = useRef(0);
+  const salaryRequest = useRef(0);
   const attendanceSavingRef = useRef(new Set());
   const pieceSavingRef = useRef(new Set());
 
@@ -469,28 +470,38 @@ export default function Attendance() {
     catch (error) { toast.error(`Employee deleted, but deleted-employee archive could not be refreshed: ${apiError(error)}`); }
     if (salaryReport) await loadSalaries();
   };
-  const loadSalaries = async (startDate = salaryStart, endDate = salaryEnd) => {
-    if (!startDate || !endDate) return toast.error("Select both salary period dates");
-    if (endDate < startDate) return toast.error("The end date must be on or after the start date");
-    setSalaryLoading(true);
+  const fetchSalaryReport = async (startDate, endDate, requestId) => {
     try {
-      const report = await api.get("/salaries", { start_date: startDate, end_date: endDate });
+      const report = await api.getUncached("/salaries", { start_date: startDate, end_date: endDate });
+      if (requestId !== salaryRequest.current) return null;
       setSalaryReport(report);
       setSalaryCuts(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.cut || 0)])));
       setSalaryWeeklySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.weekly_salary ?? 0)])));
       setSalaryMonthlySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.monthly_salary ?? "")])));
-    } catch (e) { toast.error(apiError(e)); } finally { setSalaryLoading(false); }
+      return report;
+    } catch (error) {
+      if (requestId === salaryRequest.current) toast.error(apiError(error));
+      return null;
+    }
+  };
+  const loadSalaries = async (startDate = salaryStart, endDate = salaryEnd) => {
+    if (!startDate || !endDate) return toast.error("Select both salary period dates");
+    if (endDate < startDate) return toast.error("The end date must be on or after the start date");
+    const requestId = ++salaryRequest.current;
+    setSalaryLoading(true);
+    try { await fetchSalaryReport(startDate, endDate, requestId); }
+    finally {
+      if (requestId === salaryRequest.current) setSalaryLoading(false);
+    }
   };
   const downloadWeeklySalaryReport = async () => {
     if (!salaryStart || !salaryEnd) return toast.error("Select both salary period dates");
     if (salaryEnd < salaryStart) return toast.error("The end date must be on or after the start date");
+    const requestId = ++salaryRequest.current;
     setSalaryLoading(true);
     try {
-      const report = await api.get("/salaries", { start_date: salaryStart, end_date: salaryEnd });
-      setSalaryReport(report);
-      setSalaryCuts(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.cut || 0)])));
-      setSalaryWeeklySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.weekly_salary ?? 0)])));
-      setSalaryMonthlySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.monthly_salary ?? "")])));
+      const report = await fetchSalaryReport(salaryStart, salaryEnd, requestId);
+      if (!report || requestId !== salaryRequest.current) return;
 
       const { jsPDF } = await import("jspdf");
       const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
@@ -499,22 +510,20 @@ export default function Attendance() {
       const margin = 6;
       const tableWidth = pageWidth - margin * 2;
       const columns = [
-        { label: "EMPLOYEE", width: 40, align: "left" },
+        { label: "EMPLOYEE", width: 45, align: "left" },
         { label: "GROSS PAY", width: 30, align: "right" },
         { label: "CUT", width: 24, align: "right" },
         { label: "BALANCE BEFORE CUT", width: 39, align: "right" },
         { label: "BALANCE AFTER CUT", width: 39, align: "right" },
-        { label: "CURRENT BALANCE", width: 37, align: "right" },
-        { label: "NET PAY DUE", width: 34, align: "right" },
-        { label: "ACTUAL PAID", width: 42, align: "right" },
+        { label: "CURRENT BALANCE", width: 38, align: "right" },
+        { label: "ACTUAL PAID", width: 70, align: "right" },
       ];
       let y = 0;
       const totals = report.employees.reduce((result, employee) => ({
         gross: result.gross + Number(employee.gross_salary || 0),
         cuts: result.cuts + Number(employee.cut || 0),
-        net: result.net + Number(employee.net_salary || 0),
         balance: result.balance + Number(employee.balance || 0),
-      }), { gross: 0, cuts: 0, net: 0, balance: 0 });
+      }), { gross: 0, cuts: 0, balance: 0 });
       const departments = [...report.employees.reduce((groups, employee) => {
         const department = String(employee.department || "Other").trim() || "Other";
         const key = department.toLocaleLowerCase();
@@ -545,7 +554,7 @@ export default function Attendance() {
           const metrics = [
             ["GROSS PAY", totals.gross],
             ["DEDUCTIONS", totals.cuts],
-            ["NET PAY DUE", totals.net],
+            ["CURRENT BALANCE", totals.balance],
           ];
           const gap = 3;
           const cardWidth = (tableWidth - gap * (metrics.length - 1)) / metrics.length;
@@ -566,7 +575,7 @@ export default function Attendance() {
           pdf.setFont("helvetica", "normal");
           pdf.setFontSize(7.5);
           pdf.setTextColor(71, 85, 105);
-          pdf.text("Actual salary payments are not recorded. Net pay due is gross pay minus the cut.", margin, y + 4);
+          pdf.text("Actual salary payments are not recorded in the system.", margin, y + 4);
           y += 7;
         }
       };
@@ -623,7 +632,6 @@ export default function Attendance() {
           fmtMoney(employee.available_balance),
           fmtMoney(employee.balance_after_period),
           fmtMoney(employee.balance),
-          fmtMoney(employee.net_salary),
           "Not recorded",
         ];
         let x = margin;
@@ -666,23 +674,28 @@ export default function Attendance() {
         const rowHeight = pageEmployees.length
           ? Math.min(7.2, (availableHeight - departmentGroups.length * 8) / pageEmployees.length)
           : 7.2;
+        const previousPageDepartments = new Set(
+          employeePages.slice(0, pageIndex)
+            .flatMap((employees) => employees.map((employee) => employee.report_department.toLocaleLowerCase())),
+        );
 
         departmentGroups.forEach(({ name, employees }) => {
           drawDepartmentHeading(
             name,
             employees.length,
-            pageIndex > 0 && departments.some((department) => department.name.toLocaleLowerCase() === name.toLocaleLowerCase()),
+            previousPageDepartments.has(name.toLocaleLowerCase()),
           );
           employees.forEach((employee, index) => drawEmployeeRow(employee, index, rowHeight));
         });
       });
 
+      if (requestId !== salaryRequest.current) return;
       pdf.save(`weekly-salary-report-${salaryStart}-${salaryEnd}.pdf`);
       toast.success("Weekly salary report downloaded");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : apiError(error));
     } finally {
-      setSalaryLoading(false);
+      if (requestId === salaryRequest.current) setSalaryLoading(false);
     }
   };
   const saveSalaryRate = async (employee) => {
@@ -756,12 +769,11 @@ export default function Attendance() {
     (salaryDepartment === "" || (employee.department || "Other") === salaryDepartment)
     && `${employee.name} ${employee.department || ""}`.toLocaleLowerCase().includes(salarySearch.trim().toLocaleLowerCase()),
   ) || [];
-  const salaryTotals = filteredSalaryEmployees.reduce((totals, employee) => ({
-    gross: totals.gross + employee.gross_salary,
-    cuts: totals.cuts + employee.cut,
-    net: totals.net + employee.net_salary,
-    balance: totals.balance + employee.balance,
-  }), { gross: 0, cuts: 0, net: 0, balance: 0 });
+  const salaryTotals = (salaryReport?.employees || []).reduce((totals, employee) => ({
+    gross: totals.gross + Number(employee.gross_salary || 0),
+    cuts: totals.cuts + Number(employee.cut || 0),
+    balance: totals.balance + Number(employee.balance || 0),
+  }), { gross: 0, cuts: 0, balance: 0 });
   const chooseSalaryWeek = (offset) => {
     const period = weekPeriod(offset);
     setSalaryStart(period.start);
@@ -813,18 +825,18 @@ export default function Attendance() {
               <p className="mt-1 text-sm text-slate-500">Cuts are saved against the selected dates, and previous balances carry forward automatically. Monthly fixed salaries are included only for a complete calendar month.</p>
             </div>
             <div className="flex flex-wrap items-end gap-3">
-              <div className="w-44"><Input label="Period starts" type="date" value={salaryStart} onChange={(event) => { setSalaryStart(event.target.value); setSalaryReport(null); }} data-testid="salary-start-date" /></div>
-              <div className="w-44"><Input label="Period ends" type="date" value={salaryEnd} onChange={(event) => { setSalaryEnd(event.target.value); setSalaryReport(null); }} data-testid="salary-end-date" /></div>
+              <div className="w-44"><Input label="Period starts" type="date" value={salaryStart} onChange={(event) => { salaryRequest.current += 1; setSalaryLoading(false); setSalaryStart(event.target.value); setSalaryReport(null); }} data-testid="salary-start-date" /></div>
+              <div className="w-44"><Input label="Period ends" type="date" value={salaryEnd} onChange={(event) => { salaryRequest.current += 1; setSalaryLoading(false); setSalaryEnd(event.target.value); setSalaryReport(null); }} data-testid="salary-end-date" /></div>
               <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryMonth(0)} data-testid="salary-this-month-btn">This month</Btn>
               <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryMonth(-1)} data-testid="salary-last-month-btn">Last month</Btn>
-              <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryWeek(0)} data-testid="salary-this-week-btn">This week (Mon–Sun)</Btn>
-              <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryWeek(-1)} data-testid="salary-last-week-btn">Last week</Btn>
+              <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryWeek(0)} data-testid="salary-this-week-btn">This week (Mon–Sat)</Btn>
+              <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryWeek(-1)} data-testid="salary-last-week-btn">Last week (Mon–Sat)</Btn>
               <div className="ml-auto flex flex-wrap items-center gap-3">
                 <Btn variant="danger" disabled={rosterResetting || salaryLoading} onClick={resetPayrollRosterAndAttendance} data-testid="reset-payroll-roster-btn">{rosterResetting ? "Resetting roster…" : "Reset roster and attendance"}</Btn>
                 <Btn disabled={salaryLoading} onClick={downloadWeeklySalaryReport} data-testid="load-salaries-btn"><Download size={16} /> {salaryLoading ? "Preparing..." : "Download weekly report"}</Btn>
               </div>
             </div>
-            <p className="border-t border-border pt-3 text-xs leading-relaxed text-slate-500">Weekly salaries are divided by six paid days. Yaseen Uncle and Ameena receive fixed monthly pay once per calendar month; record their attendance daily. Overtime is paid separately at R20 per hour for weekly-paid staff. Ayanda and Asive remain on piece pay.</p>
+            <p className="border-t border-border pt-3 text-xs leading-relaxed text-slate-500">Weekly salaries are divided by six paid days. For 2–7 November 2026, Yassine Uncle’s full salary is R5,300, prorated for recorded attendance; Ameena receives fixed monthly pay. Overtime is paid separately at R20 per hour for weekly-paid staff. Ayanda and Asive remain on piece pay.</p>
           </Card>
           {salaryReport && <Card className="overflow-hidden">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-slate-50/70 px-4 py-3">
@@ -833,7 +845,7 @@ export default function Attendance() {
             </div>
             {salaryReport.employees.length === 0 ? <Empty icon={Users} title="No employees found" /> : <>
             <div className="grid grid-cols-2 gap-3 border-b border-border p-4 sm:grid-cols-4">
-              {[["Gross payroll", salaryTotals.gross], ["Cuts this period", salaryTotals.cuts], ["Net pay", salaryTotals.net], ["Outstanding balances", salaryTotals.balance]].map(([label, value]) => (
+              {[["Gross payroll", salaryTotals.gross], ["Cuts this period", salaryTotals.cuts], ["Outstanding balances", salaryTotals.balance]].map(([label, value]) => (
                 <div key={label} className="rounded-xl border border-border/70 bg-gradient-to-br from-white to-slate-50 p-3 transition-transform duration-200 hover:-translate-y-0.5">
                   <p className="text-[11px] font-bold uppercase tracking-wide text-slate-400">{label}</p><p className="mt-1 font-mono text-lg font-bold text-slate-800">{fmtMoney(value)}</p>
                 </div>

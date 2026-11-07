@@ -34,6 +34,8 @@ from salary_math import (
     STANDARD_WEEKLY_HOURS,
     calculate_salary_hours,
 )
+YASEEN_UNCLE_WEEKLY_SALARY = 5300
+YASEEN_UNCLE_WEEKLY_PERIOD_START = date(2026, 11, 2)
 from grv_math import (
     aggregate_accepted_stock_lines,
     grv_confirmation_status,
@@ -7895,6 +7897,17 @@ def is_monthly_fixed_salary_employee(employee):
         "UNCLE" in tokens and bool(tokens & {"YASEEN", "YASSEN", "YASSINE", "YASIN"})
     )
 
+def is_yaseen_uncle_weekly_period(employee, start_date, end_date):
+    normalized_name = " ".join(
+        "".join(character if character.isalnum() else " " for character in (employee.get("name") or "")).split()
+    ).upper()
+    tokens = set(normalized_name.split())
+    if "UNCLE" not in tokens or not tokens & {"YASEEN", "YASSEN", "YASSINE", "YASIN"}:
+        return False
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    return start == YASEEN_UNCLE_WEEKLY_PERIOD_START and end == start + timedelta(days=5)
+
 def piecework_includes_sunday(employee_name):
     normalized_name = " ".join((employee_name or "").split()).upper()
     return normalized_name not in seed_data.PIECEWORK_EMPLOYEE_NAMES
@@ -8350,9 +8363,15 @@ async def salary_report(start_date, end_date):
     for employee in employees:
         hourly_rate = float(employee.get("hourly_rate") or 20)
         is_piece_paid = is_piece_paid_employee(employee)
-        is_monthly_fixed = is_monthly_fixed_salary_employee(employee) and not is_piece_paid
+        is_yaseen_uncle_weekly = is_yaseen_uncle_weekly_period(employee, start_date, end_date)
+        is_monthly_fixed = is_monthly_fixed_salary_employee(employee) and not is_piece_paid and not is_yaseen_uncle_weekly
         monthly_salary = employee.get("monthly_salary") if is_monthly_fixed else None
-        weekly_salary = employee.get("weekly_salary") if not is_piece_paid and not is_monthly_fixed else None
+        if is_yaseen_uncle_weekly:
+            weekly_salary = YASEEN_UNCLE_WEEKLY_SALARY
+        elif not is_piece_paid and not is_monthly_fixed:
+            weekly_salary = employee.get("weekly_salary")
+        else:
+            weekly_salary = None
         hours_per_week = STANDARD_WEEKLY_HOURS
         work_days_per_week = 6
         if weekly_salary is None and not is_piece_paid and not is_monthly_fixed:
@@ -8387,8 +8406,14 @@ async def salary_report(start_date, end_date):
         employee_cuts = [item for item in cuts if item.get("employee_id") == employee["id"]]
         all_advance_total = sum((D(item.get("amount", 0)) for item in employee_advances), Decimal("0"))
         all_cut_total = sum((D(item.get("amount", 0)) for item in employee_cuts), Decimal("0"))
-        period_cut = next((item for item in employee_cuts
-                           if item.get("start_date") == start_date and item.get("end_date") == end_date), None)
+        period_cut = r2(sum(
+            (
+                D(item.get("amount", 0))
+                for item in employee_cuts
+                if item.get("start_date") == start_date and item.get("end_date") == end_date
+            ),
+            Decimal("0"),
+        ))
         regular_pay = r2(sum(
             (
                 D(weekly_salary) * D(day["attendance_fraction"]) / D(STANDARD_PAID_DAYS_PER_WEEK)
@@ -8401,7 +8426,7 @@ async def salary_report(start_date, end_date):
         gross = employee_piecework["piece_pay"] if is_piece_paid else (
             monthly_pay if is_monthly_fixed else r2(regular_pay + overtime_pay)
         )
-        cut = r2((period_cut or {}).get("amount", 0))
+        cut = period_cut
         balance = all_advance_total - all_cut_total
         balance_before_period = sum(
             (D(item.get("amount", 0)) for item in employee_advances if item.get("date", "") < start_date),
