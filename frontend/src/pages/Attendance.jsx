@@ -771,12 +771,6 @@ export default function Attendance() {
     (salaryDepartment === "" || (employee.department || "Other") === salaryDepartment)
     && `${employee.name} ${employee.department || ""}`.toLocaleLowerCase().includes(salarySearch.trim().toLocaleLowerCase()),
   ) || [];
-  const salaryTotals = (salaryReport?.employees || []).reduce((totals, employee) => ({
-    gross: totals.gross + Number(employee.gross_salary || 0),
-    cuts: totals.cuts + Number(employee.cut || 0),
-    afterCuts: totals.afterCuts + Number(employee.gross_salary || 0) - Number(employee.cut || 0),
-    balance: totals.balance + Number(employee.balance || 0),
-  }), { gross: 0, cuts: 0, afterCuts: 0, balance: 0 });
   const chooseSalaryWeek = (offset) => {
     const period = weekPeriod(offset);
     setSalaryStart(period.start);
@@ -842,18 +836,7 @@ export default function Attendance() {
             <p className="border-t border-border pt-3 text-xs leading-relaxed text-slate-500">Weekly salaries are divided by six paid days. Yassine Uncle is paid monthly; for November 2026 his salary is R6,500 with a R1,200 balance deduction (R5,300 after the cut). Ameena receives fixed monthly pay. Overtime is paid separately at R20 per hour for weekly-paid staff. Ayanda and Asive remain on piece pay.</p>
           </Card>
           {salaryReport && <Card className="overflow-hidden">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-slate-50/70 px-4 py-3">
-              <h2 className="font-display text-lg font-bold text-slate-800">Salary Report</h2>
-              <p className="text-sm font-medium text-slate-500">{salaryStart} – {salaryEnd}</p>
-            </div>
             {salaryReport.employees.length === 0 ? <Empty icon={Users} title="No employees found" /> : <>
-            <div className="grid grid-cols-2 gap-3 border-b border-border p-4 sm:grid-cols-4">
-              {[["Gross payroll", salaryTotals.gross], ["Cuts this period", salaryTotals.cuts], ["Pay after cuts", salaryTotals.afterCuts], ["Outstanding balances", salaryTotals.balance]].map(([label, value]) => (
-                <div key={label} className="rounded-xl border border-border/70 bg-gradient-to-br from-white to-slate-50 p-3 transition-transform duration-200 hover:-translate-y-0.5">
-                  <p className="text-[11px] font-bold uppercase tracking-wide text-slate-400">{label}</p><p className="mt-1 font-mono text-lg font-bold text-slate-800">{fmtMoney(value)}</p>
-                </div>
-              ))}
-            </div>
             <div className="border-b border-border p-4">
               <div className="flex flex-wrap items-end gap-3">
               <div className="relative w-full max-w-sm">
