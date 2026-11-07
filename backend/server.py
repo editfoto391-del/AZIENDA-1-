@@ -250,26 +250,66 @@ def fmt_local(s):
     return parse_dt(s).astimezone(TZ).strftime("%d %b %Y, %H:%M")
 
 class StockLock:
+    LEASE_DURATION = timedelta(minutes=2)
+    HEARTBEAT_INTERVAL = 30
+
     def __init__(self, ids):
         self.ids = sorted(set(ids))
         self.held = []
+        self.token = new_id()
+        self.heartbeat_task = None
 
     async def __aenter__(self):
-        import asyncio
         for sid in self.ids:
             for _ in range(50):
-                if await db.stock.find_one_and_update({"id": sid, "lock": {"$ne": True}}, {"$set": {"lock": True}}):
+                now = datetime.now(timezone.utc)
+                stale_before = now - self.LEASE_DURATION
+                lock_query = {
+                    "id": sid,
+                    "$or": [
+                        {"lock": {"$ne": True}},
+                        {"lock": True, "lock_at": {"$lt": stale_before}},
+                        {"lock": True, "lock_at": {"$exists": False}},
+                    ],
+                }
+                if await db.stock.find_one_and_update(
+                    lock_query,
+                    {"$set": {"lock": True, "lock_at": now, "lock_token": self.token}},
+                ):
                     self.held.append(sid)
                     break
                 await asyncio.sleep(0.1)
             else:
                 await self.__aexit__()
                 raise HTTPException(409, "Stock is being updated by another operation. Please retry")
+        if self.held:
+            self.heartbeat_task = asyncio.create_task(self._heartbeat())
         return self
 
+    async def _heartbeat(self):
+        while True:
+            await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+            try:
+                await db.stock.update_many(
+                    {"id": {"$in": self.held}, "lock_token": self.token},
+                    {"$set": {"lock_at": datetime.now(timezone.utc)}},
+                )
+            except Exception:
+                logging.exception("Failed to renew stock lock lease")
+
     async def __aexit__(self, *a):
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
+            try:
+                await self.heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self.heartbeat_task = None
         if self.held:
-            await db.stock.update_many({"id": {"$in": self.held}}, {"$unset": {"lock": ""}})
+            await db.stock.update_many(
+                {"id": {"$in": self.held}, "lock_token": self.token},
+                {"$unset": {"lock": "", "lock_at": "", "lock_token": ""}},
+            )
         self.held = []
 
 
@@ -6951,6 +6991,21 @@ async def stock_current(s, session=None):
     return apply_stock_movements(s, movs)
 
 
+async def stock_movement_totals_by_stock_id(stock_ids):
+    if not stock_ids:
+        return {}
+    totals = {stock_id: Decimal("0") for stock_id in stock_ids}
+    cursor = db.stock_movements.find(
+        {"stock_id": {"$in": list(totals)}},
+        {"_id": 0, "stock_id": 1, "type": 1, "quantity": 1, "direction": 1},
+    )
+    async for movement in cursor:
+        stock_id = movement.get("stock_id")
+        if stock_id in totals:
+            totals[stock_id] += D(movement.get("quantity", 0)) * mov_sign(movement)
+    return totals
+
+
 async def stock_movements_for_stock_ids(stock_ids):
     if not stock_ids:
         return {}
@@ -10961,6 +11016,9 @@ class GRVIn(BaseModel):
 class GRVDeleteIn(BaseModel):
     supervisor_password: Optional[str] = None
 
+class GRVBulkDeleteIn(BaseModel):
+    ids: List[str] = Field(min_length=1, max_length=500)
+
 class MonthlyBusinessPurchaseIn(BaseModel):
     name: str
     supplier_name: Optional[str] = ""
@@ -12232,24 +12290,36 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
     async with StockLock([item["stock_id"] for item in accepted]), PurchaseOrderReceiptLock(
         po["id"] if po else "", grv_id,
     ):
+        stock_ids = list({item["stock_id"] for item in accepted})
+        stock_cursor = db.stock.find({"id": {"$in": stock_ids}}, {"_id": 0})
+        stocks = {stock["id"]: stock async for stock in stock_cursor}
+        for item in accepted:
+            if item["stock_id"] not in stocks:
+                raise HTTPException(409, f"Stock item no longer exists: {item['product']} {item['size']}")
+
+        reversal_keys = [f"grv-reversal:{grv_id}:{stock_id}" for stock_id in stock_ids]
+        receipt_keys = [f"grv:{grv_id}:{stock_id}" for stock_id in stock_ids]
+        movement_cursor = db.stock_movements.find(
+            {"dedupe_key": {"$in": reversal_keys + receipt_keys}}, {"_id": 0},
+        )
+        movements_by_key = {
+            movement["dedupe_key"]: movement async for movement in movement_cursor
+        }
+        stock_deltas = await stock_movement_totals_by_stock_id(stock_ids)
+
         reverse_ids = []
         for item in accepted:
-            stock = await db.stock.find_one({"id": item["stock_id"]}, {"_id": 0})
-            if not stock:
-                raise HTTPException(409, f"Stock item no longer exists: {item['product']} {item['size']}")
+            stock = stocks[item["stock_id"]]
             key = f"grv-reversal:{grv_id}:{item['stock_id']}"
-            movement = await db.stock_movements.find_one({"dedupe_key": key}, {"_id": 0})
+            movement = movements_by_key.get(key)
             if not movement:
-                await stock_current(stock)
-                if D(item["quantity"]) > D(stock["current"]):
+                current = r2(D(stock.get("opening", 0)) + stock_deltas[item["stock_id"]])
+                if D(item["quantity"]) > D(current):
                     raise HTTPException(
                         409,
-                        f"Cannot reverse {item['product']} {item['size']}: only {stock['current']} remain in stock",
+                        f"Cannot reverse {item['product']} {item['size']}: only {current} remain in stock",
                     )
-                received_movement = await db.stock_movements.find_one(
-                    {"dedupe_key": f"grv:{grv_id}:{item['stock_id']}"},
-                    {"_id": 0},
-                )
+                received_movement = movements_by_key.get(f"grv:{grv_id}:{item['stock_id']}")
                 unit_cost = received_movement.get("unit_cost") if received_movement else item.get("unit_cost")
                 cost_status = (
                     received_movement.get("historical_cost_status")
@@ -12261,7 +12331,7 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
                     stock, "reversal", item["quantity"], user,
                     reason=f"Reversal of {grv['grv_number']}",
                     reference=grv["grv_number"], dedupe_key=key,
-                    direction=-1, extra={
+                    direction=-1, allow_negative=True, extra={
                         "grv_id": grv_id,
                         "grv_number": grv["grv_number"],
                         "reverses_grv": True,
@@ -12342,36 +12412,65 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
     })
     return updated
 
-@api.delete("/grvs/{grv_id}")
-async def delete_grv(
-    grv_id: str, body: GRVDeleteIn = GRVDeleteIn(),
-    user=Depends(get_current_user),
-):
+def require_grv_delete_owner(user):
     company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
-    role = user.get("_active_role") or company_role(user, company_id)
-    is_owner = user.get("role") == "owner" or role == "owner"
-    is_worker = user.get("is_worker", False)
-    if role not in ("owner", "admin") and not (
-        is_worker and set(user.get("worker_allowed_sections") or []).intersection({"grv", "costs"})
-    ):
-        raise HTTPException(403, "Administrator or GRV worker access required")
+    is_company_owner = (
+        not user.get("is_worker")
+        and (
+            user.get("_active_role") == "owner"
+            or (user.get("company_roles") or {}).get(company_id) == "owner"
+        )
+    )
+    if not is_global_owner_account(user) and not is_company_owner:
+        raise HTTPException(403, "Global owner or active company owner access required")
 
+
+async def _delete_grv_record(grv_id, user):
     grv = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
     if not grv:
         raise HTTPException(404, "GRV not found")
     if grv.get("status") not in ("draft", "pending_inspection", "cancelled"):
         raise HTTPException(409, "Reverse a confirmed GRV before deleting it")
 
-    if company_id != DEFAULT_COMPANY_ID and not is_owner:
-        if not body.supervisor_password:
-            raise HTTPException(428, "Supervisor password is required to delete this GRV")
-        await authenticate_supervisor(body.supervisor_password, user, allow_skip=False)
-
     await log_audit("grv", grv_id, "deleted", user, before=grv)
-    result = await db.grvs.delete_one({"id": grv_id})
+    result = await db.grvs.delete_one({
+        "id": grv_id,
+        "status": {"$in": ["draft", "pending_inspection", "cancelled"]},
+    })
     if result.deleted_count != 1:
         raise HTTPException(409, "GRV changed before it could be deleted")
+    return grv
+
+
+@api.delete("/grvs/{grv_id}")
+async def delete_grv(
+    grv_id: str, body: GRVDeleteIn = GRVDeleteIn(),
+    user=Depends(get_current_user),
+):
+    require_grv_delete_owner(user)
+    await _delete_grv_record(grv_id, user)
     return {"ok": True, "deleted": True}
+
+
+@api.post("/grvs/bulk-delete")
+async def bulk_delete_grvs(body: GRVBulkDeleteIn, user=Depends(get_current_user)):
+    require_grv_delete_owner(user)
+    ids = list(dict.fromkeys(grv_id.strip() for grv_id in body.ids if grv_id.strip()))
+    if not ids:
+        raise HTTPException(400, "Select at least one GRV to delete")
+
+    deleted = []
+    failed = []
+    for grv_id in ids:
+        try:
+            grv = await _delete_grv_record(grv_id, user)
+            deleted.append({"id": grv_id, "grv_number": grv.get("grv_number", grv_id)})
+        except HTTPException as error:
+            failed.append({
+                "id": grv_id,
+                "message": error.detail,
+            })
+    return {"deleted": deleted, "failed": failed}
 
 @api.post("/purchase-orders")
 async def add_purchase_order(body: PurchaseOrderIn, user=Depends(get_current_user)):

@@ -22,6 +22,8 @@ def _matches(document, query):
                 return False
             if "$in" in expected and actual not in expected["$in"]:
                 return False
+            if "$lt" in expected and (actual is None or actual >= expected["$lt"]):
+                return False
             if "$regex" in expected:
                 options = re.IGNORECASE if "i" in expected.get("$options", "") else 0
                 if actual is None or not re.search(expected["$regex"], str(actual), options):
@@ -34,6 +36,14 @@ def _matches(document, query):
 class FakeCollection:
     def __init__(self, documents=()):
         self.documents = [deepcopy(document) for document in documents]
+        self.find_queries = []
+
+    def find(self, query=None, projection=None):
+        self.find_queries.append(deepcopy(query or {}))
+        return FakeCursor([
+            document for document in self.documents
+            if _matches(document, query or {})
+        ])
 
     async def find_one(self, query, projection=None):
         found = next((document for document in self.documents if _matches(document, query)), None)
@@ -62,6 +72,14 @@ class FakeCollection:
                 self._apply(document, update)
                 return type("UpdateResult", (), {"matched_count": 1})()
         return type("UpdateResult", (), {"matched_count": 0})()
+
+    async def update_many(self, query, update):
+        matched = 0
+        for document in self.documents:
+            if _matches(document, query):
+                self._apply(document, update)
+                matched += 1
+        return type("UpdateResult", (), {"matched_count": matched})()
 
     @staticmethod
     def _set_path(document, path, value):
@@ -122,6 +140,20 @@ class FakeDatabase:
             return self.collections[name]
         except KeyError:
             raise AttributeError(name)
+
+
+class FakeCursor:
+    def __init__(self, documents):
+        self.documents = iter(deepcopy(documents))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self.documents)
+        except StopIteration:
+            raise StopAsyncIteration
 
 
 def _install_fake_grv_dependencies(monkeypatch, fake_db):
@@ -225,6 +257,91 @@ def test_partial_grvs_update_po_and_stock_once_without_creating_buyings(monkeypa
         with pytest.raises(HTTPException) as duplicate:
             await server.confirm_grv(second["id"], user)
         assert duplicate.value.status_code == 409
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("initial_status", ["completed", "reversing"])
+def test_grv_reversal_batches_stock_history_reads_and_retries_interrupted_reversals(
+    monkeypatch, initial_status,
+):
+    fake_db = FakeDatabase()
+    fake_db.stock.documents.append({
+        "id": "stock-2", "product": "Simple", "size": "1200x100",
+    })
+    fake_db.grvs.documents.append({
+        "id": "grv-1", "grv_number": "GRV-1", "status": initial_status,
+        "items": [
+            {"stock_id": "stock-1", "product": "Simple", "size": "910x100",
+             "accepted_quantity": 3, "unit_cost": 4},
+            {"stock_id": "stock-2", "product": "Simple", "size": "1200x100",
+             "accepted_quantity": 2, "unit_cost": 5},
+        ],
+    })
+    fake_db.stock_movements.documents.extend([
+        {"id": "receipt-1", "stock_id": "stock-1", "type": "purchase",
+         "direction": 1, "quantity": 10, "dedupe_key": "grv:grv-1:stock-1",
+         "unit_cost": 4, "historical_cost_status": "verified", "batch_id": "receipt-1"},
+        {"id": "invoice-1", "stock_id": "stock-1", "type": "invoice",
+         "direction": -1, "quantity": 2},
+        {"id": "receipt-2", "stock_id": "stock-2", "type": "purchase",
+         "direction": 1, "quantity": 5, "dedupe_key": "grv:grv-1:stock-2",
+         "unit_cost": 5, "historical_cost_status": "verified", "batch_id": "receipt-2"},
+    ])
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    user = {
+        "email": "admin@example.test", "_active_role": "admin",
+        "_active_company_id": "test-company",
+    }
+
+    async def scenario():
+        result = await server.reverse_grv(
+            "grv-1", server.ReasonIn(reason="Incorrect delivery"), user,
+        )
+        assert result["status"] == "cancelled"
+        reversals = [
+            movement for movement in fake_db.stock_movements.documents
+            if movement.get("reverses_grv")
+        ]
+        assert {movement["stock_id"]: movement["quantity"] for movement in reversals} == {
+            "stock-1": 3, "stock-2": 2,
+        }
+        assert len(fake_db.stock_movements.find_queries) == 2
+        assert len(fake_db.stock_movements.documents) == 5
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("lock_at", [None, "expired"])
+def test_stock_lock_recovers_abandoned_lease_and_releases_only_its_own_lock(monkeypatch, lock_at):
+    fake_db = FakeDatabase()
+    old_lock = {"id": "stock-1", "lock": True, "lock_token": "abandoned-owner"}
+    if lock_at == "expired":
+        old_lock["lock_at"] = server.datetime.now(server.timezone.utc) - server.timedelta(minutes=3)
+    fake_db.stock.documents = [old_lock]
+    monkeypatch.setattr(server, "db", fake_db)
+
+    async def scenario():
+        lock = server.StockLock(["stock-1"])
+        async with lock:
+            acquired = await fake_db.stock.find_one({"id": "stock-1"})
+            assert acquired["lock"] is True
+            assert acquired["lock_token"] == lock.token
+            assert acquired["lock_at"] > server.datetime.now(server.timezone.utc) - server.timedelta(seconds=5)
+
+        released = await fake_db.stock.find_one({"id": "stock-1"})
+        assert "lock" not in released
+        assert "lock_at" not in released
+        assert "lock_token" not in released
+
+        async with server.StockLock(["stock-1"]):
+            await fake_db.stock.update_one(
+                {"id": "stock-1"},
+                {"$set": {"lock_token": "another-owner"}},
+            )
+        still_owned = await fake_db.stock.find_one({"id": "stock-1"})
+        assert still_owned["lock"] is True
+        assert still_owned["lock_token"] == "another-owner"
 
     asyncio.run(scenario())
 
@@ -511,80 +628,95 @@ def test_unified_price_company_grv_creates_new_product_with_one_price(monkeypatc
     asyncio.run(scenario())
 
 
-def test_worker_grv_delete_requires_supervisor_except_in_superiqfoam(monkeypatch):
+def test_only_global_or_active_company_owner_can_delete_grv(monkeypatch):
     fake_db = FakeDatabase()
     fake_db.grvs.documents.extend([
-        {"id": "other-company-grv", "grv_number": "GRV-OTHER", "status": "draft"},
-        {"id": "manufacturing-grv", "grv_number": "GRV-MFG", "status": "draft"},
-        {"id": "superiqfoam-grv", "grv_number": "GRV-SIQ", "status": "draft"},
-        {"id": "confirmed-grv", "grv_number": "GRV-CONFIRMED", "status": "completed"},
+        {"id": "company-owner-grv", "grv_number": "GRV-OWNER", "status": "draft"},
+        {"id": "global-owner-grv", "grv_number": "GRV-GLOBAL", "status": "draft"},
+        {"id": "admin-grv", "grv_number": "GRV-ADMIN", "status": "draft"},
+        {"id": "worker-grv", "grv_number": "GRV-WORKER", "status": "draft"},
     ])
     monkeypatch.setattr(server, "db", fake_db)
     monkeypatch.setattr(server, "log_audit", _no_audit)
-    authorized_passwords = []
-
-    async def authenticate_supervisor(password, user, allow_skip=True):
-        authorized_passwords.append((password, allow_skip))
-        if password != "valid-supervisor-password":
-            raise HTTPException(403, "Supervisor password is incorrect")
-        return "supervisor-id", "Supervisor"
-
-    monkeypatch.setattr(server, "authenticate_supervisor", authenticate_supervisor)
+    monkeypatch.setenv("ADMIN_EMAIL", "global-owner@example.test")
+    company_owner = {
+        "id": "company-owner", "email": "company-owner@example.test",
+        "role": "user", "_active_role": "owner",
+        "_active_company_id": "test-company",
+        "company_roles": {"test-company": "owner"},
+    }
+    global_owner = {
+        "id": "global-owner", "email": "global-owner@example.test",
+        "role": "owner", "_active_role": "owner",
+        "_active_company_id": "test-company",
+    }
+    admin = {
+        "id": "admin", "email": "admin@example.test",
+        "_active_role": "admin", "_active_company_id": "test-company",
+    }
     worker = {
         "id": "worker", "email": "worker@example.test", "is_worker": True,
-        "_active_role": "user", "_active_company_id": "another-company",
+        "_active_role": "user", "_active_company_id": "test-company",
         "worker_allowed_sections": ["grv"],
     }
 
     async def scenario():
-        with pytest.raises(HTTPException) as missing_password:
-            await server.delete_grv("other-company-grv", server.GRVDeleteIn(), worker)
-        assert missing_password.value.status_code == 428
+        with pytest.raises(HTTPException) as admin_denied:
+            await server.delete_grv("admin-grv", server.GRVDeleteIn(), admin)
+        assert admin_denied.value.status_code == 403
 
-        with pytest.raises(HTTPException) as invalid_password:
-            await server.delete_grv(
-                "other-company-grv",
-                server.GRVDeleteIn(supervisor_password="wrong-password"),
-                worker,
-            )
-        assert invalid_password.value.status_code == 403
+        with pytest.raises(HTTPException) as worker_denied:
+            await server.delete_grv("worker-grv", server.GRVDeleteIn(), worker)
+        assert worker_denied.value.status_code == 403
 
-        deleted = await server.delete_grv(
-            "other-company-grv",
-            server.GRVDeleteIn(supervisor_password="valid-supervisor-password"),
-            worker,
-        )
+        deleted = await server.delete_grv("company-owner-grv", server.GRVDeleteIn(), company_owner)
         assert deleted == {"ok": True, "deleted": True}
-        assert await fake_db.grvs.find_one({"id": "other-company-grv"}) is None
+        assert await fake_db.grvs.find_one({"id": "company-owner-grv"}) is None
 
-        wholesaler_admin = {
-            "id": "wholesaler-admin", "email": "admin@example.test",
-            "role": "user", "_active_role": "admin",
-            "_active_company_id": "iqfoam-manufactoring",
-            "company_roles": {server.WHOLESALERS_COMPANY_ID: "admin"},
-        }
-        assert server.can_skip_supervisor_approval(wholesaler_admin)
-        await server.delete_grv(
-            "manufacturing-grv",
-            server.GRVDeleteIn(supervisor_password="valid-supervisor-password"),
-            wholesaler_admin,
+        global_deleted = await server.delete_grv(
+            "global-owner-grv", server.GRVDeleteIn(), global_owner,
         )
+        assert global_deleted == {"ok": True, "deleted": True}
 
-        superiqfoam_worker = {**worker, "_active_company_id": server.DEFAULT_COMPANY_ID}
-        deleted_without_password = await server.delete_grv(
-            "superiqfoam-grv", server.GRVDeleteIn(), superiqfoam_worker,
+    asyncio.run(scenario())
+
+
+def test_company_owner_can_bulk_delete_eligible_grvs_and_receives_per_item_failures(monkeypatch):
+    fake_db = FakeDatabase()
+    fake_db.grvs.documents.extend([
+        {"id": "draft-grv", "grv_number": "GRV-DRAFT", "status": "draft"},
+        {"id": "cancelled-grv", "grv_number": "GRV-CANCELLED", "status": "cancelled"},
+        {"id": "confirmed-grv", "grv_number": "GRV-CONFIRMED", "status": "completed"},
+    ])
+    monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "log_audit", _no_audit)
+    owner = {
+        "id": "owner", "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": "test-company",
+    }
+
+    async def scenario():
+        result = await server.bulk_delete_grvs(
+            server.GRVBulkDeleteIn(ids=[
+                "draft-grv", "cancelled-grv", "confirmed-grv", "missing-grv",
+            ]),
+            owner,
         )
-        assert deleted_without_password == {"ok": True, "deleted": True}
-        assert authorized_passwords == [
-            ("wrong-password", False),
-            ("valid-supervisor-password", False),
-            ("valid-supervisor-password", False),
+        assert result["deleted"] == [
+            {"id": "draft-grv", "grv_number": "GRV-DRAFT"},
+            {"id": "cancelled-grv", "grv_number": "GRV-CANCELLED"},
         ]
+        assert result["failed"] == [
+            {"id": "confirmed-grv", "message": "Reverse a confirmed GRV before deleting it"},
+            {"id": "missing-grv", "message": "GRV not found"},
+        ]
+        assert [grv["id"] for grv in fake_db.grvs.documents] == ["confirmed-grv"]
 
-        with pytest.raises(HTTPException) as confirmed:
-            await server.delete_grv(
-                "confirmed-grv", server.GRVDeleteIn(), superiqfoam_worker,
+        with pytest.raises(HTTPException) as admin_denied:
+            await server.bulk_delete_grvs(
+                server.GRVBulkDeleteIn(ids=["confirmed-grv"]),
+                {"_active_role": "admin", "_active_company_id": "test-company"},
             )
-        assert confirmed.value.status_code == 409
+        assert admin_denied.value.status_code == 403
 
     asyncio.run(scenario())

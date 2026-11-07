@@ -20,6 +20,7 @@ const STATUSES = [
   ["discrepancy", "Discrepancy"],
   ["cancelled", "Cancelled"],
 ];
+const DELETABLE_GRV_STATUSES = new Set(["draft", "pending_inspection", "cancelled"]);
 const STATUS_STYLE = {
   draft: "bg-slate-100 text-slate-600 border-slate-200",
   pending_inspection: "bg-blue-50 text-blue-700 border-blue-200",
@@ -231,10 +232,11 @@ export default function GRV() {
   const [draft, setDraft] = useState(null);
   const [scanReceivingMode, setScanReceivingMode] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
-  const [deletePassword, setDeletePassword] = useState("");
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [selectedGRVIds, setSelectedGRVIds] = useState([]);
   const [saving, setSaving] = useState(false);
   const [workingId, setWorkingId] = useState("");
+  const canDeleteGRVs = !!(user?.is_owner || user?.is_company_owner);
 
   const refresh = useCallback(async () => {
     setRecords(null);
@@ -273,6 +275,16 @@ export default function GRV() {
       sum + (grv.items || []).reduce((lineSum, line) => lineSum + Number(line.total_value || 0), 0), 0),
     [records],
   );
+  const selectableGRVs = useMemo(
+    () => (records || []).filter((grv) => DELETABLE_GRV_STATUSES.has(grv.status)),
+    [records],
+  );
+  const allVisibleGRVsSelected = selectableGRVs.length > 0
+    && selectableGRVs.every((grv) => selectedGRVIds.includes(grv.id));
+
+  useEffect(() => {
+    setSelectedGRVIds([]);
+  }, [companyId, filters]);
 
   const updateLine = (index, key, value) => {
     setDraft((current) => ({
@@ -404,13 +416,19 @@ export default function GRV() {
     if (!deleteTarget || deleteBusy) return;
     setDeleteBusy(true);
     try {
-      await api.delWithData(`/grvs/${deleteTarget.id}`, {
-        supervisor_password: deletePassword || undefined,
-      });
+      await api.delWithData(`/grvs/${deleteTarget.id}`, {});
+      const deleted = deleteTarget;
+      setRecords((current) => current?.filter((grv) => grv.id !== deleted.id) ?? current);
+      setSelectedGRVIds((current) => current.filter((id) => id !== deleted.id));
       toast.success(`${deleteTarget.grv_number} deleted`);
       setDeleteTarget(null);
-      setDeletePassword("");
-      await refresh();
+      const query = {
+        ...Object.fromEntries(Object.entries(filters).filter(([, value]) => value)),
+        company_profile_id: companyId,
+      };
+      api.get("/grvs/dashboard", query).then(setDashboard).catch((error) => {
+        toast.error(`GRV deleted, but the summary could not be refreshed: ${apiError(error)}`);
+      });
     } catch (error) {
       toast.error(apiError(error));
     } finally {
@@ -418,8 +436,35 @@ export default function GRV() {
     }
   };
 
-  const requiresGRVDeletePassword = companyId !== "superiqfoam"
-    && !user?.is_owner && !user?.is_company_owner;
+  const deleteSelectedGRVs = async () => {
+    if (!selectedGRVIds.length || deleteBusy) return;
+    if (!window.confirm(`Permanently delete ${selectedGRVIds.length} selected GRV(s)? Confirmed GRVs must be reversed first.`)) return;
+    setDeleteBusy(true);
+    try {
+      const result = await api.post("/grvs/bulk-delete", { ids: selectedGRVIds });
+      const deletedIds = new Set((result.deleted || []).map((grv) => grv.id));
+      setRecords((current) => current?.filter((grv) => !deletedIds.has(grv.id)) ?? current);
+      setSelectedGRVIds([]);
+      if (deletedIds.size) {
+        toast.success(`${deletedIds.size} GRV${deletedIds.size === 1 ? "" : "s"} deleted`);
+      }
+      if (result.failed?.length) {
+        toast.error(`${result.failed.length} GRV(s) not deleted: ${result.failed.map((item) => `${item.id}: ${item.message}`).join("; ")}`);
+      }
+      const query = {
+        ...Object.fromEntries(Object.entries(filters).filter(([, value]) => value)),
+        company_profile_id: companyId,
+      };
+      api.get("/grvs/dashboard", query).then(setDashboard).catch((error) => {
+        toast.error(`GRVs deleted, but the summary could not be refreshed: ${apiError(error)}`);
+      });
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
   const deleteRequiresReversal = deleteTarget
     && !["draft", "pending_inspection", "cancelled"].includes(deleteTarget.status);
 
@@ -587,7 +632,17 @@ export default function GRV() {
             <h2 className="font-semibold text-slate-800">GRV Register</h2>
             <p className="text-xs text-slate-500">Accepted stock value in this view: {fmtMoney(totalValue)}</p>
           </div>
-          <span className="text-xs text-slate-500">{records?.length ?? 0} records</span>
+          <div className="flex items-center gap-3">
+            {canDeleteGRVs && selectedGRVIds.length > 0 && <Btn
+              variant="danger"
+              onClick={deleteSelectedGRVs}
+              disabled={deleteBusy}
+              data-testid="grv-bulk-delete"
+            >
+              <Trash2 size={15} /> {deleteBusy ? "Deleting..." : `Delete selected (${selectedGRVIds.length})`}
+            </Btn>}
+            <span className="text-xs text-slate-500">{records?.length ?? 0} records</span>
+          </div>
         </div>
         {records === null ? <p className="p-6 text-sm text-slate-400" role="status">Loading GRVs...</p> : records.length === 0 ? (
           <Empty icon={ClipboardCheck} title="No GRVs found" hint="Create a goods received voucher for a supplier delivery." />
@@ -595,6 +650,21 @@ export default function GRV() {
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1080px] text-sm">
               <thead><tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500">
+                {canDeleteGRVs && <th className="px-3 py-3 text-center">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all deletable GRVs"
+                    checked={allVisibleGRVsSelected}
+                    disabled={!selectableGRVs.length || deleteBusy}
+                    onChange={(event) => {
+                      const visibleIds = new Set(selectableGRVs.map((grv) => grv.id));
+                      setSelectedGRVIds((current) => event.target.checked
+                        ? [...new Set([...current, ...visibleIds])]
+                        : current.filter((id) => !visibleIds.has(id)));
+                    }}
+                    data-testid="grv-select-all"
+                  />
+                </th>}
                 <th className="px-4 py-3">GRV number</th><th className="px-4 py-3">Received date</th>
                 <th className="px-4 py-3">Supplier</th><th className="px-4 py-3">PO / delivery note</th>
                 <th className="px-4 py-3 text-right">Lines</th><th className="px-4 py-3 text-right">Accepted value</th>
@@ -606,6 +676,18 @@ export default function GRV() {
                 const confirmed = ["completed", "partially_received", "discrepancy", "reversing"].includes(grv.status);
                 return (
                   <tr key={grv.id} className="border-b border-border/60 align-top hover:bg-slate-50" data-testid={`grv-row-${grv.id}`}>
+                    {canDeleteGRVs && <td className="px-3 py-3 text-center">
+                      {DELETABLE_GRV_STATUSES.has(grv.status) && <input
+                        type="checkbox"
+                        aria-label={`Select ${grv.grv_number} for deletion`}
+                        checked={selectedGRVIds.includes(grv.id)}
+                        disabled={deleteBusy}
+                        onChange={(event) => setSelectedGRVIds((current) => event.target.checked
+                          ? [...new Set([...current, grv.id])]
+                          : current.filter((id) => id !== grv.id))}
+                        data-testid={`grv-select-${grv.id}`}
+                      />}
+                    </td>}
                     <td className="px-4 py-3 font-semibold text-primary">{grv.grv_number}</td>
                     <td className="px-4 py-3">{fmtDate(grv.received_date)}</td>
                     <td className="px-4 py-3">{grv.supplier_name || "-"}</td>
@@ -620,8 +702,8 @@ export default function GRV() {
                         {grv.status === "draft" && <button type="button" onClick={() => act(grv, "inspect")} disabled={busy} className="rounded px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50" data-testid={`grv-inspect-${grv.id}`}>Inspect</button>}
                         {["draft", "pending_inspection", "confirming"].includes(grv.status) && <button type="button" onClick={() => act(grv, "confirm", `Confirm ${grv.grv_number}? Accepted quantities will be posted to Stock once.`)} disabled={busy} className="rounded px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50" data-testid={`grv-confirm-${grv.id}`}>{busy ? "Working..." : grv.status === "confirming" ? "Retry confirm" : "Confirm"}</button>}
                         {["draft", "pending_inspection"].includes(grv.status) && <button type="button" onClick={() => act(grv, "cancel")} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Cancel draft" data-testid={`grv-cancel-${grv.id}`}><Ban size={15} /></button>}
-                        {grv.status !== "reversing" && <button type="button" onClick={() => { setDeleteTarget(grv); setDeletePassword(""); }} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Delete GRV" aria-label={`Delete ${grv.grv_number}`} data-testid={`grv-delete-${grv.id}`}><Trash2 size={15} /></button>}
-                        {confirmed && (user?.is_admin || user?.is_owner) && <button type="button" onClick={() => act(grv, "reverse", `Reverse ${grv.grv_number}? This adds traceable stock reversals and reopens its PO quantities when possible.`)} disabled={busy} className="rounded p-1.5 text-red-700 hover:bg-red-50 disabled:opacity-50" title="Reverse confirmed GRV" data-testid={`grv-reverse-${grv.id}`}><RotateCcw size={15} /></button>}
+                        {canDeleteGRVs && DELETABLE_GRV_STATUSES.has(grv.status) && <button type="button" onClick={() => setDeleteTarget(grv)} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Delete GRV" aria-label={`Delete ${grv.grv_number}`} data-testid={`grv-delete-${grv.id}`}><Trash2 size={15} /></button>}
+                        {confirmed && (user?.is_admin || user?.is_owner) && <button type="button" onClick={() => act(grv, "reverse", `${grv.status === "reversing" ? "Retry" : "Reverse"} ${grv.grv_number}? This adds traceable stock reversals and reopens its PO quantities when possible.`)} disabled={busy} className="rounded p-1.5 text-red-700 hover:bg-red-50 disabled:opacity-50" title={grv.status === "reversing" ? "Retry GRV reversal" : "Reverse confirmed GRV"} data-testid={`grv-reverse-${grv.id}`}><RotateCcw size={15} /></button>}
                       </div>
                     </td>
                   </tr>
@@ -800,19 +882,9 @@ export default function GRV() {
             Permanently delete <span className="font-semibold">{deleteTarget.grv_number}</span>? This cannot be undone.
             {deleteRequiresReversal && " This GRV has affected stock. Use Reverse first, then delete it to preserve the stock history."}
           </p>
-          {!deleteRequiresReversal && requiresGRVDeletePassword && <Input
-            label="Supervisor password"
-            type="password"
-            autoComplete="current-password"
-            autoFocus
-            required
-            value={deletePassword}
-            onChange={(event) => setDeletePassword(event.target.value)}
-            data-testid="grv-delete-supervisor-password"
-          />}
           <div className="flex justify-end gap-2">
             <Btn type="button" variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}>Cancel</Btn>
-            <Btn type="submit" variant="danger" disabled={deleteBusy || deleteRequiresReversal || (requiresGRVDeletePassword && !deletePassword)} data-testid="grv-delete-confirm">
+            <Btn type="submit" variant="danger" disabled={deleteBusy || deleteRequiresReversal} data-testid="grv-delete-confirm">
               {deleteBusy ? "Deleting..." : "Delete GRV"}
             </Btn>
           </div>
