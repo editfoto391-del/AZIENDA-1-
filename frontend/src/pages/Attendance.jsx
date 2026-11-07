@@ -45,6 +45,8 @@ const isFullMonthPeriod = (start, end) => {
   return expectedStart === start && expectedEnd === end;
 };
 
+const moneyToCents = (amount) => Math.round((Number(amount) || 0) * 100);
+
 function SalaryEmployeeCard({ employee, weeklySalary, monthlySalary, deduction, saving, onWeeklySalaryChange, onMonthlySalaryChange, onSaveSalary, onDeductionChange, onSaveCut, onAddAdvance, onViewHistory, onDelete, fullMonthPeriod }) {
   const monthlyFixed = employee.pay_frequency === "monthly_fixed";
   const fixedWeeklySalary = Number(weeklySalary ?? employee.weekly_salary) || 0;
@@ -196,6 +198,7 @@ export default function Attendance() {
   const [salarySearch, setSalarySearch] = useState("");
   const [salaryDepartment, setSalaryDepartment] = useState("");
   const [salaryReport, setSalaryReport] = useState(null);
+  const [salaryCalculationVisible, setSalaryCalculationVisible] = useState(false);
   const [salaryLoading, setSalaryLoading] = useState(false);
   const [salaryCuts, setSalaryCuts] = useState({});
   const [salaryWeeklySalaries, setSalaryWeeklySalaries] = useState({});
@@ -474,6 +477,7 @@ export default function Attendance() {
     try {
       const report = await api.getUncached("/salaries", { start_date: startDate, end_date: endDate });
       if (requestId !== salaryRequest.current) return null;
+      setSalaryCalculationVisible(false);
       setSalaryReport(report);
       setSalaryCuts(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.cut || 0)])));
       setSalaryWeeklySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.weekly_salary ?? 0)])));
@@ -771,6 +775,34 @@ export default function Attendance() {
     (salaryDepartment === "" || (employee.department || "Other") === salaryDepartment)
     && `${employee.name} ${employee.department || ""}`.toLocaleLowerCase().includes(salarySearch.trim().toLocaleLowerCase()),
   ) || [];
+  const salaryCalculationRows = useMemo(() => (salaryReport?.employees || []).map((employee) => {
+    const grossCents = moneyToCents(employee.gross_salary);
+    const cutCents = moneyToCents(salaryCuts[employee.employee_id] ?? employee.cut);
+    return {
+      employee,
+      grossCents,
+      cutCents,
+      takeHomeCents: grossCents - cutCents,
+    };
+  }), [salaryReport, salaryCuts]);
+  const salaryCalculationTotals = salaryCalculationRows.reduce((totals, row) => ({
+    grossCents: totals.grossCents + row.grossCents,
+    cutCents: totals.cutCents + row.cutCents,
+    takeHomeCents: totals.takeHomeCents + row.takeHomeCents,
+  }), { grossCents: 0, cutCents: 0, takeHomeCents: 0 });
+  const calculateExactSalaryTotal = () => {
+    for (const employee of salaryReport?.employees || []) {
+      const requestedCut = Number(salaryCuts[employee.employee_id] ?? employee.cut ?? 0);
+      const maximumCut = Math.max(0, Math.min(
+        Number(employee.gross_salary) || 0,
+        Number(employee.available_balance) || 0,
+      ));
+      if (!Number.isFinite(requestedCut) || requestedCut < 0 || requestedCut > maximumCut) {
+        return toast.error(`Check the balance cut for ${employee.name}; it cannot exceed ${fmtMoney(Math.max(0, maximumCut))}.`);
+      }
+    }
+    setSalaryCalculationVisible(true);
+  };
   const chooseSalaryWeek = (offset) => {
     const period = weekPeriod(offset);
     setSalaryStart(period.start);
@@ -837,6 +869,56 @@ export default function Attendance() {
           </Card>
           {salaryReport && <Card className="overflow-hidden">
             {salaryReport.employees.length === 0 ? <Empty icon={Users} title="No employees found" /> : <>
+            <section className="border-b border-border bg-slate-50/60 p-4" data-testid="exact-salary-calculator">
+              <button
+                type="button"
+                onClick={calculateExactSalaryTotal}
+                disabled={salaryLoading}
+                className="w-full rounded-lg bg-primary px-4 py-3 text-sm font-bold uppercase tracking-wide text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
+                data-testid="calculate-exact-total-salary-btn"
+              >
+                CALCULATE EXACT TOTAL SALARY
+              </button>
+              {salaryCalculationVisible && <div className="mt-4 space-y-3">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {[
+                    ["Gross salary total", salaryCalculationTotals.grossCents],
+                    ["Balance cuts", salaryCalculationTotals.cutCents],
+                    ["Total take-home calculated", salaryCalculationTotals.takeHomeCents],
+                  ].map(([label, amount]) => (
+                    <div key={label} className="rounded-lg border border-border bg-white p-3">
+                      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{label}</p>
+                      <p className="mt-1 font-mono text-lg font-bold text-slate-900">{fmtMoney(amount / 100)}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-slate-500">Take-home is calculated after the selected balance cuts; actual salary payments are not recorded here.</p>
+                <div className="overflow-x-auto rounded-lg border border-border bg-white">
+                  <table className="w-full min-w-[620px] text-sm">
+                    <thead>
+                      <tr className="bg-slate-100 text-left text-xs font-bold uppercase tracking-wide text-slate-600">
+                        <th className="px-3 py-2">Employee</th>
+                        <th className="px-3 py-2 text-right">Final salary</th>
+                        <th className="px-3 py-2 text-right">Balance cut</th>
+                        <th className="px-3 py-2 text-right">Take-home calculated</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {salaryCalculationRows.map(({ employee, grossCents, cutCents, takeHomeCents }) => (
+                        <tr key={employee.employee_id} className="border-t border-border/70" data-testid={`exact-salary-row-${employee.employee_id}`}>
+                          <td className="px-3 py-2 font-semibold text-slate-800">{employee.name}</td>
+                          <td className="px-3 py-2 text-right font-mono">{fmtMoney(grossCents / 100)}</td>
+                          <td className="px-3 py-2 text-right font-mono">
+                            {cutCents > 0 ? `${fmtMoney(cutCents / 100)} · Cut applied` : "R 0.00 · No cut"}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono font-bold">{fmtMoney(takeHomeCents / 100)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>}
+            </section>
             <div className="border-b border-border p-4">
               <div className="flex flex-wrap items-end gap-3">
               <div className="relative w-full max-w-sm">
@@ -868,7 +950,10 @@ export default function Attendance() {
                   onWeeklySalaryChange={(value) => setSalaryWeeklySalaries((current) => ({ ...current, [employee.employee_id]: value }))}
                   onMonthlySalaryChange={(value) => setSalaryMonthlySalaries((current) => ({ ...current, [employee.employee_id]: value }))}
                   onSaveSalary={() => saveSalaryRate(employee)}
-                  onDeductionChange={(value) => setSalaryCuts((current) => ({ ...current, [employee.employee_id]: value }))}
+                  onDeductionChange={(value) => {
+                    setSalaryCalculationVisible(false);
+                    setSalaryCuts((current) => ({ ...current, [employee.employee_id]: value }));
+                  }}
                   onSaveCut={() => saveSalaryCut(employee)}
                   onAddAdvance={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, date: today(), amount: "", notes: "" })}
                   onViewHistory={() => setHistoryEmployee(employee)}
