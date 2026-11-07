@@ -27,6 +27,14 @@ const weekPeriod = (offset = 0) => {
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 };
 
+const weekPeriodFromStart = (startDate) => {
+  const start = new Date(`${startDate}T00:00:00Z`);
+  if (!Number.isFinite(start.getTime()) || start.getUTCDay() !== 1) return null;
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 5);
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+};
+
 const monthPeriod = (offset = 0) => {
   const start = new Date(`${today()}T00:00:00Z`);
   start.setUTCDate(1);
@@ -198,7 +206,11 @@ export default function Attendance() {
   const [salarySearch, setSalarySearch] = useState("");
   const [salaryDepartment, setSalaryDepartment] = useState("");
   const [salaryReport, setSalaryReport] = useState(null);
-  const [salaryCalculationVisible, setSalaryCalculationVisible] = useState(false);
+  const [exactSalaryWeekStart, setExactSalaryWeekStart] = useState(() => weekPeriod().start);
+  const [exactSalaryReport, setExactSalaryReport] = useState(null);
+  const [exactSalaryReportPeriod, setExactSalaryReportPeriod] = useState(null);
+  const [exactSalaryModalOpen, setExactSalaryModalOpen] = useState(false);
+  const [exactSalaryLoading, setExactSalaryLoading] = useState(false);
   const [salaryLoading, setSalaryLoading] = useState(false);
   const [salaryCuts, setSalaryCuts] = useState({});
   const [salaryWeeklySalaries, setSalaryWeeklySalaries] = useState({});
@@ -209,6 +221,7 @@ export default function Attendance() {
   const [advanceModal, setAdvanceModal] = useState(null);
   const loadRequest = useRef(0);
   const salaryRequest = useRef(0);
+  const exactSalaryRequest = useRef(0);
   const attendanceSavingRef = useRef(new Set());
   const pieceSavingRef = useRef(new Set());
 
@@ -477,7 +490,6 @@ export default function Attendance() {
     try {
       const report = await api.getUncached("/salaries", { start_date: startDate, end_date: endDate });
       if (requestId !== salaryRequest.current) return null;
-      setSalaryCalculationVisible(false);
       setSalaryReport(report);
       setSalaryCuts(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.cut || 0)])));
       setSalaryWeeklySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.weekly_salary ?? 0)])));
@@ -775,34 +787,53 @@ export default function Attendance() {
     (salaryDepartment === "" || (employee.department || "Other") === salaryDepartment)
     && `${employee.name} ${employee.department || ""}`.toLocaleLowerCase().includes(salarySearch.trim().toLocaleLowerCase()),
   ) || [];
-  const salaryCalculationRows = useMemo(() => (salaryReport?.employees || []).map((employee) => {
+  const salaryCalculationRows = useMemo(() => (exactSalaryReport?.employees || []).map((employee) => {
     const grossCents = moneyToCents(employee.gross_salary);
-    const cutCents = moneyToCents(salaryCuts[employee.employee_id] ?? employee.cut);
+    const cutCents = moneyToCents(employee.cut);
     return {
       employee,
       grossCents,
       cutCents,
       takeHomeCents: grossCents - cutCents,
     };
-  }), [salaryReport, salaryCuts]);
+  }), [exactSalaryReport]);
   const salaryCalculationTotals = salaryCalculationRows.reduce((totals, row) => ({
     grossCents: totals.grossCents + row.grossCents,
     cutCents: totals.cutCents + row.cutCents,
     takeHomeCents: totals.takeHomeCents + row.takeHomeCents,
   }), { grossCents: 0, cutCents: 0, takeHomeCents: 0 });
-  const calculateExactSalaryTotal = () => {
-    for (const employee of salaryReport?.employees || []) {
-      const requestedCut = Number(salaryCuts[employee.employee_id] ?? employee.cut ?? 0);
-      const maximumCut = Math.max(0, Math.min(
-        Number(employee.gross_salary) || 0,
-        Number(employee.available_balance) || 0,
-      ));
-      if (!Number.isFinite(requestedCut) || requestedCut < 0 || requestedCut > maximumCut) {
-        return toast.error(`Check the balance cut for ${employee.name}; it cannot exceed ${fmtMoney(Math.max(0, maximumCut))}.`);
-      }
-    }
-    setSalaryCalculationVisible(true);
+  const openExactSalaryCalculator = () => {
+    const currentPeriod = weekPeriodFromStart(salaryStart);
+    const selectedPeriod = currentPeriod?.end === salaryEnd ? currentPeriod : weekPeriod();
+    setExactSalaryWeekStart(selectedPeriod.start);
+    setExactSalaryModalOpen(true);
   };
+  const calculateExactSalaryTotal = async () => {
+    const period = weekPeriodFromStart(exactSalaryWeekStart);
+    if (!period) return toast.error("Choose a Monday; the calculator uses Monday to Saturday.");
+    const requestId = ++exactSalaryRequest.current;
+    setExactSalaryLoading(true);
+    try {
+      const report = await api.getUncached("/salaries", {
+        start_date: period.start,
+        end_date: period.end,
+      });
+      if (requestId !== exactSalaryRequest.current) return;
+      setExactSalaryReport(report);
+      setExactSalaryReportPeriod(period);
+      setExactSalaryModalOpen(false);
+    } catch (error) {
+      if (requestId === exactSalaryRequest.current) toast.error(apiError(error));
+    } finally {
+      if (requestId === exactSalaryRequest.current) setExactSalaryLoading(false);
+    }
+  };
+  useEffect(() => {
+    exactSalaryRequest.current += 1;
+    setExactSalaryLoading(false);
+    setExactSalaryReport(null);
+    setExactSalaryReportPeriod(null);
+  }, [user?.company_id]);
   const chooseSalaryWeek = (offset) => {
     const period = weekPeriod(offset);
     setSalaryStart(period.start);
@@ -867,58 +898,65 @@ export default function Attendance() {
             </div>
             <p className="border-t border-border pt-3 text-xs leading-relaxed text-slate-500">Weekly salaries are divided by six paid days. Yassine Uncle is paid monthly; for November 2026 his salary is R6,500 with a R1,200 balance deduction (R5,300 after the cut). Ameena receives fixed monthly pay. Overtime is paid separately at R20 per hour for weekly-paid staff. Ayanda and Asive remain on piece pay.</p>
           </Card>
+          <Card className="overflow-hidden" data-testid="exact-salary-calculator">
+            <div className="flex flex-wrap items-center justify-between gap-3 p-4">
+              <div>
+                <h2 className="font-display text-lg font-bold text-slate-800">Exact weekly salary calculator</h2>
+                <p className="mt-1 text-sm text-slate-500">Choose a Monday–Saturday week to recalculate attendance, saved balance cuts, and the total for every employee.</p>
+              </div>
+              <Btn type="button" onClick={openExactSalaryCalculator} data-testid="calculate-exact-total-salary-btn">CALCULATE EXACT TOTAL SALARY</Btn>
+            </div>
+            {exactSalaryReport && <>
+              <div className="border-y border-border bg-slate-50/60 px-4 py-2 text-sm font-semibold text-slate-700" data-testid="exact-salary-period">
+                Selected week: {exactSalaryReportPeriod.start} – {exactSalaryReportPeriod.end}
+              </div>
+              <div className="grid gap-3 border-b border-border p-4 sm:grid-cols-3">
+                {[
+                  ["Gross salary total", salaryCalculationTotals.grossCents],
+                  ["Balance cuts", salaryCalculationTotals.cutCents],
+                  ["Total take-home calculated", salaryCalculationTotals.takeHomeCents],
+                ].map(([label, amount]) => (
+                  <div key={label} className="rounded-lg border border-border bg-white p-3">
+                    <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{label}</p>
+                    <p className="mt-1 font-mono text-lg font-bold text-slate-900">{fmtMoney(amount / 100)}</p>
+                  </div>
+                ))}
+              </div>
+              <p className="px-4 pt-3 text-xs text-slate-500">Take-home is calculated from this week’s attendance and saved cuts; actual salary payments are not recorded here.</p>
+              {salaryCalculationRows.length === 0 ? <Empty icon={Users} title="No employees found for this week" /> : <div className="overflow-x-auto p-4">
+                <table className="w-full min-w-[760px] text-sm">
+                  <thead>
+                    <tr className="bg-slate-100 text-left text-xs font-bold uppercase tracking-wide text-slate-600">
+                      <th className="px-3 py-2">Employee</th>
+                      <th className="px-3 py-2">Attendance / production</th>
+                      <th className="px-3 py-2 text-right">Final salary</th>
+                      <th className="px-3 py-2 text-right">Balance cut</th>
+                      <th className="px-3 py-2 text-right">Take-home calculated</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {salaryCalculationRows.map(({ employee, grossCents, cutCents, takeHomeCents }) => (
+                      <tr key={employee.employee_id} className="border-t border-border/70" data-testid={`exact-salary-row-${employee.employee_id}`}>
+                        <td className="px-3 py-2 font-semibold text-slate-800">{employee.name}</td>
+                        <td className="px-3 py-2 text-slate-600">
+                          {employee.pay_type === "piece"
+                            ? `${employee.total_pieces} pieces`
+                            : `${employee.present_days} full + ${employee.half_days} half days`}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">{fmtMoney(grossCents / 100)}</td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {cutCents > 0 ? `${fmtMoney(cutCents / 100)} · Cut applied` : "R 0.00 · No cut"}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono font-bold">{fmtMoney(takeHomeCents / 100)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>}
+            </>}
+          </Card>
           {salaryReport && <Card className="overflow-hidden">
             {salaryReport.employees.length === 0 ? <Empty icon={Users} title="No employees found" /> : <>
-            <section className="border-b border-border bg-slate-50/60 p-4" data-testid="exact-salary-calculator">
-              <button
-                type="button"
-                onClick={calculateExactSalaryTotal}
-                disabled={salaryLoading}
-                className="w-full rounded-lg bg-primary px-4 py-3 text-sm font-bold uppercase tracking-wide text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
-                data-testid="calculate-exact-total-salary-btn"
-              >
-                CALCULATE EXACT TOTAL SALARY
-              </button>
-              {salaryCalculationVisible && <div className="mt-4 space-y-3">
-                <div className="grid gap-3 sm:grid-cols-3">
-                  {[
-                    ["Gross salary total", salaryCalculationTotals.grossCents],
-                    ["Balance cuts", salaryCalculationTotals.cutCents],
-                    ["Total take-home calculated", salaryCalculationTotals.takeHomeCents],
-                  ].map(([label, amount]) => (
-                    <div key={label} className="rounded-lg border border-border bg-white p-3">
-                      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{label}</p>
-                      <p className="mt-1 font-mono text-lg font-bold text-slate-900">{fmtMoney(amount / 100)}</p>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-xs text-slate-500">Take-home is calculated after the selected balance cuts; actual salary payments are not recorded here.</p>
-                <div className="overflow-x-auto rounded-lg border border-border bg-white">
-                  <table className="w-full min-w-[620px] text-sm">
-                    <thead>
-                      <tr className="bg-slate-100 text-left text-xs font-bold uppercase tracking-wide text-slate-600">
-                        <th className="px-3 py-2">Employee</th>
-                        <th className="px-3 py-2 text-right">Final salary</th>
-                        <th className="px-3 py-2 text-right">Balance cut</th>
-                        <th className="px-3 py-2 text-right">Take-home calculated</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {salaryCalculationRows.map(({ employee, grossCents, cutCents, takeHomeCents }) => (
-                        <tr key={employee.employee_id} className="border-t border-border/70" data-testid={`exact-salary-row-${employee.employee_id}`}>
-                          <td className="px-3 py-2 font-semibold text-slate-800">{employee.name}</td>
-                          <td className="px-3 py-2 text-right font-mono">{fmtMoney(grossCents / 100)}</td>
-                          <td className="px-3 py-2 text-right font-mono">
-                            {cutCents > 0 ? `${fmtMoney(cutCents / 100)} · Cut applied` : "R 0.00 · No cut"}
-                          </td>
-                          <td className="px-3 py-2 text-right font-mono font-bold">{fmtMoney(takeHomeCents / 100)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>}
-            </section>
             <div className="border-b border-border p-4">
               <div className="flex flex-wrap items-end gap-3">
               <div className="relative w-full max-w-sm">
@@ -951,7 +989,6 @@ export default function Attendance() {
                   onMonthlySalaryChange={(value) => setSalaryMonthlySalaries((current) => ({ ...current, [employee.employee_id]: value }))}
                   onSaveSalary={() => saveSalaryRate(employee)}
                   onDeductionChange={(value) => {
-                    setSalaryCalculationVisible(false);
                     setSalaryCuts((current) => ({ ...current, [employee.employee_id]: value }));
                   }}
                   onSaveCut={() => saveSalaryCut(employee)}
@@ -963,6 +1000,39 @@ export default function Attendance() {
             </div>}
             </>}
           </Card>}
+          <Modal open={exactSalaryModalOpen} onClose={() => {
+            if (!exactSalaryLoading) setExactSalaryModalOpen(false);
+          }} title="For which week?">
+            <div className="space-y-4">
+              <p className="text-sm text-slate-600">Choose the Monday. The calculator will use that Monday through Saturday and reload attendance and saved salary cuts for the selected week.</p>
+              <Input
+                label="Week starting (Monday)"
+                type="date"
+                value={exactSalaryWeekStart}
+                onChange={(event) => setExactSalaryWeekStart(event.target.value)}
+                disabled={exactSalaryLoading}
+                data-testid="exact-salary-week-start"
+              />
+              {weekPeriodFromStart(exactSalaryWeekStart)
+                ? <p className="text-sm font-semibold text-slate-700">Week ends Saturday, {weekPeriodFromStart(exactSalaryWeekStart).end}</p>
+                : <p className="text-sm font-medium text-red-600">Pick a Monday to calculate a complete work week.</p>}
+              <div className="flex flex-wrap gap-2">
+                <Btn type="button" variant="outline" disabled={exactSalaryLoading} onClick={() => setExactSalaryWeekStart(weekPeriod().start)} data-testid="exact-salary-this-week">This week</Btn>
+                <Btn type="button" variant="outline" disabled={exactSalaryLoading} onClick={() => setExactSalaryWeekStart(weekPeriod(-1).start)} data-testid="exact-salary-last-week">Last week</Btn>
+              </div>
+              <div className="flex justify-end gap-2 border-t border-border pt-3">
+                <Btn type="button" variant="outline" disabled={exactSalaryLoading} onClick={() => setExactSalaryModalOpen(false)}>Cancel</Btn>
+                <Btn
+                  type="button"
+                  disabled={exactSalaryLoading || !weekPeriodFromStart(exactSalaryWeekStart)}
+                  onClick={calculateExactSalaryTotal}
+                  data-testid="confirm-exact-salary-week"
+                >
+                  {exactSalaryLoading ? "Calculating…" : "Calculate this week"}
+                </Btn>
+              </div>
+            </div>
+          </Modal>
         </div>
       ) : (
       <>
