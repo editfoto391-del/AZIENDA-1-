@@ -15957,11 +15957,9 @@ async def on_startup():
 
 app.include_router(api)
 configured_cors_origins = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "*").split(",") if origin.strip()]
+cors_origin_regex = r"https://[a-zA-Z0-9-]+(?:\.preview)?\.emergentagent\.com"
 if "*" in configured_cors_origins:
     configured_cors_origins = ["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"]
-    cors_origin_regex = r"https://[a-zA-Z0-9-]+\.preview\.emergentagent\.com"
-else:
-    cors_origin_regex = None
 app.add_middleware(CORSMiddleware, allow_credentials=True,
                    allow_origins=configured_cors_origins, allow_origin_regex=cors_origin_regex,
                    allow_methods=["*"], allow_headers=["*"])
