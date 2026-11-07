@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { today } from "@/lib/format";
 import { Card, Btn, Input, Select, Modal, PageHeader, Empty } from "@/components/common";
-import { Users, Plus, CheckCheck, Pencil, CalendarCheck, Wallet, History, Landmark, Trash2, Search } from "lucide-react";
+import { Users, Plus, CheckCheck, Pencil, CalendarCheck, Wallet, History, Landmark, Trash2, Search, Download } from "lucide-react";
 import { fmtMoney } from "@/lib/format";
 import { useAuth } from "@/context/AuthContext";
 
@@ -481,6 +481,210 @@ export default function Attendance() {
       setSalaryMonthlySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.monthly_salary ?? "")])));
     } catch (e) { toast.error(apiError(e)); } finally { setSalaryLoading(false); }
   };
+  const downloadWeeklySalaryReport = async () => {
+    if (!salaryStart || !salaryEnd) return toast.error("Select both salary period dates");
+    if (salaryEnd < salaryStart) return toast.error("The end date must be on or after the start date");
+    setSalaryLoading(true);
+    try {
+      const report = await api.get("/salaries", { start_date: salaryStart, end_date: salaryEnd });
+      setSalaryReport(report);
+      setSalaryCuts(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.cut || 0)])));
+      setSalaryWeeklySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.weekly_salary ?? 0)])));
+      setSalaryMonthlySalaries(Object.fromEntries(report.employees.map((employee) => [employee.employee_id, String(employee.monthly_salary ?? "")])));
+
+      const { jsPDF } = await import("jspdf");
+      const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 6;
+      const tableWidth = pageWidth - margin * 2;
+      const columns = [
+        { label: "EMPLOYEE", width: 40, align: "left" },
+        { label: "GROSS PAY", width: 30, align: "right" },
+        { label: "CUT", width: 24, align: "right" },
+        { label: "BALANCE BEFORE CUT", width: 39, align: "right" },
+        { label: "BALANCE AFTER CUT", width: 39, align: "right" },
+        { label: "CURRENT BALANCE", width: 37, align: "right" },
+        { label: "NET PAY DUE", width: 34, align: "right" },
+        { label: "ACTUAL PAID", width: 42, align: "right" },
+      ];
+      let y = 0;
+      const totals = report.employees.reduce((result, employee) => ({
+        gross: result.gross + Number(employee.gross_salary || 0),
+        cuts: result.cuts + Number(employee.cut || 0),
+        net: result.net + Number(employee.net_salary || 0),
+        balance: result.balance + Number(employee.balance || 0),
+      }), { gross: 0, cuts: 0, net: 0, balance: 0 });
+      const departments = [...report.employees.reduce((groups, employee) => {
+        const department = String(employee.department || "Other").trim() || "Other";
+        const key = department.toLocaleLowerCase();
+        if (!groups.has(key)) groups.set(key, { name: department, employees: [] });
+        groups.get(key).employees.push(employee);
+        return groups;
+      }, new Map()).values()]
+        .sort((a, b) => a.name.localeCompare(b.name));
+      departments.forEach((group) => group.employees.sort((a, b) => a.name.localeCompare(b.name)));
+      const orderedEmployees = departments.flatMap(({ name, employees }) => employees.map((employee) => ({ ...employee, report_department: name })));
+      const splitAt = Math.ceil(orderedEmployees.length / 2);
+      const employeePages = orderedEmployees.length > 12
+        ? [orderedEmployees.slice(0, splitAt), orderedEmployees.slice(splitAt)]
+        : [orderedEmployees];
+
+      const drawPageHeader = (continued = false, includeSummary = false) => {
+        pdf.setTextColor(19, 43, 65);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(17);
+        pdf.text(`Weekly Salary Report${continued ? " (continued)" : ""}`, margin, 19);
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9.5);
+        pdf.setTextColor(71, 85, 105);
+        pdf.text(`Pay period: ${salaryStart} to ${salaryEnd}`, margin, 27);
+        pdf.text(`Generated: ${today()}`, pageWidth - margin, 27, { align: "right" });
+        y = 34;
+        if (includeSummary) {
+          const metrics = [
+            ["GROSS PAY", totals.gross],
+            ["DEDUCTIONS", totals.cuts],
+            ["NET PAY DUE", totals.net],
+          ];
+          const gap = 3;
+          const cardWidth = (tableWidth - gap * (metrics.length - 1)) / metrics.length;
+          metrics.forEach(([label, amount], index) => {
+            const x = margin + index * (cardWidth + gap);
+            pdf.setDrawColor(203, 213, 225);
+            pdf.setFillColor(248, 250, 252);
+            pdf.roundedRect(x, y, cardWidth, 16, 2, 2, "FD");
+            pdf.setFont("helvetica", "bold");
+            pdf.setFontSize(6.5);
+            pdf.setTextColor(71, 85, 105);
+            pdf.text(label, x + 2.5, y + 5.5);
+            pdf.setFontSize(8.5);
+            pdf.setTextColor(15, 23, 42);
+            pdf.text(fmtMoney(amount), x + 2.5, y + 12);
+          });
+          y += 19;
+          pdf.setFont("helvetica", "normal");
+          pdf.setFontSize(7.5);
+          pdf.setTextColor(71, 85, 105);
+          pdf.text("Actual salary payments are not recorded. Net pay due is gross pay minus the cut.", margin, y + 4);
+          y += 7;
+        }
+      };
+      const drawColumnHeader = () => {
+        const headerHeight = 11;
+        pdf.setFillColor(30, 58, 75);
+        pdf.setDrawColor(30, 58, 75);
+        pdf.rect(margin, y, tableWidth, headerHeight, "F");
+        pdf.setDrawColor(255, 255, 255);
+        pdf.setLineWidth(0.25);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(6.5);
+        let x = margin;
+        columns.forEach((column) => {
+          pdf.setTextColor(255, 255, 255);
+          const labelLines = pdf.splitTextToSize(column.label, column.width - 3);
+          pdf.text(
+            labelLines,
+            column.align === "right" ? x + column.width - 2 : x + 2,
+            y + (headerHeight - labelLines.length * 2.7) / 2 + 2.4,
+            { align: column.align, lineHeightFactor: 1 },
+          );
+          x += column.width;
+          if (x < margin + tableWidth) pdf.line(x, y, x, y + headerHeight);
+        });
+        y += headerHeight;
+      };
+      const drawDepartmentHeading = (name, count, continued = false) => {
+        pdf.setFillColor(30, 58, 75);
+        pdf.setDrawColor(30, 58, 75);
+        pdf.rect(margin, y, tableWidth, 8, "FD");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(8.5);
+        pdf.setTextColor(255, 255, 255);
+        pdf.text(
+          `${name}${continued ? " (continued)" : ""}  ·  ${count} ${count === 1 ? "employee" : "employees"}`,
+          margin + 2.5,
+          y + 5.5,
+        );
+        y += 8;
+      };
+      const drawEmployeeRow = (employee, rowIndex, rowHeight) => {
+        const rowTop = y;
+        pdf.setFillColor(rowIndex % 2 === 0 ? 255 : 248, rowIndex % 2 === 0 ? 255 : 250, rowIndex % 2 === 0 ? 255 : 252);
+        pdf.rect(margin, rowTop, tableWidth, rowHeight, "F");
+        pdf.setDrawColor(203, 213, 225);
+        pdf.setLineWidth(0.2);
+        pdf.line(margin, rowTop + rowHeight, margin + tableWidth, rowTop + rowHeight);
+        pdf.setFont("helvetica", "normal");
+        const values = [
+          employee.name || "Unnamed employee",
+          fmtMoney(employee.gross_salary),
+          fmtMoney(employee.cut),
+          fmtMoney(employee.available_balance),
+          fmtMoney(employee.balance_after_period),
+          fmtMoney(employee.balance),
+          fmtMoney(employee.net_salary),
+          "Not recorded",
+        ];
+        let x = margin;
+        columns.forEach((column, index) => {
+          if (index > 0) pdf.line(x, rowTop, x, rowTop + rowHeight);
+          pdf.setTextColor(30, 41, 59);
+          let fontSize = Math.min(7, Math.max(4, rowHeight * 0.72 / 0.3528));
+          pdf.setFontSize(fontSize);
+          while (pdf.getTextWidth(String(values[index])) > column.width - 4 && fontSize > 5.5) {
+            fontSize -= 0.25;
+            pdf.setFontSize(fontSize);
+          }
+          pdf.text(String(values[index]), column.align === "right" ? x + column.width - 2 : x + 2, rowTop + rowHeight / 2 + fontSize * 0.17, {
+            align: column.align,
+          });
+          x += column.width;
+        });
+        y += rowHeight;
+      };
+
+      employeePages.forEach((pageEmployees, pageIndex) => {
+        if (pageIndex > 0) pdf.addPage("a4", "landscape");
+        drawPageHeader(pageIndex > 0, pageIndex === 0);
+        drawColumnHeader();
+        if (!pageEmployees.length) {
+          pdf.setFont("helvetica", "normal");
+          pdf.setFontSize(10);
+          pdf.setTextColor(71, 85, 105);
+          pdf.text("No employees found for this period.", margin, y + 8);
+          return;
+        }
+
+        const departmentGroups = [...pageEmployees.reduce((groups, employee) => {
+          const key = employee.report_department.toLocaleLowerCase();
+          if (!groups.has(key)) groups.set(key, { name: employee.report_department, employees: [] });
+          groups.get(key).employees.push(employee);
+          return groups;
+        }, new Map()).values()];
+        const availableHeight = pageHeight - margin - y;
+        const rowHeight = pageEmployees.length
+          ? Math.min(7.2, (availableHeight - departmentGroups.length * 8) / pageEmployees.length)
+          : 7.2;
+
+        departmentGroups.forEach(({ name, employees }) => {
+          drawDepartmentHeading(
+            name,
+            employees.length,
+            pageIndex > 0 && departments.some((department) => department.name.toLocaleLowerCase() === name.toLocaleLowerCase()),
+          );
+          employees.forEach((employee, index) => drawEmployeeRow(employee, index, rowHeight));
+        });
+      });
+
+      pdf.save(`weekly-salary-report-${salaryStart}-${salaryEnd}.pdf`);
+      toast.success("Weekly salary report downloaded");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : apiError(error));
+    } finally {
+      setSalaryLoading(false);
+    }
+  };
   const saveSalaryRate = async (employee) => {
     if (employee.pay_frequency === "monthly_fixed") {
       const monthlySalary = Number(salaryMonthlySalaries[employee.employee_id]);
@@ -615,12 +819,18 @@ export default function Attendance() {
               <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryMonth(-1)} data-testid="salary-last-month-btn">Last month</Btn>
               <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryWeek(0)} data-testid="salary-this-week-btn">This week (Mon–Sun)</Btn>
               <Btn variant="outline" disabled={salaryLoading} onClick={() => chooseSalaryWeek(-1)} data-testid="salary-last-week-btn">Last week</Btn>
-              <Btn disabled={salaryLoading} onClick={loadSalaries} data-testid="load-salaries-btn">{salaryLoading ? "Loading..." : "Show salaries"}</Btn>
-              <Btn variant="danger" disabled={rosterResetting || salaryLoading} onClick={resetPayrollRosterAndAttendance} data-testid="reset-payroll-roster-btn">{rosterResetting ? "Resetting roster…" : "Reset roster and attendance"}</Btn>
+              <div className="ml-auto flex flex-wrap items-center gap-3">
+                <Btn variant="danger" disabled={rosterResetting || salaryLoading} onClick={resetPayrollRosterAndAttendance} data-testid="reset-payroll-roster-btn">{rosterResetting ? "Resetting roster…" : "Reset roster and attendance"}</Btn>
+                <Btn disabled={salaryLoading} onClick={downloadWeeklySalaryReport} data-testid="load-salaries-btn"><Download size={16} /> {salaryLoading ? "Preparing..." : "Download weekly report"}</Btn>
+              </div>
             </div>
             <p className="border-t border-border pt-3 text-xs leading-relaxed text-slate-500">Weekly salaries are divided by six paid days. Yaseen Uncle and Ameena receive fixed monthly pay once per calendar month; record their attendance daily. Overtime is paid separately at R20 per hour for weekly-paid staff. Ayanda and Asive remain on piece pay.</p>
           </Card>
           {salaryReport && <Card className="overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-slate-50/70 px-4 py-3">
+              <h2 className="font-display text-lg font-bold text-slate-800">Salary Report</h2>
+              <p className="text-sm font-medium text-slate-500">{salaryStart} – {salaryEnd}</p>
+            </div>
             {salaryReport.employees.length === 0 ? <Empty icon={Users} title="No employees found" /> : <>
             <div className="grid grid-cols-2 gap-3 border-b border-border p-4 sm:grid-cols-4">
               {[["Gross payroll", salaryTotals.gross], ["Cuts this period", salaryTotals.cuts], ["Net pay", salaryTotals.net], ["Outstanding balances", salaryTotals.balance]].map(([label, value]) => (

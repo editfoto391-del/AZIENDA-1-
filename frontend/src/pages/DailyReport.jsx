@@ -9,8 +9,6 @@ import { companyDailyReportName, companyProfileName } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Btn } from "@/components/common";
 
-const MIN_ROWS = 12;
-
 function getNextFinancialRefreshDelay(now = new Date()) {
   const getZonedParts = (date) => Object.fromEntries(
     new Intl.DateTimeFormat("en-CA", {
@@ -57,49 +55,97 @@ function formatMoney(value) {
   })}`;
 }
 
+function ReportTable({ number, columns, rows, totalLabel, total, mainInvoiceNo, emptyMessage = "No records for this section." }) {
+  const amountColumnIndex = columns.findIndex((column) => column.key === "amount");
+  const trailingColumnCount = columns.length - amountColumnIndex - 1;
+  return (
+    <div className="overflow-x-auto">
+      <table className={`daily-report-table${number === "01" ? " daily-report-invoices-table" : ""}`}>
+        <thead>
+          <tr>{columns.map((column) => <th key={column.key} className={column.align === "right" ? "text-right" : ""}>{column.label}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.length ? rows.map((row, index) => (
+            <tr key={row.id || `${number}-row-${index}`}>
+              {columns.map((column) => (
+                <td key={column.key} className={column.align === "right" ? "text-right" : ""}>
+                  {column.render(row, index)}
+                </td>
+              ))}
+            </tr>
+          )) : (
+            <tr className="daily-report-empty-row"><td colSpan={columns.length}>{emptyMessage}</td></tr>
+          )}
+          {totalLabel && <tr className="daily-report-total">
+            <td colSpan={amountColumnIndex}>{totalLabel}</td>
+            <td className="text-right">{formatMoney(total)}</td>
+            {trailingColumnCount > 0 && <td colSpan={trailingColumnCount} />}
+          </tr>}
+          {number === "01" && (
+            <tr className="daily-report-main-invoice">
+              <td colSpan={columns.length - 1}>
+                <span>Main Invoice No.</span>
+                <strong>{mainInvoiceNo || "—"}</strong>
+              </td>
+              <td />
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function ReportSection({ number, title, columns, rows, totalLabel, total, mainInvoiceNo }) {
-  const visibleRows = Math.max(MIN_ROWS, rows.length);
   return (
     <section className="daily-report-section" aria-label={title}>
       <div className="daily-report-section-title">
         <span className="daily-report-number">{number}</span>
         <span>{title}</span>
       </div>
-      <div className="overflow-x-auto">
-        <table className={`daily-report-table${number === "01" ? " daily-report-invoices-table" : ""}`}>
-          <thead>
-            <tr>{columns.map((column) => <th key={column.key} className={column.align === "right" ? "text-right" : ""}>{column.label}</th>)}</tr>
-          </thead>
-          <tbody>
-            {Array.from({ length: visibleRows }, (_, index) => {
-              const row = rows[index];
-              return (
-                <tr key={row?.id || `${number}-row-${index}`}>
-                  {columns.map((column, columnIndex) => (
-                    <td key={column.key} className={column.align === "right" ? "text-right" : ""}>
-                      {row ? column.render(row, index) : columnIndex === 0 && number !== "05" ? index + 1 : ""}
-                    </td>
-                  ))}
-                </tr>
-              );
-            })}
-            <tr className="daily-report-total">
-              <td colSpan={columns.length - 1}>{totalLabel}</td>
-              <td className="text-right">{formatMoney(total)}</td>
-            </tr>
-            {number === "01" && (
-              <tr className="daily-report-main-invoice">
-                <td colSpan={columns.length - 1}>
-                  <label className="flex items-center gap-2">
-                    <span>Main Invoice No.</span>
-                    <span>{mainInvoiceNo || "-"}</span>
-                  </label>
-                </td>
-                <td />
-              </tr>
-            )}
-          </tbody>
-        </table>
+      <ReportTable number={number} columns={columns} rows={rows} totalLabel={totalLabel} total={total} mainInvoiceNo={mainInvoiceNo} />
+    </section>
+  );
+}
+
+function ExpenseReportSection({ rows, total }) {
+  const groupedExpenses = rows.reduce((groups, row) => {
+    const category = String(row.category || "General").trim() || "General";
+    const key = category.toLocaleLowerCase();
+    if (!groups.has(key)) groups.set(key, { category, rows: [] });
+    groups.get(key).rows.push(row);
+    return groups;
+  }, new Map());
+  const categories = [...groupedExpenses.values()].sort((a, b) => a.category.localeCompare(b.category));
+  const columns = [
+    { key: "no", label: "NO.", render: (_row, index) => index + 1 },
+    { key: "description", label: "DESCRIPTION", render: (row) => row.description || "—" },
+    { key: "amount", label: "AMOUNT", align: "right", render: (row) => formatMoney(row.amount) },
+  ];
+
+  return (
+    <section className="daily-report-section daily-report-expenses-section" aria-label="Expenses by category">
+      <div className="daily-report-section-title">
+        <span className="daily-report-number">03</span>
+        <span>EXPENSES BY CATEGORY</span>
+      </div>
+      {categories.length ? <div className="daily-report-expense-groups">
+        {categories.map(({ category, rows: categoryRows }) => (
+          <div className="daily-report-expense-group" key={category.toLocaleLowerCase()}>
+            <h3 className="daily-report-expense-category">{category}</h3>
+            <ReportTable
+              number="03"
+              columns={columns}
+              rows={categoryRows}
+              totalLabel={`Total ${category}`}
+              total={categoryRows.reduce((sum, row) => sum + Number(row.amount || 0), 0)}
+            />
+          </div>
+        ))}
+      </div> : <ReportTable number="03" columns={columns} rows={[]} emptyMessage="No expenses recorded for this date." />}
+      <div className="daily-report-expenses-total">
+        <span>Total Expenses</span>
+        <strong>{formatMoney(total)}</strong>
       </div>
     </section>
   );
@@ -136,19 +182,7 @@ function ReportTables({ report }) {
         totalLabel="Total Received"
         total={report.totals?.received}
       />
-      <ReportSection
-        number="03"
-        title="EXPENSES BREAKDOWN"
-        columns={[
-          { key: "no", label: "NO", render: (_row, index) => index + 1 },
-          { key: "category", label: "CATEGORY", render: (row) => row.category },
-          { key: "description", label: "DESCRIPTION", render: (row) => row.description },
-          { key: "amount", label: "AMOUNT", align: "right", render: (row) => formatMoney(row.amount) },
-        ]}
-        rows={report.expenses || []}
-        totalLabel="Total Expenses"
-        total={report.totals?.expenses}
-      />
+      <ExpenseReportSection rows={report.expenses || []} total={report.totals?.expenses} />
       <ReportSection
         number="04"
         title="DIESEL USAGE (BY VEHICLE)"
@@ -603,8 +637,8 @@ export default function DailyReport() {
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">{viewMode === "daily" ? "Daily Report" : `${viewMode === "weekly" ? "Weekly" : "Monthly"} Financial Report`}</h1>
-          <p className="mt-1 text-sm text-slate-500">{viewMode === "daily" ? companyName : companyProfileName(reportCompany)} {viewMode === "daily" ? "daily transaction summary" : "company-scoped financial summary"}</p>
+          <h1 className="text-3xl font-bold text-slate-900 sm:text-4xl">{viewMode === "daily" ? "Daily Report" : `${viewMode === "weekly" ? "Weekly" : "Monthly"} Financial Report`}</h1>
+          <p className="mt-1 text-base text-slate-600">{viewMode === "daily" ? companyName : companyProfileName(reportCompany)} {viewMode === "daily" ? "daily transaction summary" : "company-scoped financial summary"}</p>
         </div>
       </div>
       <nav className="flex gap-2 border-b border-slate-200 pb-2" aria-label="Report period">
@@ -616,11 +650,11 @@ export default function DailyReport() {
             setError("");
             setViewMode(period);
           }
-        }} className={`rounded-md px-3 py-2 text-sm font-semibold capitalize ${viewMode === period ? "bg-slate-800 text-white" : "text-slate-600 hover:bg-slate-100"}`} data-testid={`report-period-${period}`}>{period}</button>)}
+        }} className={`rounded-lg px-5 py-3 text-base font-semibold capitalize ${viewMode === period ? "bg-slate-800 text-white" : "text-slate-600 hover:bg-slate-100"}`} data-testid={`report-period-${period}`}>{period}</button>)}
       </nav>
-      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-3 shadow-sm sm:p-4" data-report-controls>
+      <div className="flex flex-wrap items-end gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5" data-report-controls>
         <label className="block min-w-[220px]">
-          <span className="mb-1.5 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-600"><CalendarDays size={14} className="text-primary" /> {viewMode === "daily" ? "Report Date" : viewMode === "weekly" ? "Select a date in the week" : "Report month"}</span>
+          <span className="mb-2 flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-slate-700"><CalendarDays size={17} className="text-primary" /> {viewMode === "daily" ? "Report Date" : viewMode === "weekly" ? "Select a date in the week" : "Report month"}</span>
           <input
             type={viewMode === "monthly" ? "month" : "date"}
             aria-label={viewMode === "monthly" ? "Report month" : "Report date"}
@@ -637,7 +671,7 @@ export default function DailyReport() {
               } else if (viewMode === "weekly") setWeekDate(selected);
               else setMonthValue(selected);
             }}
-            className="w-full rounded-lg border border-slate-300 bg-slate-50 px-3 py-2.5 text-sm font-semibold text-slate-800 shadow-inner outline-none transition focus:border-primary focus:bg-white focus:ring-2 focus:ring-primary/20"
+            className="w-full rounded-lg border border-slate-300 bg-slate-50 px-4 py-3 text-base font-semibold text-slate-800 shadow-inner outline-none transition focus:border-primary focus:bg-white focus:ring-2 focus:ring-primary/20"
           />
         </label>
         {viewMode === "daily" && <button
@@ -650,18 +684,18 @@ export default function DailyReport() {
             setReportDate(today());
           }}
           disabled={reportDate === today()}
-          className="inline-flex h-10 items-center justify-center rounded-lg border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-primary/50 hover:bg-primary/5 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-default disabled:bg-slate-100 disabled:text-slate-400"
+          className="inline-flex h-12 items-center justify-center rounded-lg border border-slate-300 bg-white px-5 text-base font-semibold text-slate-700 shadow-sm transition hover:border-primary/50 hover:bg-primary/5 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-default disabled:bg-slate-100 disabled:text-slate-400"
           data-testid="daily-report-date-today"
         >Today</button>}
-        {viewMode === "daily" && <Btn onClick={generateDailyReport} disabled={loading} data-testid="daily-report-generate">
+        {viewMode === "daily" && <Btn className="min-h-12 px-5 text-base" onClick={generateDailyReport} disabled={loading} data-testid="daily-report-generate">
           {loading ? <RefreshCw size={16} className="animate-spin" /> : <CalendarDays size={16} />}
           {loading ? "Generating report..." : "GENERATE DAILY REPORT"}
         </Btn>}
-        {viewMode === "daily" && <Btn onClick={downloadPdf} disabled={!report || loading || downloading} data-testid="daily-report-download-pdf">
+        {viewMode === "daily" && <Btn className="min-h-12 px-5 text-base" onClick={downloadPdf} disabled={!report || loading || downloading} data-testid="daily-report-download-pdf">
           {downloading ? <RefreshCw size={16} className="animate-spin" /> : <Download size={16} />}
           {downloading ? "Preparing PDF..." : "DOWNLOAD COMPANY PDF"}
         </Btn>}
-        {viewMode === "daily" && <Btn variant="outline" onClick={downloadHomePdf} disabled={!report || loading || downloadingHome} data-testid="home-daily-report-download-pdf">
+        {viewMode === "daily" && <Btn variant="outline" className="min-h-12 px-5 text-base" onClick={downloadHomePdf} disabled={!report || loading || downloadingHome} data-testid="home-daily-report-download-pdf">
           {downloadingHome ? <RefreshCw size={16} className="animate-spin" /> : <Download size={16} />}
           {downloadingHome ? "Preparing PDF..." : "DOWNLOAD HOME PDF"}
         </Btn>}

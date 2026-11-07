@@ -84,9 +84,9 @@
 .daily-report-paper {
     overflow: hidden;
     border: 1px solid #e0e5e8;
-    border-radius: 9px;
+    border-radius: 14px;
     background: #fff;
-    padding: 16px;
+    padding: 24px;
     box-shadow: 0 8px 24px rgba(15, 23, 42, 0.07);
 }
 
@@ -94,23 +94,23 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    gap: 10px;
-    margin: 0 auto 14px;
-    max-width: 1000px;
-    padding: 0 4px;
+    gap: 16px;
+    margin: 0 0 24px;
+    padding: 0 4px 18px;
+    border-bottom: 2px solid #e0e5e8;
 }
 
 .daily-report-company {
     color: #152b3b;
-    font-size: 20px;
+    font-size: 28px;
     font-weight: 800;
-    line-height: 1.1;
+    line-height: 1.2;
 }
 
 .daily-report-title {
     color: #518ba3;
-    font-size: 24px;
-    font-weight: 500;
+    font-size: 30px;
+    font-weight: 700;
     letter-spacing: 0.04em;
     text-align: right;
 }
@@ -124,12 +124,12 @@
     border-radius: 7px;
     background: #fff;
     text-align: left;
-    font-size: 11px;
+    font-size: 15px;
 }
 
 .daily-report-meta span {
     min-width: 0;
-    padding: 8px 10px;
+    padding: 12px 14px;
     overflow-wrap: anywhere;
 }
 
@@ -139,16 +139,17 @@
 
 .daily-report-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px 10px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
 }
 
 .daily-report-section {
     min-width: 0;
     overflow: hidden;
-    border: 1px solid #e0e5e8;
-    border-radius: 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 12px;
     background: #fff;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
 }
 
 .daily-report-section:nth-child(1) {
@@ -183,28 +184,28 @@
 
 .daily-report-section-title {
     display: flex;
-    min-height: 34px;
+    min-height: 52px;
     align-items: center;
-    gap: 9px;
+    gap: 12px;
     background: var(--report-tint);
-    padding: 5px 9px;
+    padding: 10px 16px;
     color: #18212a;
-    font-size: 11px;
+    font-size: 17px;
     font-weight: 800;
     letter-spacing: 0.025em;
 }
 
 .daily-report-number {
     display: inline-flex;
-    width: 23px;
-    height: 20px;
+    width: 34px;
+    height: 30px;
     flex: 0 0 auto;
     align-items: center;
     justify-content: center;
     border-radius: 999px;
     background: var(--report-accent);
     color: #fff;
-    font-size: 10px;
+    font-size: 14px;
 }
 
 .daily-report-table {
@@ -213,23 +214,24 @@
     table-layout: fixed;
     border-collapse: collapse;
     color: #18212a;
-    font-size: 10px;
+    font-size: 15px;
 }
 
 .daily-report-table th,
 .daily-report-table td {
-    height: 25px;
+    height: 48px;
     overflow-wrap: anywhere;
-    border: 1px solid #e3e7e9;
-    padding: 3px 5px;
+    border: 1px solid #cbd5e1;
+    padding: 11px 14px;
     vertical-align: middle;
+    line-height: 1.45;
 }
 
 .daily-report-table th {
-    height: 26px;
-    background: #fff;
-    color: #26323a;
-    font-size: 9px;
+    height: 50px;
+    background: #1e3a4b;
+    color: #fff;
+    font-size: 14px;
     font-weight: 800;
     letter-spacing: 0.015em;
     text-align: left;
@@ -237,20 +239,20 @@
 
 .daily-report-invoices-table {
     min-width: 0;
-    font-size: 12px;
+    font-size: 15px;
 }
 
 .daily-report-invoices-table th,
 .daily-report-invoices-table td {
-    padding: 6px 10px;
+    padding: 11px 14px;
 }
 
 .daily-report-invoices-table th {
-    height: 38px;
-    border-bottom: 2px solid #b9c9d1;
-    background: #f2f7f9;
-    color: #172f3d;
-    font-size: 12px;
+    height: 50px;
+    border-bottom: 2px solid #1e3a4b;
+    background: #1e3a4b;
+    color: #fff;
+    font-size: 14px;
     letter-spacing: 0.035em;
     white-space: nowrap;
 }
@@ -281,18 +283,80 @@
 }
 
 .daily-report-table tbody tr:nth-child(odd):not(.daily-report-total) {
-    background: #fafafa;
+    background: #f1f5f9;
+}
+
+.daily-report-table tbody tr:nth-child(even):not(.daily-report-total) {
+    background: #fff;
+}
+
+.daily-report-table .daily-report-empty-row td {
+    height: 60px;
+    color: #64748b;
+    font-style: italic;
+    text-align: center;
 }
 
 .daily-report-table .daily-report-total {
-    background: var(--report-tint);
+    background: #e2e8f0;
+    color: #0f172a;
     font-weight: 800;
 }
 
 .daily-report-table .daily-report-main-invoice {
-    background: #fafbfc;
-    font-size: 9px;
+    background: #eff6ff;
+    font-size: 14px;
     font-weight: 700;
+}
+
+.daily-report-main-invoice span {
+    margin-right: 10px;
+    color: #475569;
+}
+
+.daily-report-expense-groups {
+    display: grid;
+    gap: 18px;
+    padding: 18px;
+}
+
+.daily-report-expense-group {
+    overflow: hidden;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+}
+
+.daily-report-expense-category {
+    margin: 0;
+    border-bottom: 1px solid #cbd5e1;
+    background: #f1f5f9;
+    padding: 12px 16px;
+    color: #1e293b;
+    font-size: 17px;
+    font-weight: 800;
+}
+
+.daily-report-expense-group .daily-report-table {
+    min-width: 0;
+}
+
+.daily-report-expenses-total {
+    display: flex;
+    min-height: 60px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border-top: 2px solid #1e3a4b;
+    background: #e2e8f0;
+    padding: 14px 20px;
+    color: #0f172a;
+    font-size: 18px;
+    font-weight: 800;
+}
+
+.daily-report-expenses-total strong {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
 
 .daily-report-loading {
@@ -315,7 +379,79 @@
 
 @media (max-width: 560px) {
     .daily-report-paper {
-        padding: 9px;
+        padding: 12px;
+    }
+
+    .daily-report-heading {
+        gap: 10px;
+        margin-bottom: 16px;
+        padding-bottom: 12px;
+    }
+
+    .daily-report-company {
+        font-size: 21px;
+    }
+
+    .daily-report-title {
+        font-size: 20px;
+    }
+
+    .daily-report-meta {
+        font-size: 13px;
+    }
+
+    .daily-report-meta span {
+        padding: 10px;
+    }
+
+    .daily-report-section-title {
+        min-height: 46px;
+        padding: 8px 10px;
+        font-size: 15px;
+    }
+
+    .daily-report-table {
+        font-size: 13px;
+    }
+
+    .daily-report-table th,
+    .daily-report-table td {
+        height: 40px;
+        padding: 8px;
+    }
+
+    .daily-report-invoices-table th,
+    .daily-report-invoices-table td {
+        padding: 9px 8px;
+    }
+
+    .daily-report-invoices-table th {
+        font-size: 12px;
+    }
+
+    .daily-report-expense-groups {
+        gap: 12px;
+        padding: 12px;
+    }
+
+    .daily-report-expense-category {
+        padding: 10px 12px;
+        font-size: 15px;
+    }
+
+    .daily-report-expense-group .daily-report-table {
+        font-size: 13px;
+    }
+
+    .daily-report-expense-group .daily-report-table th,
+    .daily-report-expense-group .daily-report-table td {
+        padding: 8px;
+    }
+
+    .daily-report-expenses-total {
+        min-height: 52px;
+        padding: 12px;
+        font-size: 16px;
     }
 
     .daily-report-meta {
@@ -347,6 +483,13 @@
         border: 0;
         box-shadow: none;
         padding: 0;
+    }
+
+    .daily-report-section,
+    .daily-report-expense-group,
+    .daily-report-table tr {
+        break-inside: avoid;
+        page-break-inside: avoid;
     }
 
     .financial-report-paper {
