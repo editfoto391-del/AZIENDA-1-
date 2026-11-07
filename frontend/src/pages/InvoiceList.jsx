@@ -216,6 +216,11 @@ export default function InvoiceList({ express = false }) {
   const pageCount = Math.max(1, Math.ceil(total / 50));
   const rangeStart = total === 0 ? 0 : (page - 1) * 50 + 1;
   const rangeEnd = Math.min(page * 50, total);
+  const invoiceSummary = list.reduce((summary, invoice) => ({
+    total: summary.total + (Number(invoice.total) || 0),
+    paid: summary.paid + (Number(invoice.amount_paid) || 0),
+    outstanding: summary.outstanding + (Number(invoice.outstanding) || 0),
+  }), { total: 0, paid: 0, outstanding: 0 });
 
   return (
     <div>
@@ -241,6 +246,25 @@ export default function InvoiceList({ express = false }) {
             <input type="checkbox" checked={showArchived} onChange={(e) => { setShowArchived(e.target.checked); setPage(1); }} />
             Show archived invoices
         </label>}
+      </Card>
+
+      <Card className="mb-4 p-4" data-testid="invoice-summary">
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="font-bold text-slate-800 font-display">Invoice Summary</h2>
+          <p className="text-xs text-slate-500">Current filtered page · {list.length} invoice{list.length === 1 ? "" : "s"}</p>
+        </div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          {[
+            ["Total Invoiced", invoiceSummary.total, "text-slate-800"],
+            ["Amount Paid", invoiceSummary.paid, "text-emerald-700"],
+            ["Outstanding Balance", invoiceSummary.outstanding, "text-red-700"],
+          ].map(([label, amount, tone]) => (
+            <div key={label} className="rounded-lg border border-border/70 bg-slate-50/70 px-3 py-2.5">
+              <p className="text-xs font-semibold text-slate-500">{label}</p>
+              <p className={`mt-1 font-mono text-lg font-bold ${tone}`}>{fmtMoney(amount)}</p>
+            </div>
+          ))}
+        </div>
       </Card>
 
       {canManageInvoices && sel.length > 0 && <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2" data-testid="bulk-bar">
