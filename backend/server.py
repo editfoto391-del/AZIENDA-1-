@@ -35,7 +35,6 @@ from salary_math import (
     calculate_salary_hours,
 )
 YASEEN_UNCLE_NOVEMBER_MONTHLY_SALARY = 6500
-YASEEN_UNCLE_NOVEMBER_BALANCE_CUT = 1200
 YASEEN_UNCLE_NOVEMBER_START = date(2026, 11, 1)
 YASEEN_UNCLE_NOVEMBER_END = date(2026, 11, 30)
 from grv_math import (
@@ -8426,39 +8425,6 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
             day["pay"] = r2(D(day["regular_pay"]) + D(day["overtime_pay"]))
         employee_advances = [item for item in advances if item.get("employee_id") == employee["id"]]
         employee_cuts = [item for item in cuts if item.get("employee_id") == employee["id"]]
-        november_yaseen_cut_total = sum(
-            (
-                D(item.get("amount", 0))
-                for item in employee_cuts
-                if YASEEN_UNCLE_NOVEMBER_START.isoformat() <= item.get("end_date", "") <= YASEEN_UNCLE_NOVEMBER_END.isoformat()
-            ),
-            Decimal("0"),
-        )
-        november_yaseen_opening_balance = sum(
-            (D(item.get("amount", 0)) for item in employee_advances if item.get("date", "") < YASEEN_UNCLE_NOVEMBER_START.isoformat()),
-            Decimal("0"),
-        ) - sum(
-            (D(item.get("amount", 0)) for item in employee_cuts if item.get("end_date", "") < YASEEN_UNCLE_NOVEMBER_START.isoformat()),
-            Decimal("0"),
-        )
-        system_november_cut = max(
-            Decimal("0"),
-            D(YASEEN_UNCLE_NOVEMBER_BALANCE_CUT) - november_yaseen_cut_total,
-        )
-        system_november_cut = min(system_november_cut, max(november_yaseen_opening_balance, Decimal("0")))
-        if (
-            is_yaseen_uncle
-            and is_yaseen_november_period
-            and (report_end >= YASEEN_UNCLE_NOVEMBER_END or include_monthly_salaries)
-            and system_november_cut > 0
-        ):
-            employee_cuts.append({
-                "id": "system-yaseen-uncle-november-2026-balance-cut",
-                "start_date": YASEEN_UNCLE_NOVEMBER_START.isoformat(),
-                "end_date": YASEEN_UNCLE_NOVEMBER_END.isoformat(),
-                "amount": float(system_november_cut),
-                "notes": "November 2026 balance deduction",
-            })
         all_advance_total = sum((D(item.get("amount", 0)) for item in employee_advances), Decimal("0"))
         all_cut_total = sum((D(item.get("amount", 0)) for item in employee_cuts), Decimal("0"))
         period_cut = r2(sum(
