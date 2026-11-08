@@ -296,7 +296,52 @@ def test_monthly_fixed_salary_is_not_repeated_in_a_partial_month(monkeypatch):
     assert report["employees"][0]["is_full_month_period"] is False
 
 
-def test_yaseen_uncle_gets_november_monthly_salary_after_balance_cut(monkeypatch):
+def test_monthly_fixed_salary_can_be_explicitly_included_in_a_weekly_report(monkeypatch):
+    employee = {
+        "id": "employee-yaseen",
+        "name": "Yassine Uncle",
+        "monthly_salary": 18000,
+    }
+    records = {
+        "employees": [employee],
+        "attendance": [],
+        "piece_production": [],
+        "salary_advances": [{
+            "employee_id": employee["id"],
+            "date": "2026-10-31",
+            "amount": 1200,
+        }],
+        "salary_cuts": [],
+    }
+
+    async def fake_listall(collection, *_args, **_kwargs):
+        return records[collection]
+
+    monkeypatch.setattr(server, "listall", fake_listall)
+
+    report = asyncio.run(server.salary_report(
+        "2026-11-02",
+        "2026-11-07",
+        include_monthly_salaries=True,
+    ))
+    result = report["employees"][0]
+
+    assert result["pay_frequency"] == "monthly_fixed"
+    assert result["monthly_salary"] == 6500
+    assert result["gross_salary"] == 6500
+    assert result["cut"] == 1200
+    assert result["net_salary"] == 5300
+    assert result["balance_before_period"] == 1200
+    assert result["balance_after_period"] == 0
+    assert result["is_full_month_period"] is False
+
+
+def test_salary_payroll_keys_are_unique_by_week_or_calendar_month():
+    assert server.salary_payroll_key("weekly", "2026-11-02", "2026-11-07") == "weekly:2026-11-02"
+    assert server.salary_payroll_key("monthly", "2026-11-01", "2026-11-30") == "monthly:2026-11"
+
+
+def test_yaseen_uncle_november_salary_does_not_apply_an_automatic_balance_deduction(monkeypatch):
     employee = {
         "id": "employee-yaseen",
         "name": "Yassine Uncle",
@@ -326,13 +371,13 @@ def test_yaseen_uncle_gets_november_monthly_salary_after_balance_cut(monkeypatch
     assert result["pay_frequency"] == "monthly_fixed"
     assert result["monthly_salary"] == 6500
     assert result["gross_salary"] == 6500
-    assert result["cut"] == 1200
-    assert result["net_salary"] == 5300
+    assert result["cut"] == 0
+    assert result["net_salary"] == 6500
     assert result["balance_before_period"] == 1200
-    assert result["balance_after_period"] == 0
+    assert result["balance_after_period"] == 1200
 
 
-def test_yaseen_uncle_november_cut_fills_only_the_remaining_amount(monkeypatch):
+def test_yaseen_uncle_monthly_report_uses_only_the_manual_balance_deduction(monkeypatch):
     employee = {"id": "employee-yaseen", "name": "Yaseen Uncle", "monthly_salary": 18000}
     records = {
         "employees": [employee],
@@ -353,8 +398,9 @@ def test_yaseen_uncle_november_cut_fills_only_the_remaining_amount(monkeypatch):
     result = asyncio.run(server.salary_report("2026-11-01", "2026-11-30"))["employees"][0]
 
     assert result["monthly_salary"] == 6500
-    assert result["cut"] == 1200
-    assert result["balance_after_period"] == 0
+    assert result["cut"] == 400
+    assert result["net_salary"] == 6100
+    assert result["balance_after_period"] == 800
 
 
 def test_yaseen_uncle_is_not_paid_monthly_in_a_partial_november_period(monkeypatch):
