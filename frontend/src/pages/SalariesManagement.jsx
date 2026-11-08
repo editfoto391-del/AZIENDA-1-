@@ -100,8 +100,9 @@ export default function SalariesManagement() {
     ]);
     setReport(nextReport);
     setPayments(nextPayments || []);
+    const paidByEmployee = Object.fromEntries((nextPayments || []).map((payment) => [payment.employee_id, payment]));
     setCutDrafts(Object.fromEntries((nextReport.employees || []).map((employee) => [
-      employee.employee_id, String(employee.cut || 0),
+      employee.employee_id, String(paidByEmployee[employee.employee_id]?.deduction_amount ?? employee.cut ?? 0),
     ])));
     setRateDrafts(Object.fromEntries((nextReport.employees || []).map((employee) => [
       employee.employee_id,
@@ -145,8 +146,9 @@ export default function SalariesManagement() {
       if (!active) return;
       setReport(nextReport);
       setPayments(nextPayments || []);
+      const paidByEmployee = Object.fromEntries((nextPayments || []).map((payment) => [payment.employee_id, payment]));
       setCutDrafts(Object.fromEntries((nextReport.employees || []).map((employee) => [
-        employee.employee_id, String(employee.cut || 0),
+        employee.employee_id, String(paidByEmployee[employee.employee_id]?.deduction_amount ?? employee.cut ?? 0),
       ])));
       setRateDrafts(Object.fromEntries((nextReport.employees || []).map((employee) => [
         employee.employee_id,
@@ -188,8 +190,9 @@ export default function SalariesManagement() {
   const rows = useMemo(() => (report?.employees || []).map((employee) => {
     const monthly = monthlyEmployee(employee);
     const included = !monthly || (monthlyIncluded[employee.employee_id] ?? periodType === "monthly");
-    const grossCents = cents(employee.gross_salary);
-    const cutCents = cents(employee.cut);
+    const payment = paymentByEmployee[employee.employee_id] || null;
+    const grossCents = cents(payment ? payment.gross_amount : employee.gross_salary);
+    const cutCents = cents(payment ? payment.deduction_amount : employee.cut);
     return {
       employee,
       monthly,
@@ -197,7 +200,7 @@ export default function SalariesManagement() {
       grossCents,
       cutCents,
       netCents: grossCents - cutCents,
-      payment: paymentByEmployee[employee.employee_id] || null,
+      payment,
     };
   }).sort((a, b) =>
     String(a.employee.department || "Other").localeCompare(String(b.employee.department || "Other"))
@@ -249,6 +252,10 @@ export default function SalariesManagement() {
     }
     const amount = Number(cutDrafts[employee.employee_id] ?? employee.cut ?? 0);
     if (!Number.isFinite(amount) || amount < 0) return toast.error("Deduction must be zero or more.");
+    const currentRate = monthlyEmployee(employee) ? employee.monthly_salary : employee.weekly_salary;
+    if (cents(rateDrafts[employee.employee_id]) !== cents(currentRate)) {
+      return toast.error("Save the salary rate before saving a deduction.");
+    }
     if (amount > Number(employee.available_balance || 0)) {
       return toast.error("Deduction cannot exceed the available borrowed balance.");
     }
@@ -291,6 +298,13 @@ export default function SalariesManagement() {
     const employee = row.employee;
     if (!row.included) return toast.error("Include this monthly employee in the report before recording payment.");
     if (row.payment) return toast.error("This payroll has already been marked as paid.");
+    const currentRate = row.monthly ? employee.monthly_salary : employee.weekly_salary;
+    if (cents(rateDrafts[employee.employee_id]) !== cents(currentRate)) {
+      return toast.error("Save the salary rate before marking this payroll as paid.");
+    }
+    if (cents(cutDrafts[employee.employee_id]) !== cents(employee.cut)) {
+      return toast.error("Save the balance deduction before marking this payroll as paid.");
+    }
     if (row.monthly && periodType !== "monthly") {
       return toast.error("Select the monthly payroll to record this employee's payment.");
     }
@@ -621,7 +635,7 @@ export default function SalariesManagement() {
                                 <div className="rounded-md border border-border bg-card p-3">
                                   <div className="grid grid-cols-2 gap-2 text-xs">
                                     <div><p className="text-muted-foreground">Balance before</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance_before_period || 0)}</p></div>
-                                    <div><p className="text-muted-foreground">Remaining balance</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance_after_period ?? employee.balance ?? 0)}</p></div>
+                                    <div><p className="text-muted-foreground">Current balance</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance ?? employee.balance_after_period ?? 0)}</p></div>
                                   </div>
                                   <label className="mt-3 block text-xs font-semibold text-muted-foreground">Manual deduction
                                     <input type="number" min="0" step="0.01" max={Number(employee.available_balance || 0)} value={cutDrafts[employee.employee_id] ?? "0"} onChange={(event) => setCutDrafts((current) => ({ ...current, [employee.employee_id]: event.target.value }))} disabled={!!savingIds[employee.employee_id] || (!!row.payment)} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground" />
@@ -702,7 +716,7 @@ export default function SalariesManagement() {
                         <div><p className="text-muted-foreground">Regular pay</p><strong className="font-mono">{fmtMoney(employee.regular_pay || 0)}</strong></div>
                         <div><p className="text-muted-foreground">Overtime</p><strong className="font-mono">{fmtMoney(employee.overtime_pay || 0)}</strong></div>
                         <div><p className="text-muted-foreground">Piecework</p><strong className="font-mono">{fmtMoney(employee.piece_pay || 0)}</strong></div>
-                        <div><p className="text-muted-foreground">Outstanding balance</p><strong className="font-mono">{fmtMoney(employee.balance_after_period ?? employee.balance ?? 0)}</strong></div>
+                        <div><p className="text-muted-foreground">Current balance</p><strong className="font-mono">{fmtMoney(employee.balance ?? employee.balance_after_period ?? 0)}</strong></div>
                       </div>
                       <label className="block text-xs font-semibold text-muted-foreground">Manual deduction
                         <input type="number" min="0" step="0.01" value={cutDrafts[employee.employee_id] ?? "0"} onChange={(event) => setCutDrafts((current) => ({ ...current, [employee.employee_id]: event.target.value }))} disabled={!!row.payment || (row.monthly && periodType !== "monthly")} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" />
