@@ -6,7 +6,6 @@ PIECEWORK_THRESHOLD = 70
 SATURDAY_PIECEWORK_THRESHOLD = 40
 PIECEWORK_LOW_RATE = Decimal("2.50")
 PIECEWORK_HIGH_RATE = Decimal("3.50")
-SATURDAY_PIECEWORK_BONUS = Decimal("60.00")
 
 
 def _money(amount):
@@ -110,11 +109,14 @@ def calculate_piecework(records, *, include_sunday=True, start_date=None, end_da
             weekday_pay += Decimal(str(row["pay"]))
             daily.append(row)
 
-        saturday_pay = (
-            SATURDAY_PIECEWORK_BONUS
-            if saturday_pieces > SATURDAY_PIECEWORK_THRESHOLD
-            else Decimal("0")
+        saturday_rate = (
+            PIECEWORK_HIGH_RATE
+            if saturday_recorded and saturday_pieces >= SATURDAY_PIECEWORK_THRESHOLD
+            else PIECEWORK_LOW_RATE
         )
+        saturday_high_pieces = saturday_pieces if saturday_recorded and saturday_pieces >= SATURDAY_PIECEWORK_THRESHOLD else 0
+        saturday_low_pieces = saturday_pieces if saturday_recorded and saturday_pieces < SATURDAY_PIECEWORK_THRESHOLD else 0
+        saturday_pay = Decimal(saturday_high_pieces) * PIECEWORK_HIGH_RATE + Decimal(saturday_low_pieces) * PIECEWORK_LOW_RATE
         daily.append({
             "date": saturday.isoformat(),
             "pieces": saturday_pieces,
@@ -124,11 +126,11 @@ def calculate_piecework(records, *, include_sunday=True, start_date=None, end_da
             "deficit": max(0, SATURDAY_PIECEWORK_THRESHOLD - saturday_pieces) if saturday_recorded else 0,
             "recovered_previous_deficits": saturday_recovered,
             "unrecovered_deficit": 0,
-            "high_rate_pieces": 0,
-            "low_rate_pieces": 0,
-            "high_rate_pay": 0,
-            "low_rate_pay": 0,
-            "piece_rate": 0,
+            "high_rate_pieces": saturday_high_pieces,
+            "low_rate_pieces": saturday_low_pieces,
+            "high_rate_pay": _money(Decimal(saturday_high_pieces) * PIECEWORK_HIGH_RATE),
+            "low_rate_pay": _money(Decimal(saturday_low_pieces) * PIECEWORK_LOW_RATE),
+            "piece_rate": float(saturday_rate),
             "pay": _money(saturday_pay),
         })
 
@@ -136,8 +138,8 @@ def calculate_piecework(records, *, include_sunday=True, start_date=None, end_da
         recovered_total = weekday_recovered + saturday_recovered
         pieces = weekday_pieces + saturday_pieces
         week_pay = weekday_pay + saturday_pay
-        total_high_pieces = weekday_high_pieces
-        total_low_pieces = weekday_low_pieces
+        total_high_pieces = weekday_high_pieces + saturday_high_pieces
+        total_low_pieces = weekday_low_pieces + saturday_low_pieces
         week_details = {
             "week_start": week_start.isoformat(),
             "week_end": saturday.isoformat(),
@@ -158,12 +160,12 @@ def calculate_piecework(records, *, include_sunday=True, start_date=None, end_da
             "weekday_low_rate_pieces": weekday_low_pieces,
             "high_rate_pieces": total_high_pieces,
             "low_rate_pieces": total_low_pieces,
-            "saturday_high_rate_pieces": 0,
-            "saturday_low_rate_pieces": 0,
-            "unpaid_saturday_pieces": saturday_pieces,
+            "saturday_high_rate_pieces": saturday_high_pieces,
+            "saturday_low_rate_pieces": saturday_low_pieces,
+            "unpaid_saturday_pieces": 0,
             "weekday_pay": _money(weekday_pay),
-            "saturday_rate": 0,
-            "saturday_bonus": _money(saturday_pay),
+            "saturday_rate": float(saturday_rate),
+            "saturday_bonus": 0,
             "saturday_pay": _money(saturday_pay),
             "other_pieces": 0,
             "other_pay": 0,
