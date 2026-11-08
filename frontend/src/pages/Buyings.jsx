@@ -25,6 +25,7 @@ const blankBuying = () => ({
 
 export default function Buyings() {
   const { user } = useAuth();
+  const canManageBuyings = !!(user?.is_primary_owner && user?.is_owner && !user?.is_worker);
   const [buyings, setBuyings] = useState(null);
   const [stock, setStock] = useState(null);
   const [suppliers, setSuppliers] = useState(null);
@@ -109,7 +110,7 @@ export default function Buyings() {
   };
 
   const transferAllToGrv = async () => {
-    if (!user?.is_primary_owner) return toast.error("Only the Global Owner can transfer Buyings to GRV.");
+    if (!canManageBuyings) return toast.error("Only the Global Owner can transfer Buyings to GRV.");
     const pending = untransferredBuyings;
     if (!pending.length || transferring) return;
     setTransferring(true);
@@ -196,12 +197,16 @@ export default function Buyings() {
   return (
     <div>
       <PageHeader title="Buyings" subtitle="Record items purchased and their costs">
-        {user?.is_primary_owner && <Btn variant="outline" onClick={transferAllToGrv} disabled={transferring || !untransferredBuyings.length} data-testid="transfer-buyings-to-grv">
+        {canManageBuyings && <Btn variant="outline" onClick={transferAllToGrv} disabled={transferring || !untransferredBuyings.length} data-testid="transfer-buyings-to-grv">
           <ClipboardCheck size={16} /> {transferring ? "Updating inventory..." : `Transfer & update inventory (${untransferredBuyings.length})`}
         </Btn>}
-        <Link to="/suppliers" className="inline-flex items-center gap-2 rounded-md border border-border bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-secondary" data-testid="buyings-suppliers-link"><Building2 size={16} /> Manage Suppliers</Link>
-        <Btn onClick={() => setModal(blankBuying())} data-testid="add-buying-btn"><Plus size={16} /> Add Buying</Btn>
+        {canManageBuyings && <Link to="/suppliers" className="inline-flex items-center gap-2 rounded-md border border-border bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-secondary" data-testid="buyings-suppliers-link"><Building2 size={16} /> Manage Suppliers</Link>}
+        {canManageBuyings && <Btn onClick={() => setModal(blankBuying())} data-testid="add-buying-btn"><Plus size={16} /> Add Buying</Btn>}
       </PageHeader>
+
+      <div role="alert" className="mb-4 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm font-bold text-red-800" data-testid="buyings-grv-warning">
+        DO NOT USE BUYINGS. INSTEAD USE GRV. BUYING SECTION WILL SOON BE DELETED.
+      </div>
 
       <Card className="mb-4 flex flex-wrap items-end gap-3 p-4">
         <div className="relative min-w-56 flex-1">
@@ -233,7 +238,7 @@ export default function Buyings() {
                   <th className="px-4 py-3 text-right font-semibold">Unit price</th>
                   <th className="px-4 py-3 text-right font-semibold">Total</th>
                   <th className="px-4 py-3 font-semibold">GRV</th>
-                  <th className="px-4 py-3 text-right font-semibold">Actions</th>
+                  {canManageBuyings && <th className="px-4 py-3 text-right font-semibold">Actions</th>}
                 </tr>
               </thead>
               <tbody>
@@ -262,7 +267,7 @@ export default function Buyings() {
                         ><Eye size={14} /></Link>
                         : <span className="text-xs text-slate-400">Not transferred</span>}
                     </td>
-                    <td className="px-4 py-3 text-right">
+                    {canManageBuyings && <td className="px-4 py-3 text-right">
                       <button
                         type="button"
                         onClick={() => editBuying(buying)}
@@ -277,7 +282,7 @@ export default function Buyings() {
                         data-testid={`void-buying-${buying.id}`}
                         className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600"
                       ><Trash2 size={15} /></button>
-                    </td>
+                    </td>}
                   </tr>
                 ))}
               </tbody>

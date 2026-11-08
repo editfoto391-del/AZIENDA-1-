@@ -11066,6 +11066,7 @@ async def get_buyings(include_archived: bool = False, user=Depends(get_current_u
 
 @api.post("/buyings")
 async def add_buying(body: BuyingIn, user=Depends(get_current_user)):
+    require_global_owner(user)
     source, product, size = await _check_buying(body)
     data = body.model_dump()
     data.pop("supervisor_authorization", None)
@@ -11083,6 +11084,7 @@ async def add_buying(body: BuyingIn, user=Depends(get_current_user)):
 
 @api.put("/buyings/{bid}")
 async def edit_buying(bid: str, body: BuyingIn, user=Depends(get_current_user)):
+    require_global_owner(user)
     authorization = None
     if not can_skip_supervisor_approval(user):
         authorization = await db.buying_edit_authorizations.find_one({
@@ -11118,6 +11120,7 @@ async def edit_buying(bid: str, body: BuyingIn, user=Depends(get_current_user)):
 async def authorize_buying_edit(
     bid: str, body: BuyingEditAuthorizationIn, user=Depends(get_current_user),
 ):
+    require_global_owner(user)
     buying = await db.buyings.find_one({"id": bid, "voided": {"$ne": True}}, {"_id": 0, "id": 1})
     if not buying:
         raise HTTPException(404, "Buying not found")
@@ -11142,6 +11145,7 @@ async def authorize_buying_edit(
 
 @api.post("/buyings/{bid}/void")
 async def void_buying(bid: str, body: ReasonIn, user=Depends(get_current_user)):
+    require_global_owner(user)
     if not body.reason.strip():
         raise HTTPException(400, "A reason is required")
     rec = await db.buyings.find_one_and_update(
