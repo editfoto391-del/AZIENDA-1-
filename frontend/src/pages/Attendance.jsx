@@ -315,7 +315,6 @@ export default function Attendance() {
           <Btn variant="outline" onClick={() => setEmpModal({ name: "", department: "", active: true })} data-testid="add-employee-btn"><Plus size={16} /> Employee</Btn>
           {(user?.is_admin || user?.role === "admin" || user?.is_owner) && <>
             <Btn variant="outline" disabled={rosterImporting} onClick={importPayrollRoster} data-testid="import-payroll-roster-btn">{rosterImporting ? "Updating list…" : "Update employee list"}</Btn>
-            <Btn variant="danger" disabled={rosterResetting} onClick={resetPayrollRosterAndAttendance} data-testid="reset-payroll-roster-btn">{rosterResetting ? "Resetting roster…" : "Reset roster and attendance"}</Btn>
           </>}
           <Btn disabled={loading || busy || !active.length} onClick={markAll} data-testid="mark-all-present-btn"><CheckCheck size={16} /> Mark All Present</Btn>
         </>}
