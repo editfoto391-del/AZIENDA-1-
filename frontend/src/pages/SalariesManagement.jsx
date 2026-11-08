@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, today } from "@/lib/format";
+import { isPieceworkTailor, moneyToCents, sumPayrollRows } from "@/lib/salaryReportMath.mjs";
 import { Badge, Btn, Card, Empty, Input, Modal, Select } from "@/components/common";
 import { useAuth } from "@/context/AuthContext";
 
@@ -32,9 +33,29 @@ const monthRange = (month) => {
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 };
 
-const cents = (value) => Math.round((Number(value) || 0) * 100);
+const cents = moneyToCents;
 const monthlyEmployee = (employee) => employee?.pay_frequency === "monthly_fixed";
 const periodKey = (type, start) => type === "monthly" ? "monthly:" + start.slice(0, 7) : "weekly:" + start;
+
+const fetchPeriodPayments = async (period, periodType) => {
+  const periods = [{
+    period_type: periodType,
+    period_start: period.start,
+    period_end: period.end,
+  }];
+  if (periodType === "weekly") {
+    const month = monthRange(period.start.slice(0, 7));
+    if (month) periods.push({
+      period_type: "monthly",
+      period_start: month.start,
+      period_end: month.end,
+    });
+  }
+  const lists = await Promise.all(periods.map((paymentPeriod) =>
+    api.getUncached("/salaries/payments", paymentPeriod),
+  ));
+  return lists.flat();
+};
 
 function SummaryMetric({ label, value, icon: Icon, emphasis = false, helper }) {
   return (
@@ -94,14 +115,9 @@ export default function SalariesManagement() {
         end_date: period.end,
         include_monthly_salaries: true,
       };
-      const paymentParams = {
-        period_type: periodType,
-        period_start: period.start,
-        period_end: period.end,
-      };
       const [nextReport, nextPayments] = await Promise.all([
         api.getUncached("/salaries", params),
-        api.getUncached("/salaries/payments", paymentParams),
+        fetchPeriodPayments(period, periodType),
       ]);
       setReport(nextReport);
       setPayments(nextPayments || []);
@@ -113,9 +129,14 @@ export default function SalariesManagement() {
         employee.employee_id,
         String(monthlyEmployee(employee) ? (employee.monthly_salary ?? "") : (employee.weekly_salary ?? "")),
       ])));
-      setMonthlyIncluded(Object.fromEntries((nextReport.employees || [])
+      setMonthlyIncluded((current) => Object.fromEntries((nextReport.employees || [])
         .filter(monthlyEmployee)
-        .map((employee) => [employee.employee_id, periodType === "monthly"])));
+        .map((employee) => [
+          employee.employee_id,
+          Object.hasOwn(current, employee.employee_id)
+            ? current[employee.employee_id]
+            : periodType === "monthly",
+        ])));
       setExpanded({});
     } catch (error) {
       toast.error(apiError(error));
@@ -137,6 +158,7 @@ export default function SalariesManagement() {
     setMonthlyIncluded({});
     setCutDrafts({});
     setRateDrafts({});
+    setPaymentDates({});
     setAdvanceModal(null);
     setLoading(true);
     const params = {
@@ -144,14 +166,9 @@ export default function SalariesManagement() {
       end_date: period.end,
       include_monthly_salaries: true,
     };
-    const paymentParams = {
-      period_type: periodType,
-      period_start: period.start,
-      period_end: period.end,
-    };
     Promise.all([
       api.getUncached("/salaries", params),
-      api.getUncached("/salaries/payments", paymentParams),
+      fetchPeriodPayments(period, periodType),
     ]).then(([nextReport, nextPayments]) => {
       if (!active) return;
       setReport(nextReport);
@@ -164,9 +181,14 @@ export default function SalariesManagement() {
         employee.employee_id,
         String(monthlyEmployee(employee) ? (employee.monthly_salary ?? "") : (employee.weekly_salary ?? "")),
       ])));
-      setMonthlyIncluded(Object.fromEntries((nextReport.employees || [])
+      setMonthlyIncluded((current) => Object.fromEntries((nextReport.employees || [])
         .filter(monthlyEmployee)
-        .map((employee) => [employee.employee_id, periodType === "monthly"])));
+        .map((employee) => [
+          employee.employee_id,
+          Object.hasOwn(current, employee.employee_id)
+            ? current[employee.employee_id]
+            : periodType === "monthly",
+        ])));
       setExpanded({});
     }).catch((error) => {
       if (active) toast.error(apiError(error));
@@ -209,7 +231,7 @@ export default function SalariesManagement() {
       included,
       grossCents,
       cutCents,
-      netCents: grossCents - cutCents,
+      netCents: payment ? cents(payment.net_amount) : grossCents - cutCents,
       payment,
     };
   }).sort((a, b) =>
@@ -218,12 +240,9 @@ export default function SalariesManagement() {
   ), [report, monthlyIncluded, periodType, paymentByEmployee]);
 
   const reportRows = rows.filter((row) => row.included);
-  const totals = reportRows.reduce((result, row) => ({
-    grossCents: result.grossCents + row.grossCents,
-    cutCents: result.cutCents + row.cutCents,
-    netCents: result.netCents + row.netCents,
-  }), { grossCents: 0, cutCents: 0, netCents: 0 });
-  const paidCents = payments.reduce((sum, payment) => sum + cents(payment.net_amount), 0);
+  const totals = sumPayrollRows(reportRows);
+  const includedPaidRows = reportRows.filter((row) => row.payment);
+  const paidCents = includedPaidRows.reduce((sum, row) => sum + cents(row.payment.net_amount), 0);
   const departments = [...new Set(rows.map(({ employee }) => employee.department || "Other"))]
     .sort((a, b) => a.localeCompare(b));
   const filteredRows = rows.filter(({ employee }) =>
@@ -414,15 +433,16 @@ export default function SalariesManagement() {
           drawHeader();
         }
         const employee = row.employee;
+        const showPieces = isPieceworkTailor(employee);
         const basis = row.monthly
           ? "Monthly"
-          : employee.pay_type === "piece"
+          : showPieces
             ? String(employee.total_pieces || 0) + " pieces"
             : String(employee.present_days || 0) + " full / " + String(employee.half_days || 0) + " half";
         const values = [
           employee.name || "Unnamed",
           employee.department || "Other",
-          row.monthly ? "Monthly" : (employee.pay_type === "piece" ? "Piecework" : "Weekly"),
+          row.monthly ? "Monthly" : (showPieces ? "Piecework" : "Weekly"),
           basis,
           fmtMoney(row.grossCents / 100),
           fmtMoney(row.cutCents / 100),
@@ -516,8 +536,18 @@ export default function SalariesManagement() {
           <SummaryMetric label="Employees in report" value={String(reportRows.length)} icon={ListFilter} helper="Monthly employees can be included individually." />
           <SummaryMetric label="Gross payroll" value={fmtMoney(totals.grossCents / 100)} icon={Banknote} />
           <SummaryMetric label="Balance deductions" value={fmtMoney(totals.cutCents / 100)} icon={Landmark} />
-          <SummaryMetric label="Net payable" value={fmtMoney(totals.netCents / 100)} icon={Wallet} emphasis helper={"Paid: " + fmtMoney(paidCents / 100) + " · " + payments.length + " recorded payments"} />
+          <SummaryMetric label="Net payable" value={fmtMoney(totals.netCents / 100)} icon={Wallet} emphasis helper={"Paid: " + fmtMoney(paidCents / 100) + " · " + includedPaidRows.length + " recorded payments"} />
         </div>
+
+        {!!report?.unmatched_attendance_records?.length && <Card role="alert" className="border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+          <p className="font-semibold">Attendance records need reconciliation</p>
+          <p className="mt-1 text-xs">These saved records do not match an employee profile and are not included in payroll:</p>
+          <ul className="mt-2 space-y-1 text-xs">
+            {report.unmatched_attendance_records.map((record, index) => <li key={record.employee_id + "-" + record.date + "-" + index}>
+              {record.date} · {record.employee_name || "Unknown employee"} · ID {record.employee_id || "missing"} · {record.status || "No status"}
+            </li>)}
+          </ul>
+        </Card>}
 
         <Card className="overflow-hidden">
           <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border p-4">
@@ -567,10 +597,11 @@ export default function SalariesManagement() {
                       const employee = row.employee;
                       const isPaid = !!row.payment;
                       const expandedRow = !!expanded[employee.employee_id];
-                      const payLabel = row.monthly ? "Monthly" : employee.pay_type === "piece" ? "Piecework" : "Weekly";
+                      const showPieces = isPieceworkTailor(employee);
+                      const payLabel = row.monthly ? "Monthly" : showPieces ? "Piecework" : "Weekly";
                       const basis = row.monthly
                         ? "Monthly salary"
-                        : employee.pay_type === "piece"
+                        : showPieces
                           ? String(employee.total_pieces || 0) + " pieces"
                           : String(employee.present_days || 0) + " full / " + String(employee.half_days || 0) + " half";
                       return <Fragment key={employee.employee_id}>
@@ -583,6 +614,7 @@ export default function SalariesManagement() {
                               <div>
                                 <p className="font-semibold text-foreground">{employee.name}</p>
                                 {employee.active === false && <p className="text-[10px] text-muted-foreground">Inactive record</p>}
+                                {employee.salary_rate_missing && <p className="text-[10px] font-medium text-amber-700">Missing configured rate · not payable</p>}
                               </div>
                             </div>
                           </td>
@@ -615,51 +647,53 @@ export default function SalariesManagement() {
                           <td colSpan={10} className="p-4">
                             <div className="grid gap-4 xl:grid-cols-[1.2fr_1fr_1fr]">
                               <section className="space-y-3">
-                                <h4 className="font-display font-semibold text-foreground">Calculation details</h4>
-                                <div className="grid grid-cols-2 gap-2 text-xs">
-                                  <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Regular pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.regular_pay || 0)}</p></div>
-                                  <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Overtime · R20/hour</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.overtime_pay || 0)}</p></div>
-                                  <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Piecework pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.piece_pay || 0)}</p></div>
-                                  <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Recorded production</p><p className="mt-1 font-mono font-semibold">{employee.total_pieces || 0} pieces</p></div>
+                                <div>
+                                  <h4 className="font-display font-semibold text-foreground">Pay breakdown</h4>
+                                  <p className="mt-1 text-xs text-muted-foreground">How this period’s gross pay was calculated.</p>
                                 </div>
-                                {employee.piece_weeks?.map((week) => <details key={week.week_start} className="rounded-md border border-border bg-card p-3 text-xs">
-                                  <summary className="cursor-pointer font-semibold text-foreground">Piecework {week.week_start} – {week.week_end} · {fmtMoney(week.pay)}</summary>
-                                  <div className="mt-2 grid grid-cols-2 gap-2 text-muted-foreground">
-                                    <span>Weekday pieces: {week.weekday_pieces}</span>
-                                    <span>Saturday pieces: {week.saturday_pieces}</span>
-                                    <span>Saturday rate: {fmtMoney(week.saturday_rate)} / piece</span>
-                                    <span>Saturday pay: {fmtMoney(week.saturday_pay)}</span>
-                                    <span>Saturday recovery: {week.saturday_recovery_pieces} pieces</span>
-                                    <span>High-rate pieces: {week.high_rate_pieces}</span>
-                                    <span>Low-rate pieces: {week.low_rate_pieces}</span>
-                                    <span>Recovered: {week.recovered_pieces}</span>
-                                    <span>Unrecovered deficit: {week.unrecovered_weekday_deficit}</span>
-                                  </div>
-                                </details>)}
+                                <div className="grid grid-cols-2 gap-2 text-xs">
+                                  <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Attendance pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.regular_pay || 0)}</p></div>
+                                  <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Overtime <span className="font-normal">(R20/hour)</span></p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.overtime_pay || 0)}</p></div>
+                                  {showPieces ? <>
+                                    <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Piecework pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.piece_pay || 0)}</p></div>
+                                    <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Recorded production</p><p className="mt-1 font-mono font-semibold">{employee.total_pieces || 0} pieces</p></div>
+                                  </> : <>
+                                    <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Working days</p><p className="mt-1 font-mono font-semibold">{employee.present_days || 0} full · {employee.half_days || 0} half</p></div>
+                                    <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Hours worked</p><p className="mt-1 font-mono font-semibold">{Number(employee.regular_hours || 0) + Number(employee.overtime_hours || 0)} hours</p></div>
+                                  </>}
+                                </div>
+                                {employee.salary_rate_missing && <p role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">
+                                No configured {row.monthly ? "monthly" : "weekly"} salary rate is available. Payroll is shown as R0.00 and cannot be marked paid; enter only the owner-approved configured rate.
+                                </p>}
+                                {showPieces && <p className="text-xs text-muted-foreground">Pay is based on the saved daily production and approved piecework rates.</p>}
                               </section>
 
                               <section className="space-y-3">
-                                <h4 className="font-display font-semibold text-foreground">Salary rate &amp; balance</h4>
+                                <div>
+                                  <h4 className="font-display font-semibold text-foreground">Salary &amp; balance</h4>
+                                  <p className="mt-1 text-xs text-muted-foreground">Deductions are manual; nothing is taken automatically.</p>
+                                </div>
                                 <div className="rounded-md border border-border bg-card p-3">
-                                  <label className="block text-xs font-semibold text-muted-foreground">{row.monthly ? "Fixed monthly salary" : "Fixed weekly salary"}
+                                  <label className="block text-xs font-semibold text-muted-foreground">Configured {row.monthly ? "monthly" : "weekly"} salary
                                     <span className="mt-1 flex items-center gap-2">
                                       <span className="text-muted-foreground">R</span>
                                       <input type="number" min="0.01" step="0.01" value={rateDrafts[employee.employee_id] ?? ""} onChange={(event) => setRateDrafts((current) => ({ ...current, [employee.employee_id]: event.target.value }))} className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-2 font-mono text-sm text-foreground" disabled={!!savingIds[employee.employee_id]} />
-                                      <Btn size="sm" disabled={!!savingIds[employee.employee_id]} onClick={() => saveRate(employee)}>Save rate</Btn>
+                                      <Btn size="sm" disabled={!!savingIds[employee.employee_id]} onClick={() => saveRate(employee)}>Save</Btn>
                                     </span>
                                   </label>
                                 </div>
                                 <div className="rounded-md border border-border bg-card p-3">
                                   <div className="grid grid-cols-2 gap-2 text-xs">
-                                    <div><p className="text-muted-foreground">Balance before</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance_before_period || 0)}</p></div>
-                                    <div><p className="text-muted-foreground">Current balance</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance ?? employee.balance_after_period ?? 0)}</p></div>
+                                    <div><p className="text-muted-foreground">Balance at period start</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance_before_period || 0)}</p></div>
+                                    <div><p className="text-muted-foreground">Balance remaining</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance ?? employee.balance_after_period ?? 0)}</p></div>
                                   </div>
-                                  <label className="mt-3 block text-xs font-semibold text-muted-foreground">Manual deduction
+                                  <label className="mt-3 block text-xs font-semibold text-muted-foreground">Deduction for this period
                                     <input type="number" min="0" step="0.01" max={Number(employee.available_balance || 0)} value={cutDrafts[employee.employee_id] ?? "0"} onChange={(event) => setCutDrafts((current) => ({ ...current, [employee.employee_id]: event.target.value }))} disabled={!!savingIds[employee.employee_id] || (!!row.payment)} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground" />
                                   </label>
+                                  {!row.payment && <p className="mt-1 text-[11px] text-muted-foreground">Save the deduction to update take-home pay.</p>}
                                   {row.monthly && periodType !== "monthly" && <p className="mt-2 text-[11px] text-muted-foreground">Switch to Monthly payroll to edit or save this deduction.</p>}
                                   <div className="mt-3 flex flex-wrap gap-2">
-                                    <Btn className="px-3 py-1.5 text-xs" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })} disabled={!!savingIds[employee.employee_id]}> <Landmark size={13} /> Add borrowed balance</Btn>
+                                    <Btn className="px-3 py-1.5 text-xs" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })} disabled={!!savingIds[employee.employee_id]}> <Landmark size={13} /> Add borrowed amount</Btn>
                                     <Btn className="px-3 py-1.5 text-xs" onClick={() => saveCut(employee)} disabled={!!savingIds[employee.employee_id] || !!row.payment || (row.monthly && periodType !== "monthly") || (!row.monthly && periodType !== "weekly")}>Save deduction</Btn>
                                   </div>
                                 </div>
@@ -675,7 +709,10 @@ export default function SalariesManagement() {
                               </section>
 
                               <section className="space-y-3">
-                                <h4 className="font-display font-semibold text-foreground">Payment</h4>
+                                <div>
+                                  <h4 className="font-display font-semibold text-foreground">Payment</h4>
+                                  <p className="mt-1 text-xs text-muted-foreground">Confirm the date and amount paid.</p>
+                                </div>
                                 {row.payment ? <div className="rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
                                   <p className="font-semibold"><BadgeCheck size={16} className="mr-1 inline" /> Payment recorded</p>
                                   <p className="mt-2">Paid on {row.payment.payment_date}</p>
@@ -688,12 +725,12 @@ export default function SalariesManagement() {
                                   <p className="font-semibold text-foreground">Weekly earnings overview</p>
                                   <p className="mt-1 text-xs text-muted-foreground">This monthly report summarizes weekly earnings. Record payment from the specific Monday–Saturday week.</p>
                                 </div> : <div className="rounded-md border border-border bg-card p-4">
-                                  <label className="block text-xs font-semibold text-muted-foreground">Payment date
+                                  <label className="block text-xs font-semibold text-muted-foreground">Date paid
                                     <input type="date" value={paymentDates[employee.employee_id] || today()} onChange={(event) => setPaymentDates((current) => ({ ...current, [employee.employee_id]: event.target.value }))} disabled={!!savingIds[employee.employee_id]} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground" />
                                   </label>
                                   <div className="mt-3 flex items-center justify-between gap-2">
-                                    <div><p className="text-xs text-muted-foreground">Net amount to pay</p><p className="font-mono text-xl font-semibold text-primary">{fmtMoney(row.netCents / 100)}</p></div>
-                                    <Btn size="sm" className="px-3 py-1.5 text-xs" onClick={() => markPaid(row)} disabled={!!savingIds[employee.employee_id] || !row.included || row.netCents <= 0}><Check size={14} /> Mark as paid</Btn>
+                                    <div><p className="text-xs text-muted-foreground">Take-home pay</p><p className="font-mono text-xl font-semibold text-primary">{fmtMoney(row.netCents / 100)}</p></div>
+                                    <Btn size="sm" className="px-3 py-1.5 text-xs" onClick={() => markPaid(row)} disabled={!!savingIds[employee.employee_id] || !row.included || !!employee.salary_rate_missing || row.netCents <= 0}><Check size={14} /> Mark as paid</Btn>
                                   </div>
                                 </div>}
                               </section>
@@ -711,46 +748,52 @@ export default function SalariesManagement() {
                   const employee = row.employee;
                   const isPaid = !!row.payment;
                   const expandedRow = !!expanded[employee.employee_id];
+                  const showPieces = isPieceworkTailor(employee);
                   return <article key={employee.employee_id} className="p-4" data-testid={"salary-mobile-row-" + employee.employee_id}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <p className="font-semibold text-foreground">{employee.name}</p>
-                        <p className="mt-0.5 text-xs text-muted-foreground">{employee.department || "Other"} · {row.monthly ? "Monthly" : employee.pay_type === "piece" ? "Piecework" : "Weekly"}</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">{employee.department || "Other"} · {row.monthly ? "Monthly" : showPieces ? "Piecework" : "Weekly"}</p>
+                        {employee.salary_rate_missing && <p className="mt-1 text-[11px] font-medium text-amber-700">Missing configured rate · not payable</p>}
                       </div>
                       {isPaid ? <Badge cls="border-emerald-200 bg-emerald-50 text-emerald-800">Paid</Badge> : <Badge cls="border-amber-200 bg-amber-50 text-amber-800">{row.monthly ? "Monthly" : periodType === "monthly" ? "Weekly overview" : "Pending"}</Badge>}
                     </div>
                     <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                      <div><p className="text-muted-foreground">Gross</p><p className="mt-1 font-mono font-semibold">{fmtMoney(row.grossCents / 100)}</p></div>
+                      <div><p className="text-muted-foreground">Gross pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(row.grossCents / 100)}</p></div>
                       <div><p className="text-muted-foreground">Deduction</p><p className="mt-1 font-mono font-semibold">{fmtMoney(row.cutCents / 100)}</p></div>
-                      <div><p className="text-muted-foreground">Net</p><p className="mt-1 font-mono font-semibold text-primary">{fmtMoney(row.netCents / 100)}</p></div>
+                      <div><p className="text-muted-foreground">Take-home pay</p><p className="mt-1 font-mono font-semibold text-primary">{fmtMoney(row.netCents / 100)}</p></div>
                     </div>
                     {row.monthly && <label className="mt-3 inline-flex items-center gap-2 text-xs text-muted-foreground">
                       <input type="checkbox" checked={row.included} onChange={(event) => setMonthlyIncluded((current) => ({ ...current, [employee.employee_id]: event.target.checked }))} />
                       Include in this salary report
                     </label>}
                     <button type="button" onClick={() => setExpanded((current) => ({ ...current, [employee.employee_id]: !current[employee.employee_id] }))} className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-primary">
-                      {expandedRow ? <ChevronDown size={14} /> : <ChevronRight size={14} />} {expandedRow ? "Hide details" : "Calculation and payment details"}
+                      {expandedRow ? <ChevronDown size={14} /> : <ChevronRight size={14} />} {expandedRow ? "Hide details" : "More details"}
                     </button>
                     {expandedRow && <div className="mt-3 space-y-3 rounded-lg border border-border bg-secondary/30 p-3">
                       <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div><p className="text-muted-foreground">Regular pay</p><strong className="font-mono">{fmtMoney(employee.regular_pay || 0)}</strong></div>
-                        <div><p className="text-muted-foreground">Overtime</p><strong className="font-mono">{fmtMoney(employee.overtime_pay || 0)}</strong></div>
-                        <div><p className="text-muted-foreground">Piecework</p><strong className="font-mono">{fmtMoney(employee.piece_pay || 0)}</strong></div>
-                        <div><p className="text-muted-foreground">Current balance</p><strong className="font-mono">{fmtMoney(employee.balance ?? employee.balance_after_period ?? 0)}</strong></div>
+                        <div><p className="text-muted-foreground">Attendance pay</p><strong className="font-mono">{fmtMoney(employee.regular_pay || 0)}</strong></div>
+                        <div><p className="text-muted-foreground">Overtime · R20/hour</p><strong className="font-mono">{fmtMoney(employee.overtime_pay || 0)}</strong></div>
+                        {showPieces
+                          ? <div><p className="text-muted-foreground">Piecework · pieces</p><strong className="font-mono">{fmtMoney(employee.piece_pay || 0)} · {employee.total_pieces || 0}</strong></div>
+                          : <div><p className="text-muted-foreground">Working days · hours</p><strong className="font-mono">{employee.present_days || 0} full · {employee.half_days || 0} half · {Number(employee.regular_hours || 0) + Number(employee.overtime_hours || 0)}h</strong></div>}
+                        <div><p className="text-muted-foreground">Balance remaining</p><strong className="font-mono">{fmtMoney(employee.balance ?? employee.balance_after_period ?? 0)}</strong></div>
                       </div>
-                      <label className="block text-xs font-semibold text-muted-foreground">Manual deduction
+                      <p className="text-xs text-muted-foreground">Deductions are manual; nothing is taken automatically.</p>
+                      <label className="block text-xs font-semibold text-muted-foreground">Deduction for this period
                         <input type="number" min="0" step="0.01" value={cutDrafts[employee.employee_id] ?? "0"} onChange={(event) => setCutDrafts((current) => ({ ...current, [employee.employee_id]: event.target.value }))} disabled={!!row.payment || (row.monthly && periodType !== "monthly")} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" />
                       </label>
+                      {!row.payment && <p className="text-xs text-muted-foreground">Save the deduction to update take-home pay.</p>}
                       <div className="flex flex-wrap gap-2">
-                        <Btn className="px-3 py-1.5 text-xs" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })}><Landmark size={13} /> Add balance</Btn>
+                        <Btn className="px-3 py-1.5 text-xs" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })}><Landmark size={13} /> Add borrowed amount</Btn>
                         <Btn className="px-3 py-1.5 text-xs" onClick={() => saveCut(employee)} disabled={!!row.payment || (row.monthly && periodType !== "monthly") || (!row.monthly && periodType !== "weekly")}>Save deduction</Btn>
                       </div>
                       {row.payment ? <p className="text-xs text-emerald-700">Paid on {row.payment.payment_date} · {fmtMoney(row.payment.net_amount)}</p>
                         : row.monthly && periodType !== "monthly" ? <p className="text-xs text-muted-foreground">Use Monthly payroll to record payment.</p>
                         : !row.monthly && periodType !== "weekly" ? <p className="text-xs text-muted-foreground">Record payment from the specific Monday–Saturday week.</p>
                         : <div className="space-y-2">
-                          <Input label="Payment date" type="date" value={paymentDates[employee.employee_id] || today()} onChange={(event) => setPaymentDates((current) => ({ ...current, [employee.employee_id]: event.target.value }))} />
-                          <Btn className="w-full" onClick={() => markPaid(row)} disabled={!row.included || row.netCents <= 0}> <Check size={14} /> Mark as paid</Btn>
+                          <Input label="Date paid" type="date" value={paymentDates[employee.employee_id] || today()} onChange={(event) => setPaymentDates((current) => ({ ...current, [employee.employee_id]: event.target.value }))} />
+                          <Btn className="w-full" onClick={() => markPaid(row)} disabled={!!savingIds[employee.employee_id] || !row.included || !!employee.salary_rate_missing || row.netCents <= 0}> <Check size={14} /> Mark as paid</Btn>
                         </div>}
                     </div>}
                   </article>;

@@ -164,7 +164,10 @@ def test_yaseen_november_balance_cut_saves_only_the_remaining_monthly_target(mon
     monkeypatch.setattr(
         server,
         "db",
-        type("MockDB", (), {"salary_cuts": type("MockCuts", (), {"find_one": staticmethod(find_one)})()})(),
+        type("MockDB", (), {
+            "salary_cuts": type("MockCuts", (), {"find_one": staticmethod(find_one)})(),
+            "salary_payments": type("MockPayments", (), {"find_one": staticmethod(find_one)})(),
+        })(),
     )
 
     asyncio.run(server.save_salary_cut(

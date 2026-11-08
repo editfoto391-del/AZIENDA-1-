@@ -34,9 +34,6 @@ from salary_math import (
     STANDARD_WEEKLY_HOURS,
     calculate_salary_hours,
 )
-YASEEN_UNCLE_NOVEMBER_MONTHLY_SALARY = 6500
-YASEEN_UNCLE_NOVEMBER_START = date(2026, 11, 1)
-YASEEN_UNCLE_NOVEMBER_END = date(2026, 11, 30)
 from grv_math import (
     aggregate_accepted_stock_lines,
     grv_confirmation_status,
@@ -7899,13 +7896,6 @@ def is_monthly_fixed_salary_employee(employee):
         "UNCLE" in tokens and bool(tokens & {"YASEEN", "YASSEN", "YASSINE", "YASIN"})
     )
 
-def is_yaseen_uncle_employee(employee):
-    normalized_name = " ".join(
-        "".join(character if character.isalnum() else " " for character in (employee.get("name") or "")).split()
-    ).upper()
-    tokens = set(normalized_name.split())
-    return "UNCLE" in tokens and bool(tokens & {"YASEEN", "YASSEN", "YASSINE", "YASIN"})
-
 def piecework_includes_sunday(employee_name):
     normalized_name = " ".join((employee_name or "").split()).upper()
     return normalized_name not in seed_data.PIECEWORK_EMPLOYEE_NAMES
@@ -8371,37 +8361,54 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
         listall("salary_cuts", {"voided": {"$ne": True}}),
     )
     result = []
+    employee_ids = {employee.get("id") for employee in employees}
+    unmatched_attendance_records = [
+        {
+            "employee_id": record.get("employee_id"),
+            "employee_name": record.get("employee_name", ""),
+            "date": record.get("date", ""),
+            "status": record.get("status", ""),
+        }
+        for record in attendance
+        if record.get("employee_id") not in employee_ids
+    ]
     for employee in employees:
-        hourly_rate = float(employee.get("hourly_rate") or 20)
         is_piece_paid = is_piece_paid_employee(employee)
-        is_yaseen_uncle = is_yaseen_uncle_employee(employee)
         is_monthly_fixed = is_monthly_fixed_salary_employee(employee) and not is_piece_paid
         report_start = date.fromisoformat(start_date)
-        report_end = date.fromisoformat(end_date)
         payroll_month_start = report_start.replace(day=1)
         payroll_month_end = payroll_month_start.replace(
             day=calendar.monthrange(payroll_month_start.year, payroll_month_start.month)[1]
         )
-        is_yaseen_november_period = (
-            is_yaseen_uncle
-            and payroll_month_start <= YASEEN_UNCLE_NOVEMBER_END
-            and payroll_month_end >= YASEEN_UNCLE_NOVEMBER_START
-        )
-        monthly_salary = (
-            YASEEN_UNCLE_NOVEMBER_MONTHLY_SALARY
-            if is_monthly_fixed and is_yaseen_november_period
-            else employee.get("monthly_salary") if is_monthly_fixed else None
-        )
+        monthly_salary = employee.get("monthly_salary") if is_monthly_fixed else None
+        configured_hourly_rate = employee.get("hourly_rate")
+        hourly_rate = float(configured_hourly_rate) if configured_hourly_rate else 0
         weekly_salary = employee.get("weekly_salary") if not is_piece_paid and not is_monthly_fixed else None
         hours_per_week = STANDARD_WEEKLY_HOURS
         work_days_per_week = 6
-        if weekly_salary is None and not is_piece_paid and not is_monthly_fixed:
+        if (
+            (weekly_salary is None or D(weekly_salary) <= 0)
+            and not is_piece_paid
+            and not is_monthly_fixed
+            and configured_hourly_rate
+            and D(configured_hourly_rate) > 0
+        ):
             weekly_salary = r2(D(hourly_rate) * D(8) * D(STANDARD_PAID_DAYS_PER_WEEK))
+        if weekly_salary is not None and D(weekly_salary) <= 0:
+            weekly_salary = None
         if not is_piece_paid and not is_monthly_fixed:
-            hourly_rate = float(
-                (D(weekly_salary) / D(STANDARD_PAID_DAYS_PER_WEEK) / D(8))
-                .quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
-            )
+            if weekly_salary is not None:
+                hourly_rate = float(
+                    (D(weekly_salary) / D(STANDARD_PAID_DAYS_PER_WEEK) / D(8))
+                    .quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+                )
+            else:
+                hourly_rate = 0
+        salary_rate_missing = (
+            is_monthly_fixed and (monthly_salary is None or D(monthly_salary) <= 0)
+        ) or (
+            not is_piece_paid and not is_monthly_fixed and weekly_salary is None
+        )
         rows = sorted(
             [record for record in attendance if record.get("employee_id") == employee["id"]],
             key=lambda record: record.get("date", ""),
@@ -8433,7 +8440,7 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
                 for item in employee_cuts
                 if (
                     item.get("start_date") == start_date and item.get("end_date") == end_date
-                    or is_monthly_fixed and (full_month_period or include_monthly_salaries)
+                    or (full_month_period or is_monthly_fixed and include_monthly_salaries)
                     and payroll_month_start.isoformat() <= item.get("end_date", "") <= payroll_month_end.isoformat()
                 )
             ),
@@ -8509,6 +8516,7 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
             "hourly_rate": hourly_rate, "weekly_salary": weekly_salary,
             "monthly_salary": monthly_salary,
             "pay_frequency": "piece" if is_piece_paid else ("monthly_fixed" if is_monthly_fixed else "weekly_fixed"),
+            "salary_rate_missing": salary_rate_missing,
             "is_full_month_period": full_month_period,
             "hours_per_week": hours_per_week, "work_days_per_week": work_days_per_week,
             "pay_type": "piece" if is_piece_paid else "hourly",
@@ -8527,7 +8535,12 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
             "balance_history": balance_history,
             "cut": cut, "net_salary": r2(gross - cut),
         })
-    return {"start_date": start_date, "end_date": end_date, "employees": result}
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "employees": result,
+        "unmatched_attendance_records": unmatched_attendance_records,
+    }
 
 
 async def salary_cost_for_period(start_date, end_date):
@@ -8564,6 +8577,13 @@ async def get_salaries(
     user=Depends(get_current_user),
 ):
     require_admin(user)
+    salary_period_dates(start_date, end_date)
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    if not is_full_calendar_month(start_date, end_date) and (
+        start.weekday() != 0 or end != start + timedelta(days=5)
+    ):
+        raise HTTPException(400, "Choose a complete calendar month or a Monday–Saturday week")
     return await salary_report(
         start_date, end_date,
         include_monthly_salaries=include_monthly_salaries,
@@ -8719,7 +8739,10 @@ async def add_salary_advance(body: SalaryAdvanceIn, user=Depends(get_current_use
     require_admin(user)
     if not await db.employees.find_one({"id": body.employee_id}):
         raise HTTPException(404, "Employee not found")
-    record = await insert("salary_advances", body.model_dump())
+    amount = r2(D(body.amount))
+    if amount <= 0:
+        raise HTTPException(422, "Borrowed amount must be at least one cent")
+    record = await insert("salary_advances", {**body.model_dump(), "amount": amount})
     await log_audit("salary_advance", record["id"], "created", user, after=record)
     return record
 
@@ -8750,6 +8773,7 @@ async def clear_salary_history(eid: str, user=Depends(get_current_user)):
 async def save_salary_cut(body: SalaryCutIn, user=Depends(get_current_user)):
     require_admin(user)
     salary_period_dates(body.start_date, body.end_date)
+    amount = r2(D(body.amount))
     report = await salary_report(body.start_date, body.end_date)
     employee = next((item for item in report["employees"] if item["employee_id"] == body.employee_id), None)
     if not employee:
@@ -8768,28 +8792,59 @@ async def save_salary_cut(body: SalaryCutIn, user=Depends(get_current_user)):
         "payroll_key": {"$in": payment_keys},
     }, {"_id": 0}):
         raise HTTPException(409, "A completed payroll payment is locked; later balance changes apply to a future payroll")
-    before = await db.salary_cuts.find_one({
-        "employee_id": body.employee_id, "start_date": body.start_date, "end_date": body.end_date,
-    }, {"_id": 0})
-    stored_cut_amount = body.amount
+    employee_cuts = await listall("salary_cuts", {
+        "employee_id": body.employee_id,
+        "voided": {"$ne": True},
+    })
+    if employee["pay_frequency"] == "monthly_fixed":
+        payroll_start = date.fromisoformat(body.start_date)
+        payroll_end = date.fromisoformat(body.end_date)
+        period_start = payroll_start.replace(day=1).isoformat()
+        period_end = payroll_end.replace(
+            day=calendar.monthrange(
+                payroll_end.year,
+                payroll_end.month,
+            )[1],
+        ).isoformat()
+        period_cuts = [
+            item for item in employee_cuts
+            if not item.get("voided") and period_start <= item.get("end_date", "") <= period_end
+        ]
+    else:
+        period_cuts = [
+            item for item in employee_cuts
+            if (
+                not item.get("voided")
+                and item.get("start_date") == body.start_date
+                and item.get("end_date") == body.end_date
+            )
+        ]
+    before = period_cuts[-1] if period_cuts else None
+    previous_cut_total = sum((D(item.get("amount", 0)) for item in period_cuts), Decimal("0"))
     available_balance = employee["available_balance"]
-    if body.amount > available_balance:
+    if amount > available_balance:
         raise HTTPException(400, f"Cut exceeds the outstanding balance of R {available_balance:.2f}")
-    if body.amount > employee["gross_salary"]:
+    if amount > employee["gross_salary"]:
         raise HTTPException(400, f"Cut exceeds this period's gross salary of R {employee['gross_salary']:.2f}")
-    if stored_cut_amount == 0:
-        if before:
-            await update_doc("salary_cuts", before["id"], {
+    amount_delta = r2(D(amount) - previous_cut_total)
+    if amount_delta == 0:
+        return {"ok": True, "amount": amount}
+    if amount_delta < 0:
+        for existing_cut in period_cuts:
+            await update_doc("salary_cuts", existing_cut["id"], {
                 "voided": True, "voided_at": now_iso(), "voided_by": user.get("id"),
             })
-            await log_audit("salary_cut", before["id"], "voided", user, before=before)
+            await log_audit("salary_cut", existing_cut["id"], "voided_for_manual_adjustment", user,
+                            before=existing_cut)
+        amount_delta = amount
+    if amount_delta == 0:
         return {"ok": True, "amount": 0}
     data = body.model_dump()
-    data["amount"] = stored_cut_amount
+    data["amount"] = amount_delta
     data["voided"] = False
     data["voided_at"] = None
     data["voided_by"] = None
-    record = await update_doc("salary_cuts", before["id"], data) if before else await insert("salary_cuts", data)
+    record = await insert("salary_cuts", data)
     await log_audit("salary_cut", record["id"], "saved", user, before=before, after=record)
     return record
 
