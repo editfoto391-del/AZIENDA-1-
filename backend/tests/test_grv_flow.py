@@ -128,6 +128,9 @@ class FakeDatabase:
             "stock_movements": FakeCollection(),
             "grvs": FakeCollection(),
             "buyings": FakeCollection(),
+            "company_inventory": FakeCollection(),
+            "chemical_inventory": FakeCollection(),
+            "raw_material_movements": FakeCollection(),
             "prices": FakeCollection(),
             "audit_log": FakeCollection(),
         }
@@ -310,6 +313,101 @@ def test_grv_reversal_batches_stock_history_reads_and_retries_interrupted_revers
         assert len(fake_db.stock_movements.documents) == 5
 
     asyncio.run(scenario())
+
+
+def test_permanent_grv_delete_reverses_full_stock_quantity_even_if_already_used(monkeypatch):
+    fake_db = FakeDatabase()
+    fake_db.grvs.documents.append({
+        "id": "grv-delete-stock",
+        "grv_number": "GRV-DELETE-STOCK",
+        "status": "completed",
+        "received_date": "2026-10-29",
+        "items": [{
+            "stock_id": "stock-1",
+            "product": "Simple",
+            "size": "910x100",
+            "accepted_quantity": 20,
+            "actual_received_quantity": 20,
+            "unit_cost": 10,
+        }],
+    })
+    fake_db.stock.documents[0]["opening"] = 0
+    fake_db.stock_movements.documents.extend([
+        {
+            "id": "receipt-20", "stock_id": "stock-1", "type": "purchase",
+            "direction": 1, "quantity": 20, "dedupe_key": "grv:grv-delete-stock:stock-1",
+            "unit_cost": 10, "historical_cost_status": "verified",
+            "batch_id": "receipt-20", "created_at": "2026-10-29T00:00:00+00:00",
+        },
+        {
+            "id": "used-15", "stock_id": "stock-1", "type": "invoice",
+            "direction": -1, "quantity": 15, "created_at": "2026-10-30T00:00:00+00:00",
+        },
+    ])
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    monkeypatch.setattr(server, "log_audit", _no_audit)
+    owner = {
+        "id": "owner", "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": "test-company",
+    }
+
+    asyncio.run(server.delete_grv(
+        "grv-delete-stock", server.GRVDeleteIn(), owner,
+    ))
+
+    assert not any(item["id"] == "grv-delete-stock" for item in fake_db.grvs.documents)
+    reversal = next(
+        movement for movement in fake_db.stock_movements.documents
+        if movement.get("reverses_grv") is True
+        and movement.get("grv_id") == "grv-delete-stock"
+    )
+    assert reversal["quantity"] == 20
+    assert reversal["direction"] == -1
+    stock = server.apply_stock_movements(
+        deepcopy(fake_db.stock.documents[0]), fake_db.stock_movements.documents,
+    )
+    assert stock["current"] == -15
+
+
+def test_raw_grv_delete_removes_full_company_inventory_quantity_even_if_used(monkeypatch):
+    fake_db = FakeDatabase()
+    line = {
+        "product": "Fabric",
+        "size": "",
+        "unit": "",
+        "category": "Other",
+        "container_type": "Barrel",
+        "accepted_quantity": 20,
+    }
+    key = server._raw_key(line)
+    fake_db.company_inventory.documents.append({
+        "id": "inventory-fabric",
+        "name": "Fabric",
+        "size": "",
+        "unit": "",
+        "category": "Other",
+        "loose_units": 5,
+    })
+    fake_db.raw_material_movements.documents.append({
+        "id": "raw-receipt",
+        "dedupe_key": f"grv-raw:in:raw-grv:{key}",
+        "grv_id": "raw-grv",
+        "collection": "company_inventory",
+        "target_id": "inventory-fabric",
+        "quantity": 20,
+        "direction": 1,
+    })
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+
+    asyncio.run(server._apply_raw_grv(
+        {"id": "raw-grv", "is_chemical": False, "items": [line]},
+        {"email": "owner@example.test"},
+        -1,
+        allow_negative=True,
+    ))
+
+    assert fake_db.company_inventory.documents[0]["loose_units"] == -15
+    assert fake_db.raw_material_movements.documents[-1]["direction"] == -1
 
 
 @pytest.mark.parametrize("lock_at", [None, "expired"])
@@ -681,6 +779,30 @@ def test_only_global_or_active_company_owner_can_delete_grv(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_deleting_buying_grv_clears_its_transfer_link(monkeypatch):
+    fake_db = FakeDatabase()
+    fake_db.grvs.documents.append({
+        "id": "buying-grv",
+        "grv_number": "GRV-BUYING",
+        "status": "draft",
+        "source_buying_id": "buying-1",
+    })
+    fake_db.buyings.documents.append({
+        "id": "buying-1",
+        "transferred_to_grv_id": "buying-grv",
+    })
+    monkeypatch.setattr(server, "db", fake_db)
+    monkeypatch.setattr(server, "log_audit", _no_audit)
+    owner = {
+        "id": "owner", "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": "test-company",
+    }
+
+    asyncio.run(server.delete_grv("buying-grv", server.GRVDeleteIn(), owner))
+
+    assert fake_db.buyings.documents[0] == {"id": "buying-1"}
+
+
 def test_company_owner_can_bulk_delete_eligible_grvs_and_receives_per_item_failures(monkeypatch):
     fake_db = FakeDatabase()
     fake_db.grvs.documents.extend([
@@ -705,16 +827,14 @@ def test_company_owner_can_bulk_delete_eligible_grvs_and_receives_per_item_failu
         assert result["deleted"] == [
             {"id": "draft-grv", "grv_number": "GRV-DRAFT"},
             {"id": "cancelled-grv", "grv_number": "GRV-CANCELLED"},
+            {"id": "confirmed-grv", "grv_number": "GRV-CONFIRMED"},
         ]
-        assert result["failed"] == [
-            {"id": "confirmed-grv", "message": "Reverse a confirmed GRV before deleting it"},
-            {"id": "missing-grv", "message": "GRV not found"},
-        ]
-        assert [grv["id"] for grv in fake_db.grvs.documents] == ["confirmed-grv"]
+        assert result["failed"] == [{"id": "missing-grv", "message": "GRV not found"}]
+        assert fake_db.grvs.documents == []
 
         with pytest.raises(HTTPException) as admin_denied:
             await server.bulk_delete_grvs(
-                server.GRVBulkDeleteIn(ids=["confirmed-grv"]),
+                server.GRVBulkDeleteIn(ids=["missing-grv"]),
                 {"_active_role": "admin", "_active_company_id": "test-company"},
             )
         assert admin_denied.value.status_code == 403

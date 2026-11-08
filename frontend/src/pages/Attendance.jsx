@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { today } from "@/lib/format";
 import { Card, Btn, Input, Select, Modal, PageHeader, Empty } from "@/components/common";
-import { Users, Plus, CheckCheck, Pencil, CalendarCheck, Wallet, Trash2 } from "lucide-react";
+import { Users, Plus, CheckCheck, Pencil, CalendarCheck, Wallet, Trash2, Download } from "lucide-react";
 import SalariesManagement from "@/pages/SalariesManagement";
 import { useAuth } from "@/context/AuthContext";
 
@@ -18,10 +18,9 @@ const DEPTS = [
   "SECURITY",
 ];
 
-const weekPeriod = (offset = 0) => {
-  const start = new Date(`${today()}T00:00:00Z`);
-  const daysSinceMonday = (start.getUTCDay() + 6) % 7;
-  start.setUTCDate(start.getUTCDate() - daysSinceMonday + offset * 7);
+const weekPeriodForDate = (value) => {
+  const start = new Date(`${value}T00:00:00Z`);
+  start.setUTCDate(start.getUTCDate() - ((start.getUTCDay() + 6) % 7));
   const end = new Date(start);
   end.setUTCDate(end.getUTCDate() + 5);
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
@@ -43,6 +42,7 @@ export default function Attendance() {
   const [busy, setBusy] = useState(false);
   const [rosterImporting, setRosterImporting] = useState(false);
   const [rosterResetting, setRosterResetting] = useState(false);
+  const [attendanceReportDownloading, setAttendanceReportDownloading] = useState(false);
   const [attendanceSaving, setAttendanceSaving] = useState({});
   const [section, setSection] = useState("attendance");
   const [overtimeDraft, setOvertimeDraft] = useState({});
@@ -306,12 +306,195 @@ export default function Attendance() {
     try { setDeletedEmployees(await api.get("/employees/deleted")); }
     catch (error) { toast.error(`Employee deleted, but deleted-employee archive could not be refreshed: ${apiError(error)}`); }
   };
+  const downloadWeeklyAttendanceReport = async () => {
+    if (attendanceReportDownloading) return;
+    setAttendanceReportDownloading(true);
+    try {
+      const { start, end } = weekPeriodForDate(date);
+      const days = Array.from({ length: 6 }, (_, index) => {
+        const day = new Date(`${start}T00:00:00Z`);
+        day.setUTCDate(day.getUTCDate() + index);
+        return day.toISOString().slice(0, 10);
+      });
+      const attendanceByDay = await Promise.all(
+        days.map((day) => api.get("/attendance", { date: day })),
+      );
+      const attendanceMap = new Map(
+        attendanceByDay.flat().map((record) => [`${record.employee_id}:${record.date}`, record]),
+      );
+      const reportRows = active.map((employee) => {
+        const recordsForEmployee = days.map((day) =>
+          attendanceMap.get(`${employee.id}:${day}`),
+        );
+        const fullDays = recordsForEmployee.filter((record) => record?.status === "Present").length;
+        const halfDays = recordsForEmployee.filter((record) => record?.status === "Half Day").length;
+        const hours = recordsForEmployee.reduce((sum, record) => {
+          if (!record?.start_time || !record?.end_time) return sum;
+          const [startHour, startMinute] = record.start_time.split(":").map(Number);
+          const [endHour, endMinute] = record.end_time.split(":").map(Number);
+          const duration = ((endHour * 60 + endMinute) - (startHour * 60 + startMinute)) / 60;
+          return sum + (Number.isFinite(duration) && duration > 0 ? duration : 0);
+        }, 0);
+        const overtime = recordsForEmployee.reduce(
+          (sum, record) => sum + Number(record?.overtime_hours || 0), 0,
+        );
+        return {
+          employee,
+          records: recordsForEmployee,
+          fullDays,
+          halfDays,
+          hours,
+          overtime,
+        };
+      });
+
+      const { jsPDF } = await import("jspdf");
+      const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 8;
+      const reportDate = (value, options = { day: "numeric", month: "short", year: "numeric" }) =>
+        new Intl.DateTimeFormat("en-ZA", { ...options, timeZone: "UTC" })
+          .format(new Date(`${value}T00:00:00Z`));
+      const periodLabel = `${reportDate(start)} – ${reportDate(end)}`;
+      const columns = [
+        { label: "Employee", width: 38, value: (row) => row.employee.name },
+        { label: "Department", width: 30, value: (row) => row.employee.department || "-" },
+        ...days.map((day, index) => ({
+          label: `${reportDate(day, { weekday: "short" })} ${reportDate(day, { day: "numeric", month: "short" })}`,
+          width: 21,
+          align: "center",
+          value: (row) => {
+            const record = row.records[index];
+            if (!record) return "-";
+            return ({
+              Present: "P",
+              "Half Day": "HD",
+              Absent: "A",
+              Leave: "L",
+              "Sick Leave": "SL",
+              "Annual Leave": "AL",
+            }[record.status] || "O");
+          },
+        })),
+        { label: "Full days", width: 14, align: "right", value: (row) => row.fullDays },
+        { label: "Half days", width: 14, align: "right", value: (row) => row.halfDays },
+        { label: "Hours worked", width: 19, align: "right", value: (row) => row.hours.toFixed(2) },
+        { label: "Overtime", width: 18, align: "right", value: (row) => row.overtime.toFixed(2) },
+      ];
+      const tableWidth = columns.reduce((sum, column) => sum + column.width, 0);
+      const xPositions = [];
+      let columnX = margin;
+      columns.forEach((column) => {
+        xPositions.push(columnX);
+        columnX += column.width;
+      });
+      const drawPage = (pageRows, pageIndex) => {
+        pdf.setTextColor(25, 55, 45);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(14);
+        pdf.text("WEEKLY ATTENDANCE", margin, 11);
+        pdf.setFontSize(8.5);
+        pdf.setFont("helvetica", "normal");
+        pdf.text(`Week: ${periodLabel}  ·  Monday to Saturday`, margin, 17);
+        pdf.text(`Page ${pageIndex + 1}`, pageWidth - margin, 17, { align: "right" });
+        pdf.setTextColor(75, 82, 78);
+        pdf.setFontSize(7.5);
+        pdf.text(
+          "Daily status: P Present   HD Half day   A Absent   L Leave   SL Sick leave   AL Annual leave   O Other   - Not marked",
+          margin,
+          23,
+          { maxWidth: pageWidth - margin * 2 },
+        );
+        pdf.text(
+          "Full days and half days are counted separately. Hours worked use saved start/end times; overtime hours are shown separately.",
+          margin,
+          28,
+          { maxWidth: pageWidth - margin * 2 },
+        );
+        let y = 36;
+        pdf.setFillColor(232, 239, 235);
+        pdf.rect(margin, y - 5, tableWidth, 9, "F");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(7.2);
+        pdf.setTextColor(50, 65, 58);
+        columns.forEach((column, index) => {
+          const rightAligned = column.align === "right";
+          const centerAligned = column.align === "center";
+          const x = xPositions[index] + (rightAligned ? column.width - 2 : centerAligned ? column.width / 2 : 2);
+          pdf.text(column.label, x, y, {
+            align: rightAligned ? "right" : centerAligned ? "center" : "left",
+          });
+        });
+        y += 9;
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(7.5);
+        pageRows.forEach((row, rowIndex) => {
+          if (rowIndex % 2 === 1) {
+            pdf.setFillColor(249, 250, 249);
+            pdf.rect(margin, y - 4.5, tableWidth, 8, "F");
+          }
+          pdf.setTextColor(45, 50, 48);
+          columns.forEach((column, index) => {
+            const rightAligned = column.align === "right";
+            const centerAligned = column.align === "center";
+            const x = xPositions[index] + (rightAligned ? column.width - 2 : centerAligned ? column.width / 2 : 2);
+            pdf.text(String(column.value(row)), x, y, {
+              align: rightAligned ? "right" : centerAligned ? "center" : "left",
+              maxWidth: column.width - 4,
+            });
+          });
+          y += 8;
+        });
+        return y;
+      };
+      const rowsPerPage = Math.max(1, Math.floor((pageHeight - 67) / 8));
+      const pages = [];
+      for (let index = 0; index < reportRows.length; index += rowsPerPage) {
+        pages.push(reportRows.slice(index, index + rowsPerPage));
+      }
+      if (!pages.length) pages.push([]);
+      pages.forEach((pageRows, index) => {
+        if (index > 0) pdf.addPage();
+        drawPage(pageRows, index);
+      });
+      const dayTotals = days.map((day, index) => {
+        const label = reportDate(day, { weekday: "short" });
+        const count = reportRows.filter((row) =>
+          ["Present", "Half Day"].includes(row.records[index]?.status),
+        ).length;
+        return `${label} ${count}`;
+      });
+      pdf.setFontSize(8);
+      pdf.setFont("helvetica", "bold");
+      pdf.setTextColor(90, 95, 92);
+      pdf.text(
+        "Employees present or half day by day:",
+        margin,
+        pageHeight - 12,
+      );
+      pdf.setFont("helvetica", "normal");
+      pdf.text(
+        dayTotals.join("   ·   "),
+        margin,
+        pageHeight - 7,
+      );
+      pdf.save(`weekly-attendance-${start}-to-${end}.pdf`);
+    } catch (error) {
+      toast.error(`Could not download weekly attendance report: ${apiError(error)}`);
+    } finally {
+      setAttendanceReportDownloading(false);
+    }
+  };
   const Stat = ({ l, v, cls, k }) => <Card className="p-4" data-testid={`att-${k}`}><p className="text-xs text-slate-400 uppercase font-semibold">{l}</p><p className={`text-2xl font-bold font-mono mt-1 ${cls}`}>{v}</p></Card>;
 
   return (
     <div className="space-y-6">
       <PageHeader title="Attendance" subtitle="Tap Present or Absent for each employee">
         {section === "attendance" && <>
+          <Btn variant="outline" disabled={attendanceReportDownloading || loading} onClick={downloadWeeklyAttendanceReport} data-testid="attendance-weekly-report">
+            <Download size={16} /> {attendanceReportDownloading ? "Preparing report..." : "Weekly Attendance Report"}
+          </Btn>
           <Btn variant="outline" onClick={() => setEmpModal({ name: "", department: "", active: true })} data-testid="add-employee-btn"><Plus size={16} /> Employee</Btn>
           {(user?.is_admin || user?.role === "admin" || user?.is_owner) && <>
             <Btn variant="outline" disabled={rosterImporting} onClick={importPayrollRoster} data-testid="import-payroll-roster-btn">{rosterImporting ? "Updating list…" : "Update employee list"}</Btn>

@@ -1,5 +1,5 @@
 import { NavLink, useNavigate, Outlet, useLocation } from "react-router-dom";
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import {
@@ -154,8 +154,12 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
   );
 }
 
-function AnimatedOutlet() {
+function AnimatedOutlet({ scrollContainerRef }) {
   const location = useLocation();
+  useLayoutEffect(() => {
+    scrollContainerRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [location.pathname, scrollContainerRef]);
+
   return <div key={location.pathname} className="app-page-enter"><Outlet /></div>;
 }
 
@@ -173,6 +177,7 @@ export default function Layout() {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [dismissingNotificationIds, setDismissingNotificationIds] = useState([]);
   const [dismissingAllNotifications, setDismissingAllNotifications] = useState(false);
+  const mainScrollRef = useRef(null);
   const nav = useNavigate();
   const dedicatedDomain = dedicatedCompanyDomain();
 
@@ -239,7 +244,7 @@ export default function Layout() {
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="flex h-dvh flex-col overflow-hidden bg-background print:h-auto print:overflow-visible">
       {/* Desktop sidebar */}
       <aside className="erp-sidebar no-print hidden lg:flex fixed inset-y-0 left-0 w-64 flex-col border-r border-white/10 bg-[hsl(222_47%_11%)] shadow-[4px_0_18px_rgba(15,23,42,0.08)] z-30">
         <svg className="erp-sidebar-decoration pointer-events-none absolute inset-x-0 bottom-0 h-56 w-full" viewBox="0 0 280 224" preserveAspectRatio="none" aria-hidden="true">
@@ -265,9 +270,9 @@ export default function Layout() {
         )}
       </AnimatePresence>
 
-      <div className="lg:pl-64 print:pl-0">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:pl-64 print:overflow-visible print:pl-0">
         {/* Topbar */}
-        <header className="mobile-topbar no-print liquid-glass-surface sticky top-0 z-20 flex h-16 items-center gap-2 border-b border-white/70 px-3 sm:gap-4 sm:px-6">
+        <header className="mobile-topbar no-print liquid-glass-surface sticky top-0 z-20 flex h-16 shrink-0 items-center gap-2 border-b border-white/70 px-3 sm:gap-4 sm:px-6">
           <motion.button whileHover={reduceMotion ? undefined : { scale: 1.04, rotate: 0.5 }} whileTap={reduceMotion ? undefined : { scale: 0.96 }} transition={{ type: "spring", stiffness: 440, damping: 24 }} className="lg:hidden rounded-full p-2 text-slate-600 hover:bg-white/40" onClick={() => setOpen(true)} aria-label="Open navigation" data-testid="menu-toggle">
             <Menu size={22} />
           </motion.button>
@@ -400,9 +405,9 @@ export default function Layout() {
           </div>
         </header>
 
-        <main className="min-w-0 p-3 sm:p-6 lg:p-8 max-w-[1500px] mx-auto">
+        <main ref={mainScrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain p-3 sm:p-6 lg:p-8 max-w-[1500px] mx-auto print:h-auto print:flex-none print:overflow-visible">
           <Suspense fallback={<div className="text-slate-400">Loading...</div>}>
-            <AnimatedOutlet />
+            <AnimatedOutlet scrollContainerRef={mainScrollRef} />
           </Suspense>
         </main>
       </div>

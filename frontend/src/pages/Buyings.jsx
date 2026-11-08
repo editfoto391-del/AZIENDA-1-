@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Link } from "react-router-dom";
-import { Building2, Pencil, Plus, Search, ShoppingCart, Trash2 } from "lucide-react";
+import { Building2, ClipboardCheck, Eye, Pencil, Plus, Search, ShoppingCart, Trash2 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtMoney, today } from "@/lib/format";
 import { useAuth } from "@/context/AuthContext";
@@ -14,6 +14,7 @@ const blankBuying = () => ({
   stock_id: "",
   size: "",
   item_type: "",
+  quantity_unit: "",
   source: "",
   supplier_id: "",
   quantity: "1",
@@ -33,26 +34,29 @@ export default function Buyings() {
   const [supervisorPassword, setSupervisorPassword] = useState("");
   const [authorizingEdit, setAuthorizingEdit] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [transferring, setTransferring] = useState(false);
 
   const load = () => {
+    return Promise.all([
     api.get("/buyings")
       .then(setBuyings)
       .catch((error) => {
         toast.error(apiError(error));
         setBuyings([]);
-      });
+      }),
     api.get("/suppliers")
       .then(setSuppliers)
       .catch((error) => {
         toast.error(apiError(error));
         setSuppliers([]);
-      });
+      }),
     api.get("/stock")
       .then(setStock)
       .catch((error) => {
         toast.error(apiError(error));
         setStock([]);
-      });
+      }),
+    ]);
   };
 
   useEffect(() => { load(); }, []);
@@ -68,11 +72,13 @@ export default function Buyings() {
   );
   const selectedStockProduct = stock?.find((item) => item.id === modal?.stock_id);
   const formatBuyingProduct = (buying) => [buying.product, buying.size].filter(Boolean).join(" ");
+  const untransferredBuyings = (buyings || []).filter((buying) => !buying.transferred_to_grv_id);
 
   const save = async () => {
     if (modal.product_mode === "stock" && (!modal.stock_id || !modal.size)) return toast.error("Select a stock product and size");
     if (modal.product_mode === "manual" && !modal.product.trim()) return toast.error("Product is required");
     if (!modal.item_type) return toast.error("Choose whether this is a selling product or raw material");
+    const quantityUnitValue = (modal.quantity_unit || quantityUnit(modal.product)).trim();
     if (!modal.supplier_id && !modal.source.trim()) return toast.error("Select a supplier or enter a source");
     if (!(Number(modal.quantity) > 0)) return toast.error("Quantity must be greater than 0");
     if (!(Number(modal.unit_price) > 0)) return toast.error("Unit price must be greater than 0");
@@ -84,9 +90,10 @@ export default function Buyings() {
         ...modal,
         product: modal.product_mode === "stock" ? selectedStockProduct?.product || modal.product : modal.product,
         stock_id: modal.product_mode === "stock" ? modal.stock_id : "",
-        size: modal.product_mode === "stock" ? modal.size : "",
+        size: modal.size || "",
         source: selectedSupplier?.name || modal.source,
         quantity: Number(modal.quantity),
+        quantity_unit: quantityUnitValue,
         unit_price: Number(modal.unit_price),
       };
       if (modal.id) await api.put(`/buyings/${modal.id}`, payload);
@@ -98,6 +105,35 @@ export default function Buyings() {
       toast.error(apiError(error));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const transferAllToGrv = async () => {
+    if (!user?.is_primary_owner) return toast.error("Only the Global Owner can transfer Buyings to GRV.");
+    const pending = untransferredBuyings;
+    if (!pending.length || transferring) return;
+    setTransferring(true);
+    try {
+      const results = [];
+      for (let offset = 0; offset < pending.length; offset += 250) {
+        const batch = pending.slice(offset, offset + 250);
+        results.push(await api.post("/buyings/transfer-to-grv", {
+          buying_ids: batch.map((buying) => buying.id),
+        }));
+      }
+      const transferred = results.reduce((sum, result) => sum + Number(result.transferred || 0), 0);
+      const failures = results.flatMap((result) => result.failed || []);
+      if (failures.length) {
+        const examples = failures.slice(0, 3).map((failure) => failure.error).join("; ");
+        toast.error(`${transferred} transferred and inventory updated; ${failures.length} could not be completed. ${examples}`);
+      } else {
+        toast.success(`${transferred} buyings transferred. Stock and Company Inventory have been updated.`);
+      }
+      await load();
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setTransferring(false);
     }
   };
 
@@ -160,6 +196,9 @@ export default function Buyings() {
   return (
     <div>
       <PageHeader title="Buyings" subtitle="Record items purchased and their costs">
+        {user?.is_primary_owner && <Btn variant="outline" onClick={transferAllToGrv} disabled={transferring || !untransferredBuyings.length} data-testid="transfer-buyings-to-grv">
+          <ClipboardCheck size={16} /> {transferring ? "Updating inventory..." : `Transfer & update inventory (${untransferredBuyings.length})`}
+        </Btn>}
         <Link to="/suppliers" className="inline-flex items-center gap-2 rounded-md border border-border bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-secondary" data-testid="buyings-suppliers-link"><Building2 size={16} /> Manage Suppliers</Link>
         <Btn onClick={() => setModal(blankBuying())} data-testid="add-buying-btn"><Plus size={16} /> Add Buying</Btn>
       </PageHeader>
@@ -193,6 +232,7 @@ export default function Buyings() {
                   <th className="px-4 py-3 text-right font-semibold">Quantity</th>
                   <th className="px-4 py-3 text-right font-semibold">Unit price</th>
                   <th className="px-4 py-3 text-right font-semibold">Total</th>
+                  <th className="px-4 py-3 font-semibold">GRV</th>
                   <th className="px-4 py-3 text-right font-semibold">Actions</th>
                 </tr>
               </thead>
@@ -211,6 +251,17 @@ export default function Buyings() {
                     </td>
                     <td className="px-4 py-3 text-right font-mono">{fmtMoney(buying.unit_price)}</td>
                     <td className="px-4 py-3 text-right font-mono font-semibold">{fmtMoney(buying.amount)}</td>
+                    <td className="px-4 py-3">
+                      {buying.transferred_to_grv_id
+                        ? <Link
+                          to={`/grv?id=${encodeURIComponent(buying.transferred_to_grv_id)}`}
+                          className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold text-primary hover:bg-secondary"
+                          aria-label={`View ${formatBuyingProduct(buying)} GRV`}
+                          data-testid={`view-buying-grv-${buying.id}`}
+                          title="View GRV"
+                        ><Eye size={14} /></Link>
+                        : <span className="text-xs text-slate-400">Not transferred</span>}
+                    </td>
                     <td className="px-4 py-3 text-right">
                       <button
                         type="button"
@@ -274,14 +325,23 @@ export default function Buyings() {
                 </Select>
               </div>
             ) : (
-              <Input
-                label="Product / item"
-                value={modal.product}
-                onChange={(event) => setModal({ ...modal, product: event.target.value })}
-                placeholder="Type the item name"
-                data-testid="buying-product"
-                required
-              />
+              <div className="space-y-3">
+                <Input
+                  label="Product / item"
+                  value={modal.product}
+                  onChange={(event) => setModal({ ...modal, product: event.target.value })}
+                  placeholder="Type the item name"
+                  data-testid="buying-product"
+                  required
+                />
+                <Input
+                  label="Size / specification"
+                  value={modal.size || ""}
+                  onChange={(event) => setModal({ ...modal, size: event.target.value })}
+                  placeholder="Enter size when applicable"
+                  data-testid="buying-size"
+                />
+              </div>
             )}
             <Select
               label="This is..."
@@ -294,6 +354,13 @@ export default function Buyings() {
               <option value="selling_product">Selling Product</option>
               <option value="raw_material">Raw Material</option>
             </Select>
+            {modal.item_type === "raw_material" && <Input
+              label="Unit of measure"
+              value={modal.quantity_unit || quantityUnit(modal.product)}
+              onChange={(event) => setModal({ ...modal, quantity_unit: event.target.value })}
+              placeholder="e.g. kg, L, rolls or pcs"
+              data-testid="buying-quantity-unit"
+            />}
             <Select
               label="Supplier"
               value={modal.supplier_id || ""}

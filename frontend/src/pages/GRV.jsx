@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { useSearchParams } from "react-router-dom";
 import {
-  Ban, Building2, ClipboardCheck, Clock3, Download, FileText, PackageCheck,
+  Ban, Building2, ClipboardCheck, Clock3, Download, Eye, FileText, PackageCheck,
   Pencil, Plus, RefreshCw, RotateCcw, ScanLine, ShieldAlert, Trash2,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
@@ -20,7 +21,10 @@ const STATUSES = [
   ["discrepancy", "Discrepancy"],
   ["cancelled", "Cancelled"],
 ];
-const DELETABLE_GRV_STATUSES = new Set(["draft", "pending_inspection", "cancelled"]);
+const DELETABLE_GRV_STATUSES = new Set([
+  "draft", "pending_inspection", "cancelled",
+  "completed", "partially_received", "discrepancy",
+]);
 const STATUS_STYLE = {
   draft: "bg-slate-100 text-slate-600 border-slate-200",
   pending_inspection: "bg-blue-50 text-blue-700 border-blue-200",
@@ -214,6 +218,7 @@ async function downloadGRVPdf(grv, companyName, settings = {}) {
 
 export default function GRV() {
   const { user } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const companyId = user?.company_id || "";
   const isSuperIQFoam = companyId === "superiqfoam";
   const salePriceFields = isSuperIQFoam
@@ -231,6 +236,7 @@ export default function GRV() {
   const [settings, setSettings] = useState({});
   const [filters, setFilters] = useState({ date_from: "", date_to: "", supplier_id: "", status: "" });
   const [draft, setDraft] = useState(null);
+  const [viewTarget, setViewTarget] = useState(null);
   const [scanReceivingMode, setScanReceivingMode] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -261,6 +267,13 @@ export default function GRV() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    const grvId = searchParams.get("id");
+    if (!grvId || !records) return;
+    const selected = records.find((grv) => grv.id === grvId);
+    if (selected) setViewTarget(selected);
+  }, [records, searchParams]);
 
   useEffect(() => {
     // Load each list independently so one failing request does not leave the suppliers empty.
@@ -428,6 +441,18 @@ export default function GRV() {
     }
   };
 
+  const refreshInventoryAfterGRVChange = async () => {
+    const [stockResult, inventoryResult] = await Promise.allSettled([
+      api.getUncached("/stock"),
+      api.getUncached("/company-inventory"),
+    ]);
+    if (stockResult.status === "fulfilled") setStock(stockResult.value || []);
+    else toast.error(`Stock changed, but the stock list could not be refreshed: ${apiError(stockResult.reason)}`);
+    if (inventoryResult.status === "rejected") {
+      toast.error(`Inventory changed, but the Company Inventory list could not be refreshed: ${apiError(inventoryResult.reason)}`);
+    }
+  };
+
   const deleteGRV = async (event) => {
     event.preventDefault();
     if (!deleteTarget || deleteBusy) return;
@@ -439,6 +464,7 @@ export default function GRV() {
       setSelectedGRVIds((current) => current.filter((id) => id !== deleted.id));
       toast.success(`${deleteTarget.grv_number} deleted`);
       setDeleteTarget(null);
+      await refreshInventoryAfterGRVChange();
       const query = {
         ...Object.fromEntries(Object.entries(filters).filter(([, value]) => value)),
         company_profile_id: companyId,
@@ -455,7 +481,7 @@ export default function GRV() {
 
   const deleteSelectedGRVs = async () => {
     if (!selectedGRVIds.length || deleteBusy) return;
-    if (!window.confirm(`Permanently delete ${selectedGRVIds.length} selected GRV(s)? Confirmed GRVs must be reversed first.`)) return;
+    if (!window.confirm(`Permanently delete ${selectedGRVIds.length} selected GRV(s)? Any accepted quantities will first be removed from Stock or Company Inventory.`)) return;
     setDeleteBusy(true);
     try {
       const result = await api.post("/grvs/bulk-delete", { ids: selectedGRVIds });
@@ -464,6 +490,7 @@ export default function GRV() {
       setSelectedGRVIds([]);
       if (deletedIds.size) {
         toast.success(`${deletedIds.size} GRV${deletedIds.size === 1 ? "" : "s"} deleted`);
+        await refreshInventoryAfterGRVChange();
       }
       if (result.failed?.length) {
         toast.error(`${result.failed.length} GRV(s) not deleted: ${result.failed.map((item) => `${item.id}: ${item.message}`).join("; ")}`);
@@ -481,9 +508,6 @@ export default function GRV() {
       setDeleteBusy(false);
     }
   };
-
-  const deleteRequiresReversal = deleteTarget
-    && !["draft", "pending_inspection", "cancelled"].includes(deleteTarget.status);
 
   const saveDraft = async (event) => {
     event.preventDefault();
@@ -576,6 +600,15 @@ export default function GRV() {
     }
   };
 
+  const closeGRVView = () => {
+    setViewTarget(null);
+    if (searchParams.has("id")) {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete("id");
+      setSearchParams(nextParams, { replace: true });
+    }
+  };
+
   const metricCards = [
     ["Total GRVs", dashboard?.total_grvs, FileText, "text-slate-900"],
     ["Pending GRVs", dashboard?.pending_grvs, Clock3, "text-blue-700"],
@@ -658,7 +691,7 @@ export default function GRV() {
               disabled={deleteBusy}
               data-testid="grv-bulk-delete"
             >
-              <Trash2 size={15} /> {deleteBusy ? "Deleting..." : `Delete selected (${selectedGRVIds.length})`}
+              <Trash2 size={15} /> {deleteBusy ? "Deleting..." : `Delete selected permanently (${selectedGRVIds.length})`}
             </Btn>}
             <span className="text-xs text-slate-500">{records?.length ?? 0} records</span>
           </div>
@@ -716,12 +749,13 @@ export default function GRV() {
                     <td className="px-4 py-3"><Badge cls={STATUS_STYLE[grv.status] || STATUS_STYLE.draft}>{statusLabel(grv.status)}</Badge></td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex flex-wrap justify-end gap-1">
+                        <button type="button" onClick={() => setViewTarget(grv)} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="View GRV" aria-label={`View ${grv.grv_number}`} data-testid={`grv-view-${grv.id}`}><Eye size={16} /></button>
                         <button type="button" onClick={() => exportPdf(grv)} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="Download GRV PDF" aria-label={`Download PDF ${grv.grv_number}`} data-testid={`grv-pdf-${grv.id}`}><Download size={16} /></button>
                         {grv.status === "draft" && <button type="button" onClick={() => { setScanReceivingMode(false); setStockSearchByLine({}); setDraft({ ...grv, received_by: grv.received_by || "" }); }} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="Edit draft" aria-label={`Edit ${grv.grv_number}`} data-testid={`grv-edit-${grv.id}`}><Pencil size={15} /></button>}
                         {grv.status === "draft" && <button type="button" onClick={() => act(grv, "inspect")} disabled={busy} className="rounded px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50" data-testid={`grv-inspect-${grv.id}`}>Inspect</button>}
                         {["draft", "pending_inspection", "confirming"].includes(grv.status) && <button type="button" onClick={() => act(grv, "confirm", `Confirm ${grv.grv_number}? Accepted quantities will be posted to Stock once.`)} disabled={busy} className="rounded px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50" data-testid={`grv-confirm-${grv.id}`}>{busy ? "Working..." : grv.status === "confirming" ? "Retry confirm" : "Confirm"}</button>}
                         {["draft", "pending_inspection"].includes(grv.status) && <button type="button" onClick={() => act(grv, "cancel")} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Cancel draft" data-testid={`grv-cancel-${grv.id}`}><Ban size={15} /></button>}
-                        {canDeleteGRVs && DELETABLE_GRV_STATUSES.has(grv.status) && <button type="button" onClick={() => setDeleteTarget(grv)} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Delete GRV" aria-label={`Delete ${grv.grv_number}`} data-testid={`grv-delete-${grv.id}`}><Trash2 size={15} /></button>}
+                        {canDeleteGRVs && DELETABLE_GRV_STATUSES.has(grv.status) && <button type="button" onClick={() => setDeleteTarget(grv)} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Permanently delete GRV" aria-label={`Permanently delete ${grv.grv_number}`} data-testid={`grv-delete-${grv.id}`}><Trash2 size={15} /></button>}
                         {confirmed && (user?.is_admin || user?.is_owner) && <button type="button" onClick={() => act(grv, "reverse", `${grv.status === "reversing" ? "Retry" : "Reverse"} ${grv.grv_number}? This adds traceable stock reversals and reopens its PO quantities when possible.`)} disabled={busy} className="rounded p-1.5 text-red-700 hover:bg-red-50 disabled:opacity-50" title={grv.status === "reversing" ? "Retry GRV reversal" : "Reverse confirmed GRV"} data-testid={`grv-reverse-${grv.id}`}><RotateCcw size={15} /></button>}
                       </div>
                     </td>
@@ -936,16 +970,55 @@ export default function GRV() {
         </form>}
       </Modal>
 
-      <Modal open={!!deleteTarget} onClose={() => !deleteBusy && setDeleteTarget(null)} title="Delete GRV">
+      <Modal open={!!viewTarget} onClose={closeGRVView} title={viewTarget ? `GRV ${viewTarget.grv_number}` : "GRV details"}>
+        {viewTarget && <div className="max-h-[70vh] space-y-4 overflow-y-auto">
+          <div className="grid gap-3 text-sm sm:grid-cols-2">
+            <p><span className="font-semibold">Supplier:</span> {viewTarget.supplier_name || "-"}</p>
+            <p><span className="font-semibold">Received:</span> {fmtDate(viewTarget.received_date)}</p>
+            <p><span className="font-semibold">Status:</span> {statusLabel(viewTarget.status)}</p>
+            <p><span className="font-semibold">Type:</span> {viewTarget.purpose === "raw_material" ? "Company Inventory" : "Selling / Stock"}</p>
+          </div>
+          <div className="overflow-x-auto rounded border border-border">
+            <table className="w-full min-w-[560px] text-sm">
+              <thead><tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500">
+                <th className="px-3 py-2">Product / size</th>
+                <th className="px-3 py-2 text-right">Received</th>
+                <th className="px-3 py-2 text-right">Accepted</th>
+                <th className="px-3 py-2 text-right">Unit cost</th>
+                <th className="px-3 py-2 text-right">Value</th>
+              </tr></thead>
+              <tbody>{(viewTarget.items || []).map((line, index) => (
+                <tr key={`${line.product}-${line.size}-${index}`} className="border-b border-border/60">
+                  <td className="px-3 py-2">{[line.product, line.size].filter(Boolean).join(" ") || "-"}</td>
+                  <td className="px-3 py-2 text-right font-mono">{line.actual_received_quantity ?? 0}</td>
+                  <td className="px-3 py-2 text-right font-mono">{line.accepted_quantity ?? 0}</td>
+                  <td className="px-3 py-2 text-right font-mono">{fmtMoney(line.unit_cost ?? 0)}</td>
+                  <td className="px-3 py-2 text-right font-mono">{fmtMoney(line.total_value ?? lineValue(line))}</td>
+                </tr>
+              ))}</tbody>
+              <tfoot><tr className="font-semibold">
+                <td colSpan={4} className="px-3 py-2 text-right">Total accepted value</td>
+                <td className="px-3 py-2 text-right font-mono">{fmtMoney((viewTarget.items || []).reduce((sum, line) => sum + Number(line.total_value ?? lineValue(line)), 0))}</td>
+              </tr></tfoot>
+            </table>
+          </div>
+          {viewTarget.notes && <p className="whitespace-pre-wrap text-sm text-slate-600">{viewTarget.notes}</p>}
+          <div className="flex justify-end gap-2">
+            <Btn variant="outline" onClick={() => exportPdf(viewTarget)}><Download size={15} /> PDF</Btn>
+            <Btn onClick={closeGRVView}>Close</Btn>
+          </div>
+        </div>}
+      </Modal>
+
+      <Modal open={!!deleteTarget} onClose={() => !deleteBusy && setDeleteTarget(null)} title="Permanently delete GRV">
         {deleteTarget && <form onSubmit={deleteGRV} className="space-y-4">
           <p className="text-sm text-slate-700">
-            Permanently delete <span className="font-semibold">{deleteTarget.grv_number}</span>? This cannot be undone.
-            {deleteRequiresReversal && " This GRV has affected stock. Use Reverse first, then delete it to preserve the stock history."}
+            Permanently delete <span className="font-semibold">{deleteTarget.grv_number}</span>? Any received quantities will first be removed from Stock or Company Inventory. The product records remain, and the stock history records the removal.
           </p>
           <div className="flex justify-end gap-2">
             <Btn type="button" variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleteBusy}>Cancel</Btn>
-            <Btn type="submit" variant="danger" disabled={deleteBusy || deleteRequiresReversal} data-testid="grv-delete-confirm">
-              {deleteBusy ? "Deleting..." : "Delete GRV"}
+            <Btn type="submit" variant="danger" disabled={deleteBusy} data-testid="grv-delete-confirm">
+              {deleteBusy ? "Deleting..." : "Delete permanently"}
             </Btn>
           </div>
         </form>}

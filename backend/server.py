@@ -11012,6 +11012,7 @@ class BuyingIn(BaseModel):
     size: Optional[str] = ""
     item_type: str = "raw_material"
     quantity: float
+    quantity_unit: Optional[str] = ""
     unit_price: float
     date: str = Field(default_factory=today_str)
     notes: Optional[str] = ""
@@ -11045,7 +11046,10 @@ async def _check_buying(body):
     return source, product, size
 
 def set_buying_quantity_unit(data):
-    data["quantity_unit"] = "L" if data["product"].strip().casefold() == "chemical" else ""
+    data["quantity_unit"] = (
+        (data.get("quantity_unit") or "").strip()
+        or ("L" if data["product"].strip().casefold() == "chemical" else "")
+    )
 
 def buying_amount(quantity, unit_price):
     amount = r2(D(quantity) * D(unit_price))
@@ -11150,6 +11154,226 @@ async def void_buying(bid: str, body: ReasonIn, user=Depends(get_current_user)):
     await log_audit("buying", bid, "voided", user, reason=body.reason)
     await emit_workflow_event("buying.voided", rec)
     return rec
+
+
+class BuyingGRVTransferIn(BaseModel):
+    buying_ids: List[str] = Field(min_length=1, max_length=250)
+
+
+async def _buying_grv_source(buying):
+    supplier_id = (buying.get("supplier_id") or "").strip()
+    supplier_name = (buying.get("source") or "").strip()
+    if supplier_id:
+        supplier = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+        if supplier:
+            supplier_name = supplier.get("name") or supplier_name
+        else:
+            supplier_id = ""
+    return supplier_id, supplier_name
+
+
+async def _buying_grv_line(buying):
+    product = (buying.get("product") or "").strip()
+    size = (buying.get("size") or "").strip()
+    try:
+        quantity = float(buying.get("quantity") or 0)
+        unit_cost = float(buying.get("unit_price") or 0)
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(400, "The purchase quantity and unit cost must be numeric")
+    if not product or quantity <= 0 or unit_cost < 0:
+        raise HTTPException(400, "The purchase is missing a product, quantity, or valid unit cost")
+    if not math.isfinite(quantity) or not math.isfinite(unit_cost):
+        raise HTTPException(400, "The purchase quantity and unit cost must be finite")
+
+    common = {
+        "product": product,
+        "size": size,
+        "actual_received_quantity": quantity,
+        "accepted_quantity": quantity,
+        "rejected_quantity": 0,
+        "damaged_quantity": 0,
+        "unit_cost": unit_cost,
+    }
+    if buying.get("item_type") == "selling_product":
+        stock = None
+        stock_id = (buying.get("stock_id") or "").strip()
+        if stock_id:
+            stock = await db.stock.find_one({"id": stock_id}, {"_id": 0})
+            if not stock:
+                raise HTTPException(409, f"The linked stock item for {product} is no longer available")
+        else:
+            stock_size = size
+            matches = await listall("stock", {
+                "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+                "size": {"$regex": f"^{re.escape(stock_size)}$", "$options": "i"},
+            })
+            if len(matches) == 1:
+                stock = matches[0]
+            elif len(matches) > 1:
+                stock = sorted(matches, key=lambda item: str(item.get("id", "")))[0]
+        if stock:
+            return {
+                **common,
+                "stock_id": stock["id"],
+                "product": stock["product"],
+                "size": stock.get("size", ""),
+                "product_code": stock.get("code") or stock.get("product_id") or stock["id"],
+                "new_product": False,
+            }, False, ""
+        return {
+            **common,
+            "stock_id": "",
+            "product_code": "",
+            "new_product": True,
+        }, False, ""
+
+    if buying.get("item_type") != "raw_material":
+        raise HTTPException(400, "The purchase type must be Selling Product or Raw Material")
+
+    unit = (buying.get("quantity_unit") or "").strip()
+    category = "Other"
+    matches = await listall("company_inventory", {
+        "name": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+        "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
+        "unit": {"$regex": f"^{re.escape(unit)}$", "$options": "i"},
+    })
+    if len(matches) > 1:
+        matches = sorted(matches, key=lambda item: str(item.get("id", "")))
+    if len(matches) == 1:
+        unit = unit or (matches[0].get("unit") or "").strip()
+        category = (matches[0].get("category") or "Other").strip()
+    is_chemical = False
+    has_chemical_dimensions = bool(unit and size)
+    if product.casefold() == "chemical" and has_chemical_dimensions:
+        try:
+            is_chemical = float(size) > 0
+        except (TypeError, ValueError):
+            is_chemical = False
+    if not is_chemical and has_chemical_dimensions:
+        chemical_matches = await listall("chemical_inventory", {
+            "chemical": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+            "unit": {"$regex": f"^{re.escape(unit)}$", "$options": "i"},
+        })
+        if size:
+            chemical_matches = [
+                item for item in chemical_matches
+                if str(item.get("capacity", "")) == size
+            ]
+        is_chemical = len(chemical_matches) == 1
+
+    return {
+        **common,
+        "unit": unit,
+        "category": category,
+        "container_type": "Barrel",
+    }, is_chemical, unit
+
+
+async def _create_grv_from_buying(buying, user):
+    existing = await db.grvs.find_one({"source_buying_id": buying["id"]}, {"_id": 0})
+    if existing:
+        await update_doc("buyings", buying["id"], {"transferred_to_grv_id": existing["id"]})
+        return await _confirm_buying_grv(existing, user), False
+    if buying.get("transferred_to_grv_id"):
+        raise HTTPException(409, "This buying is linked to a GRV that is no longer available")
+
+    supplier_id, supplier_name = await _buying_grv_source(buying)
+    line, is_chemical, _unit = await _buying_grv_line(buying)
+    purpose = "selling" if buying.get("item_type") == "selling_product" else "raw_material"
+    if purpose == "raw_material":
+        items = _raw_grv_items(
+            [line], is_chemical,
+            allow_missing_unit=True,
+            allow_missing_chemical_size=True,
+        )
+    else:
+        items = await _grv_items_from_request(
+            [line], allow_blank_new_product_size=True,
+        )
+    received_date = buying.get("date") or today_str()
+    _validate_grv_date(received_date)
+    reference = await next_ref("grv", "GRV")
+    notes = f"Transferred from Buying {buying['id']}."
+    if (buying.get("notes") or "").strip():
+        notes += f" Original notes: {buying['notes'].strip()}"
+    record = {
+        "grv_number": reference,
+        "supplier_id": supplier_id,
+        "supplier_name": supplier_name,
+        "purchase_order_id": "",
+        "purchase_order_reference": "",
+        "delivery_note_number": "",
+        "received_date": received_date,
+        "received_by": (user.get("name") or user["email"]).strip(),
+        "warehouse": "",
+        "notes": notes,
+        "items": items,
+        "purpose": purpose,
+        "is_chemical": is_chemical if purpose == "raw_material" else False,
+        "status": "draft",
+        "created_by": user["email"],
+        "edited_by": user["email"],
+        "source_buying_id": buying["id"],
+        "audit": [{"action": "created_from_buying", "by": user["email"], "at": now_iso()}],
+    }
+    try:
+        created = await insert("grvs", record)
+    except DuplicateKeyError:
+        created = await db.grvs.find_one({"source_buying_id": buying["id"]}, {"_id": 0})
+        if not created:
+            raise
+        await update_doc("buyings", buying["id"], {"transferred_to_grv_id": created["id"]})
+        return await _confirm_buying_grv(created, user), False
+
+    await update_doc("buyings", buying["id"], {"transferred_to_grv_id": created["id"]})
+    await log_audit("grv", created["id"], "created_from_buying", user, after=created)
+    await emit_workflow_event("grv.created", {
+        **created, "item_count": len(created.get("items", [])),
+    })
+    await log_audit("buying", buying["id"], "transferred_to_grv", user,
+                    before=buying, after={**buying, "transferred_to_grv_id": created["id"]})
+    return await _confirm_buying_grv(created, user), True
+
+
+async def _confirm_buying_grv(grv, user):
+    if grv.get("status") in ("draft", "pending_inspection", "confirming"):
+        return await confirm_grv(grv["id"], user)
+    return grv
+
+
+@api.post("/buyings/transfer-to-grv")
+async def transfer_buyings_to_grv(body: BuyingGRVTransferIn, user=Depends(get_current_user)):
+    require_global_owner(user)
+    ids = list(dict.fromkeys(body.buying_ids))
+    if len(ids) != len(body.buying_ids):
+        raise HTTPException(400, "Each buying can be selected only once")
+
+    results = []
+    for buying_id in ids:
+        buying = await db.buyings.find_one({
+            "id": buying_id,
+            "voided": {"$ne": True},
+            "archived": {"$ne": True},
+        }, {"_id": 0})
+        if not buying:
+            results.append({"buying_id": buying_id, "error": "Buying not found or no longer active"})
+            continue
+        try:
+            grv, created = await _create_grv_from_buying(buying, user)
+            results.append({
+                "buying_id": buying_id,
+                "grv_id": grv["id"],
+                "grv_number": grv["grv_number"],
+                "created": created,
+            })
+        except HTTPException as error:
+            results.append({"buying_id": buying_id, "error": str(error.detail)})
+    return {
+        "transferred": sum(bool(item.get("grv_id")) for item in results),
+        "created": sum(bool(item.get("created")) for item in results),
+        "failed": [item for item in results if item.get("error")],
+        "items": results,
+    }
 
 # ---------------- Suppliers and purchase orders ----------------
 class SupplierIn(BaseModel):
@@ -11660,7 +11884,7 @@ def _grv_purpose(body):
         raise HTTPException(400, "GRV type must be selling or raw_material")
     return purpose
 
-def _grv_sale_price_updates(items, user):
+def _grv_sale_price_updates(items, user, *, require_new_product_prices=True):
     company_id = active_company_id.get() or user.get("_active_company_id") or DEFAULT_COMPANY_ID
     is_superiqfoam = company_id == DEFAULT_COMPANY_ID
     updates = {}
@@ -11672,7 +11896,11 @@ def _grv_sale_price_updates(items, user):
         zone_prices = [(1, line.get("sale_price_zone_1"))]
         if is_superiqfoam:
             zone_prices.append((2, line.get("sale_price_zone_2")))
-        if line.get("new_product") and any(value is None for _, value in zone_prices):
+        if (
+            require_new_product_prices
+            and line.get("new_product")
+            and any(value is None for _, value in zone_prices)
+        ):
             raise HTTPException(400, "Enter a sale price for every zone before adding a new product")
 
         for zone, sale_price in zone_prices:
@@ -11734,7 +11962,10 @@ async def _apply_grv_sale_prices(price_updates, user, grv):
             )
             prices.append(created)
 
-def _raw_grv_items(requested_items, is_chemical):
+def _raw_grv_items(
+    requested_items, is_chemical, *, allow_missing_unit=False,
+    allow_missing_chemical_size=False,
+):
     if not requested_items:
         raise HTTPException(400, "Add at least one product to the GRV")
     to_chemicals = _raw_goes_to_chemicals(is_chemical)
@@ -11745,10 +11976,10 @@ def _raw_grv_items(requested_items, is_chemical):
         unit = (data.get("unit") or "").strip()
         if not name:
             raise HTTPException(400, "Enter the name of every raw material")
-        if not unit:
+        if not unit and not allow_missing_unit:
             raise HTTPException(400, f"Enter the unit for {name}")
         size = (data.get("size") or "").strip()
-        if to_chemicals:
+        if to_chemicals and not (allow_missing_chemical_size and not size):
             try:
                 capacity = float(size)
             except ValueError:
@@ -11817,7 +12048,7 @@ async def _raw_inventory_target(line, is_chemical, create=False):
     })
     return "company_inventory", created
 
-async def _apply_raw_grv(grv, user, direction):
+async def _apply_raw_grv(grv, user, direction, *, allow_negative=False):
     """Post (direction=1) or reverse (direction=-1) accepted raw-material quantities; idempotent per GRV line group."""
     is_chemical = bool(grv.get("is_chemical"))
     grouped = {}
@@ -11847,12 +12078,19 @@ async def _apply_raw_grv(grv, user, direction):
             target = await getattr(db, collection).find_one({"id": target_id}, {"_id": 0})
             if not target:
                 raise HTTPException(409, f"Inventory item no longer exists: {entry['line']['product']}")
-        field = "count" if collection == "chemical_inventory" else "loose_units"
+        if collection == "chemical_inventory":
+            field = "count"
+        elif target.get("daily_remaining_quantity") is not None:
+            field = "daily_remaining_quantity"
+        else:
+            field = "loose_units"
         current = float(target.get(field, 0))
         new_value = round(current + direction * entry["quantity"], 4)
-        if new_value < -1e-9:
+        if new_value < -1e-9 and not allow_negative:
             raise HTTPException(409, f"Cannot reverse {entry['line']['product']}: only {current:g} remain in inventory")
-        await update_doc(collection, target_id, {field: max(new_value, 0)})
+        await update_doc(collection, target_id, {
+            field: new_value if allow_negative else max(new_value, 0),
+        })
         await insert("raw_material_movements", {
             "dedupe_key": dedupe, "grv_id": grv["id"], "grv_number": grv.get("grv_number", ""),
             "collection": collection, "target_id": target_id, "quantity": entry["quantity"],
@@ -11861,7 +12099,9 @@ async def _apply_raw_grv(grv, user, direction):
         posted.append({"collection": collection, "target_id": target_id, "quantity": entry["quantity"]})
     return posted
 
-async def _grv_items_from_request(requested_items, purchase_order=None):
+async def _grv_items_from_request(
+    requested_items, purchase_order=None, *, allow_blank_new_product_size=False,
+):
     if purchase_order and not requested_items:
         requested_items = [
             GRVLineIn(
@@ -11904,7 +12144,9 @@ async def _grv_items_from_request(requested_items, purchase_order=None):
             size = (data.get("size") or "").strip()
             stock_id = (data.get("stock_id") or "").strip()
             stock = None
-            if is_new_product and (not product or not size):
+            if is_new_product and (
+                not product or (not size and not allow_blank_new_product_size)
+            ):
                 raise HTTPException(400, "Enter a category/product name and size for every new product")
             if is_new_product:
                 new_product_key = (product.casefold(), canonical_price_size(size).casefold())
@@ -11978,7 +12220,7 @@ async def _materialize_grv_new_products(grv, user):
             continue
         product = (line.get("product") or "").strip()
         size = (line.get("size") or "").strip()
-        if not product or not size:
+        if not product or (not size and not grv.get("source_buying_id")):
             raise HTTPException(400, "Enter a category/product name and size for every new product")
         existing = await db.stock.find_one(
             {"created_from_grv_id": grv["id"], "created_from_grv_line": index},
@@ -12261,7 +12503,11 @@ async def confirm_grv(grv_id: str, user=Depends(get_current_user)):
             raise HTTPException(400, str(error))
         price_check_items.append({**line, **calculated})
     price_updates = (
-        _grv_sale_price_updates(price_check_items, user)
+        _grv_sale_price_updates(
+            price_check_items,
+            user,
+            require_new_product_prices=not bool(grv.get("source_buying_id")),
+        )
         if grv.get("purpose") != "raw_material" else []
     )
     if price_updates:
@@ -12499,9 +12745,9 @@ async def cancel_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user)
     })
     return before
 
-@api.post("/grvs/{grv_id}/reverse")
-async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user)):
-    require_admin(user)
+async def _reverse_grv(grv_id: str, body: ReasonIn, user, *, allow_negative=False):
+    if not allow_negative:
+        require_admin(user)
     reason = body.reason.strip()
     if not reason:
         raise HTTPException(400, "A reason is required to reverse a confirmed GRV")
@@ -12527,7 +12773,7 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
             raise HTTPException(409, "GRV reversal is already in progress")
 
     if grv.get("purpose") == "raw_material":
-        await _apply_raw_grv(grv, user, -1)
+        await _apply_raw_grv(grv, user, -1, allow_negative=allow_negative)
         updated = await update_doc("grvs", grv_id, {
             "status": "cancelled", "reversed_by": user["email"], "reversed_at": now_iso(),
             "reversal_reason": reason, "reversal_movement_ids": [], "edited_by": user["email"],
@@ -12571,7 +12817,7 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
             movement = movements_by_key.get(key)
             if not movement:
                 current = r2(D(stock.get("opening", 0)) + stock_deltas[item["stock_id"]])
-                if D(item["quantity"]) > D(current):
+                if D(item["quantity"]) > D(current) and not allow_negative:
                     raise HTTPException(
                         409,
                         f"Cannot reverse {item['product']} {item['size']}: only {current} remain in stock",
@@ -12669,6 +12915,12 @@ async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user
     })
     return updated
 
+
+@api.post("/grvs/{grv_id}/reverse")
+async def reverse_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user)):
+    return await _reverse_grv(grv_id, body, user)
+
+
 def require_grv_delete_owner(user):
     company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
     is_company_owner = (
@@ -12686,16 +12938,41 @@ async def _delete_grv_record(grv_id, user):
     grv = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
     if not grv:
         raise HTTPException(404, "GRV not found")
+    if grv.get("status") in ("completed", "partially_received", "discrepancy", "reversing"):
+        await _reverse_grv(
+            grv_id,
+            ReasonIn(reason="GRV permanently deleted by an authorized owner"),
+            user,
+            allow_negative=True,
+        )
+        grv = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
     if grv.get("status") not in ("draft", "pending_inspection", "cancelled"):
-        raise HTTPException(409, "Reverse a confirmed GRV before deleting it")
+        raise HTTPException(409, "GRV is being confirmed or cannot be safely deleted")
 
-    await log_audit("grv", grv_id, "deleted", user, before=grv)
     result = await db.grvs.delete_one({
         "id": grv_id,
         "status": {"$in": ["draft", "pending_inspection", "cancelled"]},
     })
     if result.deleted_count != 1:
         raise HTTPException(409, "GRV changed before it could be deleted")
+    source_buying_id = grv.get("source_buying_id")
+    if source_buying_id:
+        buying = await db.buyings.find_one({
+            "id": source_buying_id,
+            "transferred_to_grv_id": grv_id,
+        }, {"_id": 0})
+        if buying:
+            await db.buyings.update_one(
+                {"id": source_buying_id, "transferred_to_grv_id": grv_id},
+                {"$unset": {"transferred_to_grv_id": ""}},
+            )
+            after = dict(buying)
+            after.pop("transferred_to_grv_id", None)
+            await log_audit(
+                "buying", source_buying_id, "linked_grv_deleted", user,
+                before=buying, after=after,
+            )
+    await log_audit("grv", grv_id, "deleted", user, before=grv)
     return grv
 
 
@@ -16055,6 +16332,11 @@ async def ensure_performance_indexes(database):
                 IndexModel([("company_id", 1), ("id", 1)]),
                 *(
                     [IndexModel([("company_id", 1), ("grv_number", 1)], unique=True)]
+                    if collection_name == "grvs" else []
+                ),
+                *(
+                    [IndexModel([("source_buying_id", 1)], unique=True, sparse=True,
+                                name="grv_source_buying_once")]
                     if collection_name == "grvs" else []
                 ),
                 *(

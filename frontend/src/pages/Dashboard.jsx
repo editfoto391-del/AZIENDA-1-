@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
-import { fmtMoney, fmtDate, today, STATUS_META } from "@/lib/format";
+import { fmtMoney, fmtDate, today } from "@/lib/format";
 import { Btn, Card, Badge, Input, Modal, Select } from "@/components/common";
 import { useAuth } from "@/context/AuthContext";
 import { dedicatedCompanyDomain } from "@/lib/company";
 import {
   Receipt, Wallet, AlertTriangle, Boxes, Plus, UserPlus, CreditCard,
-  PackagePlus, Factory, CalendarCheck, Truck, TrendingUp, ArrowRight, Banknote, ClipboardList, LockKeyhole,
+  PackagePlus, Factory, CalendarCheck, TrendingUp, ArrowRight, Banknote, ClipboardList, LockKeyhole,
   Pencil, Trash2,
   Eye, Copy, RefreshCw, ShieldOff,
 } from "lucide-react";
@@ -1053,84 +1053,7 @@ export default function Dashboard() {
           ) : empty("No orders waiting to be sent.")}
         </Section>
 
-        <Section title={`Deliveries · ${periodLabel}`} icon={Truck}>
-          {d.upcoming_deliveries?.length ? (
-            <div className="space-y-2">{d.upcoming_deliveries.map((delivery) => (
-              <div key={delivery.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2" data-testid={`dash-delivery-${delivery.id}`}>
-                <span className="text-sm font-semibold text-slate-700">
-                  {delivery.customer_name || delivery.destination || "Delivery"}
-                  {delivery.destination && delivery.customer_name && <span className="font-normal text-slate-400"> · {delivery.destination}</span>}
-                </span>
-                <span className="text-xs text-slate-500">{fmtDate(delivery.planned_departure)} · {delivery.status}</span>
-              </div>
-            ))}</div>
-          ) : empty(`No deliveries scheduled for ${periodLabel.toLowerCase()}.`)}
-        </Section>
-
-        <Section title="Low Stock Alerts" icon={AlertTriangle}>
-          {d.low_stock.length === 0 ? empty("All stock above threshold.") : (
-            <div className="space-y-2">
-              {d.low_stock.map((s) => (
-                <div key={s.id} className="flex items-center justify-between rounded-lg bg-red-50 border border-red-100 px-3 py-2">
-                  <span className="text-sm font-semibold text-slate-700">{s.product} <span className="text-slate-400 font-normal">· {s.size}</span></span>
-                  <Badge cls="bg-red-100 text-red-700 border-red-200">{s.current} left</Badge>
-                </div>
-              ))}
-            </div>
-          )}
-        </Section>
-
-        <Section title="Current Production Recommendations" icon={TrendingUp}>
-          {d.recommendations.length === 0 ? empty("No production needed right now.") : (
-            <div className="space-y-2">
-              {d.recommendations.map((r, i) => (
-                <div key={i} className="rounded-lg bg-amber-50 border border-amber-100 px-3 py-2">
-                  <div className="flex justify-between"><span className="text-sm font-semibold text-slate-700">{r.product} · {r.size}</span><Badge cls="bg-amber-100 text-amber-700 border-amber-200">Make {r.recommend_qty}</Badge></div>
-                  <p className="text-xs text-slate-500 mt-0.5">{r.reason}</p>
-                </div>
-              ))}
-            </div>
-          )}
-        </Section>
-
-        <Section title={`Attendance · ${periodLabel}`} icon={CalendarCheck} action={<button onClick={() => nav("/attendance")} className="text-xs font-semibold text-primary flex items-center gap-1">View <ArrowRight size={12} /></button>}>
-          {d.attendance_today.length === 0 ? empty(`No attendance recorded for ${periodLabel.toLowerCase()}.`) : (
-            <div className="space-y-2">{d.attendance_today.map((a) => (
-              <div key={a.id} className="flex justify-between rounded-lg border border-border px-3 py-2">
-                <span className="text-sm font-semibold text-slate-700">{a.employee_name}</span><Badge cls="bg-slate-100 text-slate-600 border-slate-200">{a.status}</Badge>
-              </div>))}</div>
-          )}
-        </Section>
-
-        <Section title="Current Stock" icon={Boxes} action={<button onClick={() => nav("/stock")} className="text-xs font-semibold text-primary flex items-center gap-1">View <ArrowRight size={12} /></button>}>
-          <div className="space-y-2">{d.current_stock.map((s) => (
-            <div key={s.id} className="flex justify-between rounded-lg border border-border px-3 py-2">
-              <span className="text-sm font-semibold text-slate-700">{s.product} <span className="text-slate-400 font-normal">· {s.size}</span></span>
-              <span className={`text-sm font-mono font-bold ${s.current <= s.threshold ? "text-red-600" : "text-slate-700"}`}>{s.current}</span>
-            </div>))}</div>
-        </Section>
       </div>
-
-      <Section title={`Invoices · ${periodLabel}`} icon={Receipt} action={<button onClick={() => nav("/invoices")} className="text-xs font-semibold text-primary flex items-center gap-1">View all <ArrowRight size={12} /></button>}>
-        {d.recent_invoices.length === 0 ? empty("No invoices yet. Create your first invoice.") : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead><tr className="text-left text-xs text-slate-400 border-b border-border">
-                <th className="py-2 font-semibold">Invoice</th><th className="font-semibold">Customer</th><th className="font-semibold">Date</th><th className="font-semibold text-right">Total</th><th className="font-semibold text-right">Balance</th><th className="font-semibold text-center">Status</th>
-              </tr></thead>
-              <tbody>{d.recent_invoices.map((i) => (
-                <tr key={i.id} className="border-b border-border/60 hover:bg-slate-50 cursor-pointer" onClick={() => nav(`/invoices/${i.id}`)}>
-                  <td className="py-2.5 font-mono font-semibold text-slate-700">{i.number || "DRAFT"}</td>
-                  <td className="text-slate-600">{i.customer_name}</td>
-                  <td className="text-slate-500">{fmtDate(i.date)}</td>
-                  <td className="text-right font-mono text-slate-700">{fmtMoney(i.total)}</td>
-                  <td className="text-right font-mono text-slate-700">{fmtMoney(i.outstanding)}</td>
-                  <td className="text-center"><Badge cls={STATUS_META[i.status]?.cls}>{STATUS_META[i.status]?.label}</Badge></td>
-                </tr>))}</tbody>
-            </table>
-          </div>
-        )}
-      </Section>
 
       <Modal open={compareOpen} onClose={() => setCompareOpen(false)} title="Compare months or years" wide>
         <div className="space-y-5">
