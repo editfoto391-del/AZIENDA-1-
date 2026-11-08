@@ -627,6 +627,9 @@ export default function SalariesManagement() {
                                   <div className="mt-2 grid grid-cols-2 gap-2 text-muted-foreground">
                                     <span>Weekday pieces: {week.weekday_pieces}</span>
                                     <span>Saturday pieces: {week.saturday_pieces}</span>
+                                    <span>Saturday rate: {fmtMoney(week.saturday_rate)} / piece</span>
+                                    <span>Saturday pay: {fmtMoney(week.saturday_pay)}</span>
+                                    <span>Saturday recovery: {week.saturday_recovery_pieces} pieces</span>
                                     <span>High-rate pieces: {week.high_rate_pieces}</span>
                                     <span>Low-rate pieces: {week.low_rate_pieces}</span>
                                     <span>Recovered: {week.recovered_pieces}</span>
@@ -656,8 +659,8 @@ export default function SalariesManagement() {
                                   </label>
                                   {row.monthly && periodType !== "monthly" && <p className="mt-2 text-[11px] text-muted-foreground">Switch to Monthly payroll to edit or save this deduction.</p>}
                                   <div className="mt-3 flex flex-wrap gap-2">
-                                    <Btn size="sm" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })} disabled={!!savingIds[employee.employee_id]}> <Landmark size={13} /> Add borrowed balance</Btn>
-                                    <Btn size="sm" onClick={() => saveCut(employee)} disabled={!!savingIds[employee.employee_id] || !!row.payment || (row.monthly && periodType !== "monthly") || (!row.monthly && periodType !== "weekly")}>Save deduction</Btn>
+                                    <Btn className="px-3 py-1.5 text-xs" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })} disabled={!!savingIds[employee.employee_id]}> <Landmark size={13} /> Add borrowed balance</Btn>
+                                    <Btn className="px-3 py-1.5 text-xs" onClick={() => saveCut(employee)} disabled={!!savingIds[employee.employee_id] || !!row.payment || (row.monthly && periodType !== "monthly") || (!row.monthly && periodType !== "weekly")}>Save deduction</Btn>
                                   </div>
                                 </div>
                                 {employee.balance_history?.length > 0 && <details className="rounded-md border border-border bg-card p-3 text-xs">
@@ -739,8 +742,8 @@ export default function SalariesManagement() {
                         <input type="number" min="0" step="0.01" value={cutDrafts[employee.employee_id] ?? "0"} onChange={(event) => setCutDrafts((current) => ({ ...current, [employee.employee_id]: event.target.value }))} disabled={!!row.payment || (row.monthly && periodType !== "monthly")} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" />
                       </label>
                       <div className="flex flex-wrap gap-2">
-                        <Btn size="sm" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })}><Landmark size={13} /> Add balance</Btn>
-                        <Btn size="sm" onClick={() => saveCut(employee)} disabled={!!row.payment || (row.monthly && periodType !== "monthly") || (!row.monthly && periodType !== "weekly")}>Save deduction</Btn>
+                        <Btn className="px-3 py-1.5 text-xs" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })}><Landmark size={13} /> Add balance</Btn>
+                        <Btn className="px-3 py-1.5 text-xs" onClick={() => saveCut(employee)} disabled={!!row.payment || (row.monthly && periodType !== "monthly") || (!row.monthly && periodType !== "weekly")}>Save deduction</Btn>
                       </div>
                       {row.payment ? <p className="text-xs text-emerald-700">Paid on {row.payment.payment_date} · {fmtMoney(row.payment.net_amount)}</p>
                         : row.monthly && periodType !== "monthly" ? <p className="text-xs text-muted-foreground">Use Monthly payroll to record payment.</p>
