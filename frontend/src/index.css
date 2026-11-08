@@ -252,12 +252,89 @@ main table:not(.border-slate-300):not(.border-slate-800) tbody tr:hover {
   ::-webkit-scrollbar-thumb { background: hsl(154 14% 66%); border-radius: 8px; }
 }
 
+@media (hover: hover) and (pointer: fine) {
+  main .overflow-x-auto,
+  main .overflow-x-scroll,
+  main .grv-horizontal-scroll {
+    scrollbar-color: hsl(154 14% 52%) hsl(154 14% 90%);
+    scrollbar-width: thin;
+  }
+
+  main .overflow-x-auto::-webkit-scrollbar,
+  main .overflow-x-scroll::-webkit-scrollbar,
+  main .grv-horizontal-scroll::-webkit-scrollbar {
+    height: 12px;
+  }
+
+  main .overflow-x-auto::-webkit-scrollbar-track,
+  main .overflow-x-scroll::-webkit-scrollbar-track,
+  main .grv-horizontal-scroll::-webkit-scrollbar-track {
+    background: hsl(154 14% 90%);
+    border-radius: 8px;
+  }
+
+  main .overflow-x-auto::-webkit-scrollbar-thumb,
+  main .overflow-x-scroll::-webkit-scrollbar-thumb,
+  main .grv-horizontal-scroll::-webkit-scrollbar-thumb {
+    background: hsl(154 14% 48%);
+    border: 2px solid hsl(154 14% 90%);
+    border-radius: 8px;
+  }
+}
+
 @media (pointer: coarse) {
   button:not([data-compact-touch]),
   [role='button']:not([data-compact-touch]),
   .erp-sidebar-nav a {
     min-height: 44px;
   }
+}
+
+.phone-optimized {
+  width: min(100%, 430px);
+  margin-inline: auto;
+  border-inline: 1px solid hsl(var(--border));
+  box-shadow: 0 0 32px rgb(15 23 42 / 0.14);
+}
+
+.phone-optimized .desktop-sidebar {
+  display: none !important;
+}
+
+.phone-optimized .app-content {
+  padding-left: 0 !important;
+}
+
+.phone-optimized .phone-menu-button {
+  display: inline-flex !important;
+}
+
+.phone-optimized .phone-search {
+  display: none !important;
+}
+
+.phone-optimized .phone-header-spacer {
+  display: block !important;
+}
+
+.phone-optimized .mobile-topbar {
+  min-height: calc(4rem + env(safe-area-inset-top));
+  gap: 0.25rem;
+  padding: env(safe-area-inset-top) max(0.5rem, env(safe-area-inset-right)) 0 max(0.5rem, env(safe-area-inset-left));
+}
+
+.phone-optimized main [class*="grid-cols-2"],
+.phone-optimized main [class*="grid-cols-3"],
+.phone-optimized main [class*="grid-cols-4"],
+.phone-optimized main [class*="grid-cols-5"],
+.phone-optimized main [class*="grid-cols-6"],
+.phone-optimized main [class*="grid-cols-7"],
+.phone-optimized main [class*="grid-cols-8"],
+.phone-optimized main [class*="grid-cols-9"],
+.phone-optimized main [class*="grid-cols-10"],
+.phone-optimized main [class*="grid-cols-11"],
+.phone-optimized main [class*="grid-cols-12"] {
+  grid-template-columns: minmax(0, 1fr) !important;
 }
 
 @media screen and (max-width: 639px) {
@@ -275,6 +352,12 @@ main table:not(.border-slate-300):not(.border-slate-800) tbody tr:hover {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-inline: contain;
+  }
+
+  .grv-horizontal-scroll > table {
+    display: table;
+    max-width: none;
+    overflow: visible;
   }
 
   main div:has(> table),

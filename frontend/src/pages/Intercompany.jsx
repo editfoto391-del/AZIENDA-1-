@@ -44,12 +44,12 @@ function intercompanyError(error) {
 
 function Panel({ title, children, icon: Icon }) {
   return (
-    <section className="rounded-xl border border-slate-200 bg-white shadow-sm">
-      <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-4">
+    <section className="min-w-0 rounded-xl border border-border bg-card shadow-sm">
+      <div className="flex items-center gap-2 border-b border-border px-5 py-4">
         {Icon && <Icon size={18} className="text-emerald-700" />}
-        <h2 className="font-semibold text-slate-900">{title}</h2>
+        <h2 className="font-semibold text-foreground">{title}</h2>
       </div>
-      <div className="p-5">{children}</div>
+      <div className="min-w-0 p-4 sm:p-5">{children}</div>
     </section>
   );
 }
@@ -254,29 +254,30 @@ export default function Intercompany() {
   };
 
   return (
-    <main className="mx-auto max-w-7xl space-y-6 p-4 md:p-8">
-      <header className="flex flex-wrap items-center justify-between gap-3">
+    <div className="w-full min-w-0 space-y-6">
+      <header className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-5">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-700">Purchasing</p>
-          <h1 className="mt-1 text-2xl font-bold text-slate-900">Intercompany Requests</h1>
-          <p className="mt-1 max-w-3xl text-sm text-slate-600">
+          <h1 className="mt-1 text-2xl font-bold text-foreground">Intercompany Requests</h1>
+          <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
             Request products from another company. The supplier reviews each request, and invoices use the supplier's saved price list.
           </p>
         </div>
-        <button type="button" onClick={loadRequests} className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium hover:bg-slate-50">
+        <button type="button" onClick={() => loadRequests()} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-semibold text-foreground shadow-sm hover:bg-muted disabled:opacity-50" data-testid="intercompany-refresh">
           <RefreshCw size={16} /> Refresh
         </button>
       </header>
 
+      <div className="grid min-w-0 items-start gap-6 xl:grid-cols-[minmax(20rem,0.88fr)_minmax(0,1.62fr)]">
       <Panel title="Create a request" icon={Plus}>
         <form onSubmit={createRequest} className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid gap-4 2xl:grid-cols-2">
             <label className="space-y-1 text-sm font-medium text-slate-700">
               Supplying company
               <select value={supplierId} onChange={(event) => {
                 setSupplierId(event.target.value);
                 setDraftItems([{ stock_id: "", quantity: "1" }]);
-              }} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2">
+              }} className="w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm">
                 {suppliers.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
               </select>
             </label>
@@ -286,12 +287,12 @@ export default function Intercompany() {
                 <Search size={16} className="absolute left-3 top-2.5 text-slate-400" />
                 <input value={search} onChange={(event) => {
                   setSearch(event.target.value);
-                }} placeholder="Product or dimensions" className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3" />
+                }} placeholder="Product or dimensions" className="w-full min-w-0 rounded-lg border border-slate-300 py-2.5 pl-9 pr-3 text-sm" />
               </span>
             </label>
           </div>
           {draftItems.map((item, index) => (
-            <div key={index} className="grid gap-3 md:grid-cols-[1fr_180px_auto]">
+            <div key={index} className="grid min-w-0 gap-3 rounded-lg border border-border bg-muted/30 p-3 sm:grid-cols-[minmax(0,1fr)_7rem_auto]">
               <label className="space-y-1 text-sm font-medium text-slate-700">
                 Product {index + 1}
                 <select value={item.stock_id} onChange={(event) => {
@@ -301,7 +302,7 @@ export default function Intercompany() {
                       ? { ...line, stock_id: event.target.value, selected_product: selectedProduct }
                       : line,
                   ));
-                }} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2">
+                }} className="w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm">
                   <option value="">{productsLoading ? "Loading stock..." : "Select product"}</option>
                   {[
                     ...products,
@@ -312,15 +313,15 @@ export default function Intercompany() {
               </label>
               <label className="space-y-1 text-sm font-medium text-slate-700">
                 Quantity
-                <input type="number" min="0.001" step="any" value={item.quantity} onChange={(event) => updateLine(index, "quantity", event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2" />
+                <input type="number" min="0.001" step="any" value={item.quantity} onChange={(event) => updateLine(index, "quantity", event.target.value)} className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2.5 text-sm" />
               </label>
               {draftItems.length > 1 && <button type="button" onClick={() => setDraftItems((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="self-end rounded-lg px-3 py-2 text-sm text-rose-700 hover:bg-rose-50">Remove</button>}
             </div>
           ))}
-          <div className="flex flex-wrap items-center gap-3">
-            <button type="button" disabled={draftItems.length >= 100} onClick={() => setDraftItems((current) => [...current, { stock_id: "", quantity: "1" }])} className="rounded-lg border px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50">Add product</button>
-            <input value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={2000} placeholder="Optional notes for the supplier" className="min-w-[220px] flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" />
-            <button disabled={busy === "create-request"} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-60">
+          <div className="grid gap-3">
+            <button type="button" disabled={draftItems.length >= 100} onClick={() => setDraftItems((current) => [...current, { stock_id: "", quantity: "1" }])} className="inline-flex w-fit items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-semibold text-foreground hover:bg-muted disabled:opacity-50"><Plus size={15} /> Add product</button>
+            <input value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={2000} placeholder="Optional notes for the supplier" className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2.5 text-sm" />
+            <button disabled={busy === "create-request"} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-60">
               {busy === "create-request" ? <LoaderCircle size={16} className="animate-spin" /> : <Send size={16} />} Submit request
             </button>
           </div>
@@ -331,10 +332,11 @@ export default function Intercompany() {
         {error && <div role="alert" className="mb-4 flex items-center gap-2 rounded-lg bg-rose-50 p-3 text-sm text-rose-800"><CircleAlert size={16} />{error}</div>}
         {loading ? <div className="flex items-center gap-2 text-sm text-slate-500"><LoaderCircle size={17} className="animate-spin" /> Loading requests...</div>
           : requests.length === 0 ? <p className="text-sm text-slate-500">No intercompany requests yet.</p>
-            : <div className="overflow-x-auto">
-              <table className="w-full min-w-[760px] text-left text-sm">
-                <thead className="text-xs uppercase tracking-wide text-slate-500"><tr>
-                  <th className="pb-3">Request</th><th className="pb-3">Direction</th><th className="pb-3">Products</th><th className="pb-3">Status</th><th className="pb-3">Created</th><th className="pb-3">Actions</th>
+            : <div className="min-w-0">
+              <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="w-full min-w-[980px] text-left text-sm">
+                <thead className="bg-muted/60 text-xs uppercase tracking-wide text-muted-foreground"><tr>
+                  <th className="px-3 py-3">Request</th><th className="px-3 py-3">Direction</th><th className="px-3 py-3 text-center">Products</th><th className="px-3 py-3">Status</th><th className="px-3 py-3">Created</th><th className="px-3 py-3">Actions</th>
                 </tr></thead>
                 <tbody className="divide-y divide-slate-100">
                   {requests.map((request) => {
@@ -343,13 +345,13 @@ export default function Intercompany() {
                     const canReview = isAdmin && isSupplier && request.status === "PENDING";
                     const canCreateInvoice = isAdmin && isSupplier && ["ACCEPTED", "INVOICE_CREATED"].includes(request.status);
                     return <tr key={request.id}>
-                      <td className="py-3 font-medium">#{request.id.slice(-8)}</td>
-                      <td className="py-3">{isSupplier ? `From ${companyName(request.requesting_company_id)}` : `To ${companyName(request.supplying_company_id)}`}</td>
-                      <td className="py-3">{request.items?.length || 0}</td>
-                      <td className="py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${STATUS_STYLE[request.status] || "bg-slate-100 text-slate-700"}`}>{request.status}</span></td>
-                      <td className="py-3 text-slate-600">{request.created_at ? new Date(request.created_at).toLocaleString() : "—"}</td>
-                      <td className="py-3">
-                        <div className="flex flex-wrap gap-2">
+                      <td className="whitespace-nowrap px-3 py-3 font-semibold text-foreground">#{request.id.slice(-8)}</td>
+                      <td className="px-3 py-3">{isSupplier ? `From ${companyName(request.requesting_company_id)}` : `To ${companyName(request.supplying_company_id)}`}</td>
+                      <td className="px-3 py-3 text-center tabular-nums">{request.items?.length || 0}</td>
+                      <td className="whitespace-nowrap px-3 py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${STATUS_STYLE[request.status] || "bg-slate-100 text-slate-700"}`}>{request.status.replaceAll("_", " ")}</span></td>
+                      <td className="whitespace-nowrap px-3 py-3 text-muted-foreground">{request.created_at ? new Date(request.created_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—"}</td>
+                      <td className="px-3 py-3">
+                        <div className="flex flex-nowrap gap-2 whitespace-nowrap">
                           <button type="button" onClick={() => setSelectedRequest(request)} className="rounded-md border px-2.5 py-1.5 text-xs hover:bg-slate-50">Details</button>
                           {canReview && <><button type="button" disabled={busy === request.id} onClick={() => acceptRequest(request)} className="rounded-md bg-emerald-700 px-2.5 py-1.5 text-xs font-medium text-white disabled:opacity-60">Accept</button><button type="button" disabled={busy === request.id} onClick={() => rejectRequest(request)} className="rounded-md border border-rose-200 px-2.5 py-1.5 text-xs text-rose-700 disabled:opacity-60">Reject</button></>}
                           {canCreateInvoice && <button type="button" onClick={() => setConfirmInvoice({ request, step: request.status === "INVOICE_CREATED" ? "send" : "create" })} className="rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white">{request.status === "INVOICE_CREATED" ? "Send invoice" : "Create invoice"}</button>}
@@ -360,7 +362,8 @@ export default function Intercompany() {
                   })}
                 </tbody>
               </table>
-              <div className="mt-4 flex items-center justify-between text-sm text-slate-600">
+              </div>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
                 <span>{requestTotal ? `Showing ${(requestPage - 1) * 30 + 1}–${Math.min(requestPage * 30, requestTotal)} of ${requestTotal}` : "No requests"}</span>
                 <div className="flex gap-2">
                   <button type="button" disabled={requestPage <= 1} onClick={() => loadRequests(requestPage - 1)} className="rounded-md border px-3 py-1.5 disabled:opacity-40">Previous</button>
@@ -369,6 +372,7 @@ export default function Intercompany() {
               </div>
             </div>}
       </Panel>
+      </div>
 
       {selectedRequest && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="intercompany-detail-title">
         <div className="max-h-[90vh] w-full max-w-5xl overflow-auto rounded-xl bg-white p-5 shadow-xl">
@@ -433,6 +437,6 @@ export default function Intercompany() {
           </div>
         </div>
       </div>}
-    </main>
+    </div>
   );
 }

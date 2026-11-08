@@ -6,7 +6,7 @@ import {
   LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
   Truck, Menu, X, LogOut, Search, Bell,
   ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart, ChevronDown, Building2, Handshake, Settings as Cog, ClipboardCheck, LockKeyhole,
-  Warehouse, FlaskConical, Boxes, Moon, Sun,
+  Warehouse, FlaskConical, Boxes, Moon, Smartphone, Sun,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -168,6 +168,7 @@ export default function Layout() {
   const { theme, setTheme } = useTheme();
   const reduceMotion = useReducedMotion();
   const [open, setOpen] = useState(false);
+  const [phoneOptimized, setPhoneOptimized] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [profiles, setProfiles] = useState([]);
@@ -180,6 +181,25 @@ export default function Layout() {
   const mainScrollRef = useRef(null);
   const nav = useNavigate();
   const dedicatedDomain = dedicatedCompanyDomain();
+  const canTogglePhoneView = user?.is_primary_owner
+    && user?.is_owner
+    && !user?.is_worker;
+
+  const findHorizontalScrollRegion = (target) => {
+    if (!(target instanceof Element)) return null;
+    const region = target.closest(".overflow-x-auto, .overflow-x-scroll, .grv-horizontal-scroll");
+    return region && region.scrollWidth > region.clientWidth ? region : null;
+  };
+  const handleHorizontalWheel = (event) => {
+    if (event.shiftKey || event.deltaX !== 0 || event.deltaY === 0) return;
+    const scrollRegion = findHorizontalScrollRegion(event.target);
+    if (!scrollRegion) return;
+    const maxScrollLeft = scrollRegion.scrollWidth - scrollRegion.clientWidth;
+    if ((event.deltaY > 0 && scrollRegion.scrollLeft >= maxScrollLeft)
+      || (event.deltaY < 0 && scrollRegion.scrollLeft <= 0)) return;
+    scrollRegion.scrollLeft += event.deltaY;
+    event.preventDefault();
+  };
 
   useEffect(() => { api.get("/companies/profiles").then(setProfiles).catch(() => {}); }, []);
   const loadNotifications = async (uncached = false) => {
@@ -244,9 +264,9 @@ export default function Layout() {
   };
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-background print:h-auto print:overflow-visible">
+    <div className={`app-shell flex h-dvh flex-col overflow-hidden bg-background print:h-auto print:overflow-visible${canTogglePhoneView && phoneOptimized ? " phone-optimized" : ""}`}>
       {/* Desktop sidebar */}
-      <aside className="erp-sidebar no-print hidden lg:flex fixed inset-y-0 left-0 w-64 flex-col border-r border-white/10 bg-[hsl(222_47%_11%)] shadow-[4px_0_18px_rgba(15,23,42,0.08)] z-30">
+      <aside className="erp-sidebar desktop-sidebar no-print hidden lg:flex fixed inset-y-0 left-0 w-64 flex-col border-r border-white/10 bg-[hsl(222_47%_11%)] shadow-[4px_0_18px_rgba(15,23,42,0.08)] z-30">
         <svg className="erp-sidebar-decoration pointer-events-none absolute inset-x-0 bottom-0 h-56 w-full" viewBox="0 0 280 224" preserveAspectRatio="none" aria-hidden="true">
           <path d="M-25 225c56-68 113-142 188-172 35-14 70-18 126-8-70 27-111 58-154 114-20 27-39 49-64 66Z" fill="#c6d2c8" fillOpacity=".035" />
           <path d="M-24 220c73-77 132-144 197-169 39-15 76-16 116-9M-14 224c76-66 136-117 204-146 36-15 67-20 99-21M-16 211c76-56 136-99 205-123 33-12 62-17 91-18" fill="none" stroke="#c6d2c8" strokeOpacity=".24" strokeWidth="1" />
@@ -270,13 +290,28 @@ export default function Layout() {
         )}
       </AnimatePresence>
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:pl-64 print:overflow-visible print:pl-0">
+      <div className="app-content flex min-h-0 min-w-0 flex-1 flex-col lg:pl-64 print:overflow-visible print:pl-0">
         {/* Topbar */}
         <header className="mobile-topbar no-print liquid-glass-surface sticky top-0 z-20 flex h-16 shrink-0 items-center gap-2 border-b border-white/70 px-3 sm:gap-4 sm:px-6">
-          <motion.button whileHover={reduceMotion ? undefined : { scale: 1.04, rotate: 0.5 }} whileTap={reduceMotion ? undefined : { scale: 0.96 }} transition={{ type: "spring", stiffness: 440, damping: 24 }} className="lg:hidden rounded-full p-2 text-slate-600 hover:bg-white/40" onClick={() => setOpen(true)} aria-label="Open navigation" data-testid="menu-toggle">
+          <motion.button whileHover={reduceMotion ? undefined : { scale: 1.04, rotate: 0.5 }} whileTap={reduceMotion ? undefined : { scale: 0.96 }} transition={{ type: "spring", stiffness: 440, damping: 24 }} className="phone-menu-button lg:hidden rounded-full p-2 text-slate-600 hover:bg-white/40" onClick={() => setOpen(true)} aria-label="Open navigation" data-testid="menu-toggle">
             <Menu size={22} />
           </motion.button>
-          <div className="flex-1 max-w-md hidden sm:block">
+          {canTogglePhoneView && <button
+            type="button"
+            onClick={() => {
+              setPhoneOptimized((current) => !current);
+              setOpen(false);
+            }}
+            aria-pressed={phoneOptimized}
+            aria-label={phoneOptimized ? "Exit phone-optimized view" : "Optimize view for phone screens"}
+            title={phoneOptimized ? "Exit phone-optimized view" : "Optimize view for phone screens"}
+            data-testid="phone-view-toggle"
+            className={`inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md border px-2 text-xs font-semibold transition-colors ${phoneOptimized ? "border-primary bg-primary text-white" : "border-border bg-white text-slate-600 hover:bg-slate-50"}`}
+          >
+            <Smartphone size={17} />
+            <span>{phoneOptimized ? "Exit phone view" : "Phone view"}</span>
+          </button>}
+          <div className="phone-search flex-1 max-w-md hidden sm:block">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
               <input
@@ -287,7 +322,7 @@ export default function Layout() {
               />
             </div>
           </div>
-          <div className="flex-1 sm:hidden" />
+          <div className="phone-header-spacer flex-1 sm:hidden" />
           {user?.can_switch_company && availableProfiles.length > 1 && (
             <div className="relative" onMouseEnter={() => setProfileMenuOpen(true)} onMouseLeave={() => setProfileMenuOpen(false)}>
               <button
@@ -392,7 +427,7 @@ export default function Layout() {
             <motion.div whileHover={reduceMotion ? undefined : { scale: 1.05, y: -1 }} whileTap={reduceMotion ? undefined : { scale: 0.98 }} transition={{ type: "spring", stiffness: 500, damping: 22 }} className="h-9 w-9 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-sm">
               {(user?.name || "A")[0]}
             </motion.div>
-            <div className="hidden sm:block leading-tight">
+            <div className="phone-profile-info hidden sm:block leading-tight">
               <div className="text-sm font-semibold text-slate-800">{user?.name || "Admin"}</div>
               <div className="text-[11px] text-slate-500">{user?.is_worker ? user.worker_role || "Worker" : user?.is_owner || user?.is_company_owner ? "Owner" : user?.is_admin || user?.role === "admin" ? "Administrator" : "Team member"}</div>
             </div>
@@ -405,7 +440,11 @@ export default function Layout() {
           </div>
         </header>
 
-        <main ref={mainScrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain p-3 sm:p-6 lg:p-8 max-w-[1500px] mx-auto print:h-auto print:flex-none print:overflow-visible">
+        <main
+          ref={mainScrollRef}
+          onWheelCapture={handleHorizontalWheel}
+          className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain p-3 sm:p-5 lg:p-6 2xl:p-8 w-full max-w-none print:h-auto print:flex-none print:overflow-visible"
+        >
           <Suspense fallback={<div className="text-slate-400">Loading...</div>}>
             <AnimatedOutlet scrollContainerRef={mainScrollRef} />
           </Suspense>

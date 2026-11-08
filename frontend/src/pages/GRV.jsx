@@ -678,7 +678,7 @@ export default function GRV() {
         </Select>
       </Card>
 
-      <Card className="overflow-hidden" data-testid="grv-list">
+      <Card className="overflow-visible" data-testid="grv-list">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
           <div>
             <h2 className="font-semibold text-slate-800">GRV Register</h2>
@@ -699,7 +699,12 @@ export default function GRV() {
         {records === null ? <p className="p-6 text-sm text-slate-400" role="status">Loading GRVs...</p> : records.length === 0 ? (
           <Empty icon={ClipboardCheck} title="No GRVs found" hint="Create a goods received voucher for a supplier delivery." />
         ) : (
-          <div className="overflow-x-auto">
+          <div
+            className="grv-horizontal-scroll min-w-0 max-w-full overflow-x-auto overscroll-x-contain touch-pan-x"
+            role="region"
+            aria-label="GRV register; scroll horizontally to see all columns"
+            tabIndex={0}
+          >
             <table className="w-full min-w-[1080px] text-sm">
               <thead><tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500">
                 {canDeleteGRVs && <th className="px-3 py-3 text-center">
@@ -720,14 +725,14 @@ export default function GRV() {
                 <th className="px-4 py-3">GRV number</th><th className="px-4 py-3">Received date</th>
                 <th className="px-4 py-3">Supplier</th><th className="px-4 py-3">PO / delivery note</th>
                 <th className="px-4 py-3 text-right">Lines</th><th className="px-4 py-3 text-right">Accepted value</th>
-                <th className="px-4 py-3">Status</th><th className="px-4 py-3 text-right">Actions</th>
+                <th className="px-4 py-3">Status</th><th className="sticky right-0 z-20 min-w-[240px] bg-slate-50 px-4 py-3 text-right">Actions</th>
               </tr></thead>
               <tbody>{records.map((grv) => {
                 const value = (grv.items || []).reduce((sum, line) => sum + Number(line.total_value || 0), 0);
                 const busy = workingId === grv.id;
                 const confirmed = ["completed", "partially_received", "discrepancy", "reversing"].includes(grv.status);
                 return (
-                  <tr key={grv.id} className="border-b border-border/60 align-top hover:bg-slate-50" data-testid={`grv-row-${grv.id}`}>
+                  <tr key={grv.id} className="group border-b border-border/60 align-top hover:bg-slate-50" data-testid={`grv-row-${grv.id}`}>
                     {canDeleteGRVs && <td className="px-3 py-3 text-center">
                       {DELETABLE_GRV_STATUSES.has(grv.status) && <input
                         type="checkbox"
@@ -740,23 +745,25 @@ export default function GRV() {
                         data-testid={`grv-select-${grv.id}`}
                       />}
                     </td>}
-                    <td className="px-4 py-3 font-semibold text-primary">{grv.grv_number}</td>
+                    <td className="px-4 py-3">
+                      <span className="font-semibold text-primary">{grv.grv_number}</span>
+                    </td>
                     <td className="px-4 py-3">{fmtDate(grv.received_date)}</td>
                     <td className="px-4 py-3">{grv.supplier_name || "-"}</td>
                     <td className="px-4 py-3"><span className="block">{grv.purchase_order_reference || "Standalone"}</span><span className="text-xs text-slate-500">{grv.delivery_note_number || "No delivery note"}</span></td>
                     <td className="px-4 py-3 text-right font-mono">{grv.items?.length || 0}</td>
                     <td className="px-4 py-3 text-right font-mono">{fmtMoney(value)}</td>
                     <td className="px-4 py-3"><Badge cls={STATUS_STYLE[grv.status] || STATUS_STYLE.draft}>{statusLabel(grv.status)}</Badge></td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex flex-wrap justify-end gap-1">
-                        <button type="button" onClick={() => setViewTarget(grv)} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="View GRV" aria-label={`View ${grv.grv_number}`} data-testid={`grv-view-${grv.id}`}><Eye size={16} /></button>
-                        <button type="button" onClick={() => exportPdf(grv)} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="Download GRV PDF" aria-label={`Download PDF ${grv.grv_number}`} data-testid={`grv-pdf-${grv.id}`}><Download size={16} /></button>
-                        {grv.status === "draft" && <button type="button" onClick={() => { setScanReceivingMode(false); setStockSearchByLine({}); setDraft({ ...grv, received_by: grv.received_by || "" }); }} className="rounded p-1.5 text-slate-500 hover:bg-slate-100" title="Edit draft" aria-label={`Edit ${grv.grv_number}`} data-testid={`grv-edit-${grv.id}`}><Pencil size={15} /></button>}
-                        {grv.status === "draft" && <button type="button" onClick={() => act(grv, "inspect")} disabled={busy} className="rounded px-2 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50" data-testid={`grv-inspect-${grv.id}`}>Inspect</button>}
-                        {["draft", "pending_inspection", "confirming"].includes(grv.status) && <button type="button" onClick={() => act(grv, "confirm", `Confirm ${grv.grv_number}? Accepted quantities will be posted to Stock once.`)} disabled={busy} className="rounded px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50" data-testid={`grv-confirm-${grv.id}`}>{busy ? "Working..." : grv.status === "confirming" ? "Retry confirm" : "Confirm"}</button>}
-                        {["draft", "pending_inspection"].includes(grv.status) && <button type="button" onClick={() => act(grv, "cancel")} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Cancel draft" data-testid={`grv-cancel-${grv.id}`}><Ban size={15} /></button>}
-                        {canDeleteGRVs && DELETABLE_GRV_STATUSES.has(grv.status) && <button type="button" onClick={() => setDeleteTarget(grv)} disabled={busy} className="rounded p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-700" title="Permanently delete GRV" aria-label={`Permanently delete ${grv.grv_number}`} data-testid={`grv-delete-${grv.id}`}><Trash2 size={15} /></button>}
-                        {confirmed && (user?.is_admin || user?.is_owner) && <button type="button" onClick={() => act(grv, "reverse", `${grv.status === "reversing" ? "Retry" : "Reverse"} ${grv.grv_number}? This adds traceable stock reversals and reopens its PO quantities when possible.`)} disabled={busy} className="rounded p-1.5 text-red-700 hover:bg-red-50 disabled:opacity-50" title={grv.status === "reversing" ? "Retry GRV reversal" : "Reverse confirmed GRV"} data-testid={`grv-reverse-${grv.id}`}><RotateCcw size={15} /></button>}
+                    <td className="sticky right-0 z-10 min-w-[240px] bg-white px-4 py-3 group-hover:bg-slate-50">
+                      <div className="flex flex-wrap items-center justify-end gap-1.5">
+                        <button type="button" onClick={() => setViewTarget(grv)} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50" title="View GRV" aria-label={`View ${grv.grv_number}`} data-testid={`grv-view-${grv.id}`}><Eye size={14} /> View</button>
+                        <button type="button" onClick={() => exportPdf(grv)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50" title="Download GRV PDF" aria-label={`Download PDF ${grv.grv_number}`} data-testid={`grv-pdf-${grv.id}`}><Download size={15} /></button>
+                        {grv.status === "draft" && <button type="button" onClick={() => { setScanReceivingMode(false); setStockSearchByLine({}); setDraft({ ...grv, received_by: grv.received_by || "" }); }} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50" title="Edit draft" aria-label={`Edit ${grv.grv_number}`} data-testid={`grv-edit-${grv.id}`}><Pencil size={15} /></button>}
+                        {grv.status === "draft" && <button type="button" onClick={() => act(grv, "inspect")} disabled={busy} className="inline-flex h-8 items-center rounded-md border border-blue-200 bg-blue-50 px-2 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50" data-testid={`grv-inspect-${grv.id}`}>Inspect</button>}
+                        {["draft", "pending_inspection", "confirming"].includes(grv.status) && <button type="button" onClick={() => act(grv, "confirm", `Confirm ${grv.grv_number}? Accepted quantities will be posted to Stock once.`)} disabled={busy} className="inline-flex h-8 items-center rounded-md border border-emerald-200 bg-emerald-50 px-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50" data-testid={`grv-confirm-${grv.id}`}>{busy ? "Working..." : grv.status === "confirming" ? "Retry confirm" : "Confirm"}</button>}
+                        {["draft", "pending_inspection"].includes(grv.status) && <button type="button" onClick={() => act(grv, "cancel")} disabled={busy} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 hover:border-red-200 hover:bg-red-50 hover:text-red-700 disabled:opacity-50" title="Cancel draft" aria-label={`Cancel ${grv.grv_number}`} data-testid={`grv-cancel-${grv.id}`}><Ban size={15} /></button>}
+                        {confirmed && (user?.is_admin || user?.is_owner) && <button type="button" onClick={() => act(grv, "reverse", `${grv.status === "reversing" ? "Retry" : "Reverse"} ${grv.grv_number}? This adds traceable stock reversals and reopens its PO quantities when possible.`)} disabled={busy} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 disabled:opacity-50" title={grv.status === "reversing" ? "Retry GRV reversal" : "Reverse confirmed GRV"} aria-label={`${grv.status === "reversing" ? "Retry reversal" : "Reverse"} ${grv.grv_number}`} data-testid={`grv-reverse-${grv.id}`}><RotateCcw size={15} /></button>}
+                        {canDeleteGRVs && DELETABLE_GRV_STATUSES.has(grv.status) && <button type="button" onClick={() => setDeleteTarget(grv)} disabled={busy} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-red-200 bg-white text-red-700 hover:bg-red-50 disabled:opacity-50" title="Permanently delete GRV" aria-label={`Permanently delete ${grv.grv_number}`} data-testid={`grv-delete-${grv.id}`}><Trash2 size={15} /></button>}
                       </div>
                     </td>
                   </tr>
@@ -804,7 +811,12 @@ export default function GRV() {
           {scanReceivingMode && <div className="max-w-xl">
             <BarcodeScanner onScan={scanGRVProduct} disabled={saving} dedupeWindowMs={0} label="Scan product to match its stock size" />
           </div>}
-          <div className="overflow-x-auto rounded-lg border border-border">
+          <div
+            className="grv-horizontal-scroll min-w-0 max-w-full overflow-x-auto overscroll-x-contain touch-pan-x rounded-lg border border-border"
+            role="region"
+            aria-label="GRV items; scroll horizontally to see all columns"
+            tabIndex={0}
+          >
             <table className={`w-full ${scanReceivingMode ? "min-w-[1000px]" : isSuperIQFoam ? "min-w-[1250px]" : "min-w-[1100px]"} text-xs`}>
               <thead><tr className="bg-slate-50 text-left text-slate-500">
                 <th className="p-2">Product / size</th>
@@ -978,7 +990,12 @@ export default function GRV() {
             <p><span className="font-semibold">Status:</span> {statusLabel(viewTarget.status)}</p>
             <p><span className="font-semibold">Type:</span> {viewTarget.purpose === "raw_material" ? "Company Inventory" : "Selling / Stock"}</p>
           </div>
-          <div className="overflow-x-auto rounded border border-border">
+          <div
+            className="grv-horizontal-scroll min-w-0 max-w-full overflow-x-auto overscroll-x-contain touch-pan-x rounded border border-border"
+            role="region"
+            aria-label="GRV details; scroll horizontally to see all columns"
+            tabIndex={0}
+          >
             <table className="w-full min-w-[560px] text-sm">
               <thead><tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500">
                 <th className="px-3 py-2">Product / size</th>
