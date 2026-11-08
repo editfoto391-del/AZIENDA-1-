@@ -3,10 +3,11 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtDateTime, fmtMoney, documentFilename } from "@/lib/format";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal, PageHeader, Empty } from "@/components/common";
-import { ClipboardList, Plus, Trash2, Pencil, ArrowRight, Eye, FileText, Printer, Download, Search, RotateCcw, MoreHorizontal } from "lucide-react";
+import { ClipboardList, Plus, Trash2, Pencil, ArrowRight, Eye, FileText, Printer, Download, Search, RotateCcw, MoreHorizontal, Factory } from "lucide-react";
 import { useRef } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { DeliveryNote, orderLines } from "@/components/DeliveryNote";
+import SmartProductionPlanner from "@/components/SmartProductionPlanner";
 import { elementToPdf, printElement } from "@/lib/pdf";
 import BarcodeScanner from "@/components/BarcodeScanner";
 import {
@@ -307,6 +308,9 @@ export default function Orders() {
   const [settings, setSettings] = useState({});
   const [viewInvoice, setViewInvoice] = useState(null);
   const [formDataLoading, setFormDataLoading] = useState(false);
+  const [selectedOrders, setSelectedOrders] = useState({});
+  const [smartArrangement, setSmartArrangement] = useState(null);
+  const [smartArrangementLoading, setSmartArrangementLoading] = useState(false);
   const detailRequest = useRef(0);
   const products = [...new Set(stock.map((s) => s.product))];
   const sizesForProduct = (product) => {
@@ -386,6 +390,79 @@ export default function Orders() {
   const shown = list;
   const count = (status) => statusCounts[status] || 0;
   const load = () => setReload((current) => current + 1);
+  const canMakeSmartArrangement = user?.company_id === "superiqfoam"
+    && !user?.is_worker
+    && (user?.is_owner || user?.is_admin || user?.is_company_owner);
+  const selectableOrders = shown.filter((order) =>
+    ["To Send", "Preparing", "Assigned", "Partially Delivered"].includes(order.status),
+  );
+  const selectedOrderList = Object.values(selectedOrders);
+  const allVisibleSelected = selectableOrders.length > 0
+    && selectableOrders.every((order) => selectedOrders[order.id]);
+
+  const toggleOrderSelection = (order, checked) => {
+    setSelectedOrders((current) => {
+      const next = { ...current };
+      if (checked) next[order.id] = order;
+      else delete next[order.id];
+      return next;
+    });
+  };
+
+  const toggleVisibleOrderSelection = (checked) => {
+    setSelectedOrders((current) => {
+      const next = { ...current };
+      for (const order of selectableOrders) {
+        if (checked) next[order.id] = order;
+        else delete next[order.id];
+      }
+      return next;
+    });
+  };
+
+  const generateSmartArrangement = async () => {
+    if (!canMakeSmartArrangement) return toast.error("Smart Production Planner is only available to SUPERIQFOAM administrators.");
+    if (!selectedOrderList.length) return toast.error("Select at least one open order.");
+    setSmartArrangementLoading(true);
+    try {
+      const plan = await api.post("/orders/smart-production-arrangements", {
+        order_ids: selectedOrderList.map((order) => order.id),
+      });
+      setSmartArrangement(plan);
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setSmartArrangementLoading(false);
+    }
+  };
+
+  const revalidateSmartArrangement = async () => {
+    if (!smartArrangement?.order_ids?.length) return;
+    setSmartArrangementLoading(true);
+    try {
+      const plan = await api.post("/orders/smart-production-arrangements", {
+        order_ids: smartArrangement.order_ids,
+      });
+      setSmartArrangement(plan);
+      toast.success("Order and floor-stock availability revalidated.");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setSmartArrangementLoading(false);
+    }
+  };
+
+  const releaseSmartArrangement = async () => {
+    if (!smartArrangement?.id) return;
+    if (!window.confirm("Release this arrangement proposal and its planning-only stock allocations? No production or inventory records will be changed.")) return;
+    try {
+      await api.del("/orders/smart-production-arrangements/" + smartArrangement.id);
+      toast.success("Arrangement proposal released.");
+      setSmartArrangement(null);
+    } catch (error) {
+      toast.error(apiError(error));
+    }
+  };
 
   const pickCustomer = (id) => {
     const c = customers.find((x) => x.id === id);
@@ -514,6 +591,26 @@ export default function Orders() {
         ))}
         <div className="ml-auto w-48"><Input label="Order date" type="date" value={orderDate} onChange={(event) => { setOrderDate(event.target.value); setPage(1); }} data-testid="order-date-filter" /></div>
       </div>
+      {canMakeSmartArrangement && <Card className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+        <label className="flex items-center gap-2 text-sm text-slate-700">
+          <input
+            type="checkbox"
+            checked={allVisibleSelected}
+            onChange={(event) => toggleVisibleOrderSelection(event.target.checked)}
+            disabled={!selectableOrders.length || loading}
+            data-testid="select-visible-orders"
+            aria-label="Select all visible open orders"
+          />
+          Select visible open orders
+        </label>
+        <div className="flex flex-wrap items-center gap-2">
+          {selectedOrderList.length > 0 && <span className="text-xs font-medium text-slate-600">{selectedOrderList.length} selected</span>}
+          <Btn variant="outline" onClick={() => setSelectedOrders({})} disabled={!selectedOrderList.length} data-testid="clear-order-selection">Clear selection</Btn>
+          <Btn onClick={generateSmartArrangement} disabled={!selectedOrderList.length || smartArrangementLoading} data-testid="make-arrangement">
+            <Factory size={15} /> Make Arrangement
+          </Btn>
+        </div>
+      </Card>}
       <Card className="p-4">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
@@ -529,6 +626,16 @@ export default function Orders() {
                 <article key={o.id} className="rounded-lg border border-border bg-white p-3 shadow-sm" data-testid={`order-card-${o.id}`}>
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
+                      {canMakeSmartArrangement && ["To Send", "Preparing", "Assigned", "Partially Delivered"].includes(o.status) && <label className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-500">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedOrders[o.id]}
+                          onChange={(event) => toggleOrderSelection(o, event.target.checked)}
+                          data-testid={`select-order-${o.id}`}
+                          aria-label={`Select order ${o.reference}`}
+                        />
+                        Select for arrangement
+                      </label>}
                       <p className="break-all font-mono text-sm font-bold text-slate-800">{o.reference}</p>
                       {o.invoice_number && <p className="mt-0.5 text-xs text-slate-500">Invoice {o.invoice_number}</p>}
                     </div>
@@ -576,10 +683,12 @@ export default function Orders() {
             <div className="hidden overflow-x-auto sm:block">
             <table className="w-full text-sm min-w-[960px]">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
+                {canMakeSmartArrangement && <th className="w-10 px-3 py-3"><input type="checkbox" checked={allVisibleSelected} onChange={(event) => toggleVisibleOrderSelection(event.target.checked)} disabled={!selectableOrders.length || loading} aria-label="Select all visible open orders" data-testid="select-visible-orders-table" /></th>}
                 <th className="px-4 py-3 font-semibold">Ref</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">City</th><th className="px-4 font-semibold">Products</th><th className="px-4 font-semibold">Priority</th><th className="px-4 font-semibold">Status</th><th className="px-4 font-semibold">Ship Date</th><th className="px-4 font-semibold">Vehicle</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{shown.map((o) => (
                 <tr key={o.id} className="border-b border-border/60 hover:bg-slate-50 align-top" data-testid={`order-row-${o.id}`}>
+                  {canMakeSmartArrangement && <td className="px-3 py-3">{["To Send", "Preparing", "Assigned", "Partially Delivered"].includes(o.status) && <input type="checkbox" checked={!!selectedOrders[o.id]} onChange={(event) => toggleOrderSelection(o, event.target.checked)} aria-label={`Select order ${o.reference}`} data-testid={`select-order-table-${o.id}`} />}</td>}
                   <td className="px-4 py-3 font-mono font-semibold text-slate-800 whitespace-nowrap">{o.reference}{o.invoice_number && <span className="block font-sans text-[10px] font-medium text-slate-400">Invoice {o.invoice_number}</span>}</td>
                   <td className="px-4 py-3 font-semibold text-slate-700">{o.customer_name || "-"}</td>
                   <td className="px-4 py-3 text-slate-500">{o.destination}</td>
@@ -719,6 +828,13 @@ export default function Orders() {
         </div>}
       </Modal>
       <NoteModal order={note} vehicleName={note ? vName(note.vehicle_id) : ""} settings={settings} onClose={() => setNote(null)} />
+      {(smartArrangement || smartArrangementLoading) && <SmartProductionPlanner
+        plan={smartArrangement}
+        loading={smartArrangementLoading}
+        onRefresh={revalidateSmartArrangement}
+        onRelease={releaseSmartArrangement}
+        onClose={() => setSmartArrangement(null)}
+      />}
     </div>
   );
 }

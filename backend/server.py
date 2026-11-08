@@ -39,6 +39,7 @@ from grv_math import (
     grv_confirmation_status,
     validate_grv_line_quantities,
 )
+from smart_production_planner import build_smart_production_plan
 from tenancy import DEFAULT_COMPANY_ID, GLOBAL_COLLECTIONS, ScopedDatabase, active_company_id, active_mongo_session, tenant_database, uses_unified_price_list
 from attendance_math import summarize_attendance_records
 from workflow_engine import (
@@ -15484,6 +15485,195 @@ async def edit_order(oid: str, body: OrderIn, user=Depends(get_current_user)):
     record.pop("driver_signature_data", None)
     await emit_workflow_event("order.updated", record)
     return record
+
+class SmartProductionArrangementIn(BaseModel):
+    order_ids: List[str] = Field(min_length=1, max_length=50)
+
+
+def require_smart_production_planner(user):
+    company_id = user.get("_active_company_id") or active_company_id.get() or DEFAULT_COMPANY_ID
+    if company_id != DEFAULT_COMPANY_ID:
+        raise HTTPException(403, "Smart Production Planner is only available for SUPERIQFOAM")
+    require_admin(user)
+
+
+async def acquire_smart_production_planner_lock():
+    owner = uuid.uuid4().hex
+    now = datetime.now(timezone.utc)
+    try:
+        lock = await db.smart_production_arrangement_locks.find_one_and_update(
+            {
+                "_id": "planner",
+                "$or": [
+                    {"lease_until": {"$lte": now}},
+                    {"lease_until": {"$exists": False}},
+                ],
+            },
+            {"$set": {"owner": owner, "lease_until": now + timedelta(seconds=30)}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError as error:
+        raise HTTPException(409, "Another arrangement is being planned. Try again shortly.") from error
+    if not lock or lock.get("owner") != owner:
+        raise HTTPException(409, "Another arrangement is being planned. Try again shortly.")
+    return owner
+
+
+async def create_or_refresh_smart_production_arrangement(order_ids, user):
+    normalized_ids = [str(order_id).strip() for order_id in order_ids]
+    if any(not order_id for order_id in normalized_ids) or len(set(normalized_ids)) != len(normalized_ids):
+        raise HTTPException(422, "Select each order only once.")
+    owner = await acquire_smart_production_planner_lock()
+    try:
+        active_plans = await listall("smart_production_arrangements", {"status": "active"})
+        selected_ids = set(normalized_ids)
+        existing_plan = next((
+            plan for plan in active_plans
+            if set(plan.get("order_ids", [])) == selected_ids
+        ), None)
+        overlapping_plans = [
+            plan for plan in active_plans
+            if selected_ids.intersection(str(value) for value in plan.get("order_ids", []))
+        ]
+        if existing_plan is None and overlapping_plans:
+            existing_plan = overlapping_plans[0]
+        superseded_plans = [
+            plan for plan in overlapping_plans
+            if not existing_plan or plan.get("id") != existing_plan.get("id")
+        ]
+
+        all_orders = await listall("orders", {"archived": {"$ne": True}}, sort=("created_at", 1))
+        orders_by_id = {str(order.get("id") or ""): order for order in all_orders}
+        selected_orders = [orders_by_id[order_id] for order_id in normalized_ids if order_id in orders_by_id]
+        if len(selected_orders) != len(normalized_ids):
+            raise HTTPException(404, "One or more selected orders could not be found in this company.")
+
+        stock_items = await listall("stock", sort=("product", 1))
+        movements_by_stock = await stock_movements_for_stock_ids([item["id"] for item in stock_items])
+        for stock_item in stock_items:
+            apply_stock_movements(stock_item, movements_by_stock.get(stock_item["id"], []))
+        employees = await listall("employees", sort=("name", 1))
+        superseded_ids = {plan.get("id") for plan in superseded_plans}
+        other_plans = [
+            plan for plan in active_plans
+            if plan.get("id") not in superseded_ids
+            and (not existing_plan or plan.get("id") != existing_plan.get("id"))
+        ]
+        try:
+            plan = build_smart_production_plan(
+                selected_orders,
+                all_orders,
+                stock_items,
+                employees,
+                active_arrangements=other_plans,
+            )
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+
+        plan_key = hashlib.sha256("|".join(sorted(normalized_ids)).encode("utf-8")).hexdigest()
+        plan.update({
+            "plan_key": plan_key,
+            "status": "active",
+            "stage": "proposal",
+            "generated_at": now_iso(),
+            "generated_by": user.get("id"),
+        })
+        if existing_plan:
+            updated = await update_doc(
+                "smart_production_arrangements",
+                existing_plan["id"],
+                plan,
+            )
+            plan_id = existing_plan["id"]
+            await log_audit(
+                "smart_production_arrangement",
+                plan_id,
+                "proposal_revalidated" if not superseded_plans else "proposal_rearranged",
+                user,
+                before=existing_plan,
+                after=updated,
+            )
+        else:
+            updated = await insert("smart_production_arrangements", plan)
+            plan_id = updated["id"]
+            await log_audit(
+                "smart_production_arrangement",
+                plan_id,
+                "proposal_created",
+                user,
+                after=updated,
+            )
+
+        for superseded_plan in superseded_plans:
+            released = await update_doc(
+                "smart_production_arrangements",
+                superseded_plan["id"],
+                {
+                    "status": "released",
+                    "released_at": now_iso(),
+                    "released_by": user.get("id"),
+                    "superseded_by": plan_id,
+                },
+            )
+            await log_audit(
+                "smart_production_arrangement",
+                superseded_plan["id"],
+                "proposal_superseded",
+                user,
+                before=superseded_plan,
+                after=released,
+            )
+        return updated
+    finally:
+        await db.smart_production_arrangement_locks.delete_one({
+            "_id": "planner",
+            "owner": owner,
+        })
+
+
+@api.post("/orders/smart-production-arrangements")
+async def create_smart_production_arrangement(
+    body: SmartProductionArrangementIn,
+    user=Depends(get_current_user),
+):
+    require_smart_production_planner(user)
+    return await create_or_refresh_smart_production_arrangement(body.order_ids, user)
+
+
+@api.delete("/orders/smart-production-arrangements/{arrangement_id}")
+async def release_smart_production_arrangement(
+    arrangement_id: str,
+    user=Depends(get_current_user),
+):
+    require_smart_production_planner(user)
+    owner = await acquire_smart_production_planner_lock()
+    try:
+        plan = await db.smart_production_arrangements.find_one(
+            {"id": arrangement_id, "status": "active"},
+            {"_id": 0},
+        )
+        if not plan:
+            raise HTTPException(404, "Active arrangement not found.")
+        released = await update_doc(
+            "smart_production_arrangements",
+            arrangement_id,
+            {"status": "released", "released_at": now_iso(), "released_by": user.get("id")},
+        )
+        await log_audit(
+            "smart_production_arrangement",
+            arrangement_id,
+            "proposal_released",
+            user,
+            before=plan,
+            after=released,
+        )
+        return released
+    finally:
+        await db.smart_production_arrangement_locks.delete_one({
+            "_id": "planner",
+            "owner": owner,
+        })
 
 @api.get("/orders/{oid}/driver-confirmation")
 async def get_order_driver_confirmation(oid: str, user=Depends(get_current_user)):
