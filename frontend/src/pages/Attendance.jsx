@@ -235,7 +235,6 @@ export default function Attendance() {
     try {
       await api.del(`/piece-production/${previous.id}`);
       toast.success(`Piece count deleted for ${employee.name}`);
-      if (salaryReport && date >= salaryStart && date <= salaryEnd) await loadSalaries();
     } catch (error) {
       setPieceRecords((current) => [...current, previous]);
       toast.error(apiError(error));
