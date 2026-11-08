@@ -62,6 +62,7 @@ export default function SalariesManagement() {
   const [payments, setPayments] = useState([]);
   const [history, setHistory] = useState([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyCompanyId, setHistoryCompanyId] = useState(user?.company_id || "");
   const [view, setView] = useState("payroll");
   const [loading, setLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -120,6 +121,12 @@ export default function SalariesManagement() {
       setLoading(false);
       return () => { active = false; };
     }
+    setReport(null);
+    setPayments([]);
+    setMonthlyIncluded({});
+    setCutDrafts({});
+    setRateDrafts({});
+    setAdvanceModal(null);
     setLoading(true);
     const params = {
       start_date: period.start,
@@ -158,7 +165,7 @@ export default function SalariesManagement() {
   }, [period?.start, period?.end, periodType, user?.company_id]);
 
   useEffect(() => {
-    if (view !== "history" || historyLoaded) return;
+    if (view !== "history" || (historyLoaded && historyCompanyId === user?.company_id)) return;
     let active = true;
     setHistoryLoading(true);
     api.getUncached("/salaries/payments/history")
@@ -166,12 +173,13 @@ export default function SalariesManagement() {
         if (active) {
           setHistory(items || []);
           setHistoryLoaded(true);
+          setHistoryCompanyId(user?.company_id || "");
         }
       })
       .catch((error) => { if (active) toast.error(apiError(error)); })
       .finally(() => { if (active) setHistoryLoading(false); });
     return () => { active = false; };
-  }, [view, historyLoaded, user?.company_id]);
+  }, [view, historyLoaded, historyCompanyId, user?.company_id]);
 
   const paymentByEmployee = useMemo(
     () => Object.fromEntries((payments || []).map((payment) => [payment.employee_id, payment])),
@@ -481,7 +489,7 @@ export default function SalariesManagement() {
           <SummaryMetric label="Employees in report" value={String(reportRows.length)} icon={ListFilter} helper="Monthly employees can be included individually." />
           <SummaryMetric label="Gross payroll" value={fmtMoney(totals.grossCents / 100)} icon={Banknote} />
           <SummaryMetric label="Balance deductions" value={fmtMoney(totals.cutCents / 100)} icon={Landmark} />
-          <SummaryMetric label="Net payable" value={fmtMoney(totals.netCents / 100)} icon={Wallet} emphasis helper={periodType === "weekly" ? "Monthly salaries are optional in this report." : "Monthly salaries can be paid once per month."} />
+          <SummaryMetric label="Net payable" value={fmtMoney(totals.netCents / 100)} icon={Wallet} emphasis helper={"Paid: " + fmtMoney(paidCents / 100) + " · " + payments.length + " recorded payments"} />
         </div>
 
         <Card className="overflow-hidden">
