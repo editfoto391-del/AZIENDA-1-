@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
-  BadgeCheck, Banknote, CalendarDays, Check, ChevronDown, ChevronRight,
-  Clock3, Download, FileText, History, Landmark, ListFilter, Search,
-  Wallet, X,
+  BadgeCheck, Banknote, Check, ChevronDown, ChevronRight,
+  Download, History, Landmark, ListFilter, Search, Wallet,
 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, today } from "@/lib/format";
@@ -75,14 +74,12 @@ export default function SalariesManagement() {
   const [paymentDates, setPaymentDates] = useState({});
   const [savingIds, setSavingIds] = useState({});
   const [advanceModal, setAdvanceModal] = useState(null);
-  const [historyEmployee, setHistoryEmployee] = useState(null);
 
   const period = useMemo(
     () => periodType === "monthly" ? monthRange(monthValue) : weekRange(weekStart),
     [periodType, monthValue, weekStart],
   );
   const payrollKey = period ? periodKey(periodType, period.start) : "";
-  const isAdmin = !!(user?.is_admin || user?.role === "admin" || user?.is_owner);
 
   const reload = async () => {
     if (!period) throw new Error(periodType === "weekly" ? "Choose a Monday for the weekly payroll." : "Choose a valid calendar month.");
@@ -419,9 +416,6 @@ export default function SalariesManagement() {
     }
   };
 
-  const departmentsForHistory = [...new Set(history.map((entry) => entry.department || "Other"))].sort();
-  const selectedRows = view === "history" ? [] : filteredRows;
-
   return (
     <div className="space-y-5" data-testid="salary-management">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -544,8 +538,7 @@ export default function SalariesManagement() {
                         : employee.pay_type === "piece"
                           ? String(employee.total_pieces || 0) + " pieces"
                           : String(employee.present_days || 0) + " full / " + String(employee.half_days || 0) + " half";
-                      const statusText = isPaid ? "Paid " + row.payment.payment_date : row.monthly && periodType !== "monthly" ? "Monthly pay" : "Ready to pay";
-                      return <>
+                      return <Fragment key={employee.employee_id}>
                         <tr key={employee.employee_id} className="border-b border-border/70 transition-colors hover:bg-secondary/40" data-testid={"salary-row-" + employee.employee_id}>
                           <td className="px-3 py-3">
                             <div className="flex items-center gap-2">
@@ -658,14 +651,14 @@ export default function SalariesManagement() {
                                   </label>
                                   <div className="mt-3 flex items-center justify-between gap-2">
                                     <div><p className="text-xs text-muted-foreground">Net amount to pay</p><p className="font-mono text-xl font-semibold text-primary">{fmtMoney(row.netCents / 100)}</p></div>
-                                    <Btn size="sm" onClick={() => markPaid(row)} disabled={!!savingIds[employee.employee_id] || !row.included || row.netCents <= 0}><Check size={14} /> Mark as paid</Btn>
+                                    <Btn size="sm" className="px-3 py-1.5 text-xs" onClick={() => markPaid(row)} disabled={!!savingIds[employee.employee_id] || !row.included || row.netCents <= 0}><Check size={14} /> Mark as paid</Btn>
                                   </div>
                                 </div>}
                               </section>
                             </div>
                           </td>
                         </tr>}
-                      </>;
+                      </Fragment>;
                     })}
                   </tbody>
                 </table>
@@ -714,7 +707,7 @@ export default function SalariesManagement() {
                         : row.monthly && periodType !== "monthly" ? <p className="text-xs text-muted-foreground">Use Monthly payroll to record payment.</p>
                         : <div className="space-y-2">
                           <Input label="Payment date" type="date" value={paymentDates[employee.employee_id] || today()} onChange={(event) => setPaymentDates((current) => ({ ...current, [employee.employee_id]: event.target.value }))} />
-                          <Btn block onClick={() => markPaid(row)} disabled={!row.included || row.netCents <= 0}> <Check size={14} /> Mark as paid</Btn>
+                          <Btn className="w-full" onClick={() => markPaid(row)} disabled={!row.included || row.netCents <= 0}> <Check size={14} /> Mark as paid</Btn>
                         </div>}
                     </div>}
                   </article>;
