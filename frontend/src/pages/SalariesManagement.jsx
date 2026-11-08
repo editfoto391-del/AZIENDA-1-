@@ -83,35 +83,45 @@ export default function SalariesManagement() {
   const payrollKey = period ? periodKey(periodType, period.start) : "";
 
   const reload = async () => {
-    if (!period) throw new Error(periodType === "weekly" ? "Choose a Monday for the weekly payroll." : "Choose a valid calendar month.");
-    const params = {
-      start_date: period.start,
-      end_date: period.end,
-      include_monthly_salaries: true,
-    };
-    const paymentParams = {
-      period_type: periodType,
-      period_start: period.start,
-      period_end: period.end,
-    };
-    const [nextReport, nextPayments] = await Promise.all([
-      api.getUncached("/salaries", params),
-      api.getUncached("/salaries/payments", paymentParams),
-    ]);
-    setReport(nextReport);
-    setPayments(nextPayments || []);
-    const paidByEmployee = Object.fromEntries((nextPayments || []).map((payment) => [payment.employee_id, payment]));
-    setCutDrafts(Object.fromEntries((nextReport.employees || []).map((employee) => [
-      employee.employee_id, String(paidByEmployee[employee.employee_id]?.deduction_amount ?? employee.cut ?? 0),
-    ])));
-    setRateDrafts(Object.fromEntries((nextReport.employees || []).map((employee) => [
-      employee.employee_id,
-      String(monthlyEmployee(employee) ? (employee.monthly_salary ?? "") : (employee.weekly_salary ?? "")),
-    ])));
-    setMonthlyIncluded(Object.fromEntries((nextReport.employees || [])
-      .filter(monthlyEmployee)
-      .map((employee) => [employee.employee_id, periodType === "monthly"])));
-    setExpanded({});
+    if (!period) {
+      toast.error(periodType === "weekly" ? "Choose a Monday for the weekly payroll." : "Choose a valid calendar month.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const params = {
+        start_date: period.start,
+        end_date: period.end,
+        include_monthly_salaries: true,
+      };
+      const paymentParams = {
+        period_type: periodType,
+        period_start: period.start,
+        period_end: period.end,
+      };
+      const [nextReport, nextPayments] = await Promise.all([
+        api.getUncached("/salaries", params),
+        api.getUncached("/salaries/payments", paymentParams),
+      ]);
+      setReport(nextReport);
+      setPayments(nextPayments || []);
+      const paidByEmployee = Object.fromEntries((nextPayments || []).map((payment) => [payment.employee_id, payment]));
+      setCutDrafts(Object.fromEntries((nextReport.employees || []).map((employee) => [
+        employee.employee_id, String(paidByEmployee[employee.employee_id]?.deduction_amount ?? employee.cut ?? 0),
+      ])));
+      setRateDrafts(Object.fromEntries((nextReport.employees || []).map((employee) => [
+        employee.employee_id,
+        String(monthlyEmployee(employee) ? (employee.monthly_salary ?? "") : (employee.weekly_salary ?? "")),
+      ])));
+      setMonthlyIncluded(Object.fromEntries((nextReport.employees || [])
+        .filter(monthlyEmployee)
+        .map((employee) => [employee.employee_id, periodType === "monthly"])));
+      setExpanded({});
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -249,6 +259,9 @@ export default function SalariesManagement() {
   const saveCut = async (employee) => {
     if (monthlyEmployee(employee) && periodType !== "monthly") {
       return toast.error("Select the complete month to save a monthly balance deduction.");
+    }
+    if (!monthlyEmployee(employee) && periodType !== "weekly") {
+      return toast.error("Select a Monday–Saturday week to save this employee's deduction.");
     }
     const amount = Number(cutDrafts[employee.employee_id] ?? employee.cut ?? 0);
     if (!Number.isFinite(amount) || amount < 0) return toast.error("Deduction must be zero or more.");
@@ -588,6 +601,7 @@ export default function SalariesManagement() {
                           <td className="px-3 py-3">
                             {isPaid ? <Badge cls="border-emerald-200 bg-emerald-50 text-emerald-800"><Check size={11} className="mr-1" /> Paid</Badge>
                               : row.monthly && periodType !== "monthly" ? <Badge cls="border-border bg-secondary text-secondary-foreground">Monthly</Badge>
+                              : !row.monthly && periodType !== "weekly" ? <Badge cls="border-border bg-secondary text-secondary-foreground">Weekly payroll</Badge>
                               : <Badge cls="border-amber-200 bg-amber-50 text-amber-800">Pending</Badge>}
                             {isPaid && <p className="mt-1 text-[10px] text-muted-foreground">{row.payment.payment_date}</p>}
                           </td>
@@ -643,7 +657,7 @@ export default function SalariesManagement() {
                                   {row.monthly && periodType !== "monthly" && <p className="mt-2 text-[11px] text-muted-foreground">Switch to Monthly payroll to edit or save this deduction.</p>}
                                   <div className="mt-3 flex flex-wrap gap-2">
                                     <Btn size="sm" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })} disabled={!!savingIds[employee.employee_id]}> <Landmark size={13} /> Add borrowed balance</Btn>
-                                    <Btn size="sm" onClick={() => saveCut(employee)} disabled={!!savingIds[employee.employee_id] || !!row.payment || (row.monthly && periodType !== "monthly")}>Save deduction</Btn>
+                                    <Btn size="sm" onClick={() => saveCut(employee)} disabled={!!savingIds[employee.employee_id] || !!row.payment || (row.monthly && periodType !== "monthly") || (!row.monthly && periodType !== "weekly")}>Save deduction</Btn>
                                   </div>
                                 </div>
                                 {employee.balance_history?.length > 0 && <details className="rounded-md border border-border bg-card p-3 text-xs">
@@ -667,6 +681,9 @@ export default function SalariesManagement() {
                                 </div> : row.monthly && periodType !== "monthly" ? <div className="rounded-md border border-border bg-card p-4 text-sm">
                                   <p className="font-semibold text-foreground">Monthly salary</p>
                                   <p className="mt-1 text-xs text-muted-foreground">This employee can be paid once from the Monthly payroll. Include or exclude them from this report using the checkbox.</p>
+                                </div> : !row.monthly && periodType !== "weekly" ? <div className="rounded-md border border-border bg-card p-4 text-sm">
+                                  <p className="font-semibold text-foreground">Weekly earnings overview</p>
+                                  <p className="mt-1 text-xs text-muted-foreground">This monthly report summarizes weekly earnings. Record payment from the specific Monday–Saturday week.</p>
                                 </div> : <div className="rounded-md border border-border bg-card p-4">
                                   <label className="block text-xs font-semibold text-muted-foreground">Payment date
                                     <input type="date" value={paymentDates[employee.employee_id] || today()} onChange={(event) => setPaymentDates((current) => ({ ...current, [employee.employee_id]: event.target.value }))} disabled={!!savingIds[employee.employee_id]} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground" />
@@ -697,7 +714,7 @@ export default function SalariesManagement() {
                         <p className="font-semibold text-foreground">{employee.name}</p>
                         <p className="mt-0.5 text-xs text-muted-foreground">{employee.department || "Other"} · {row.monthly ? "Monthly" : employee.pay_type === "piece" ? "Piecework" : "Weekly"}</p>
                       </div>
-                      {isPaid ? <Badge cls="border-emerald-200 bg-emerald-50 text-emerald-800">Paid</Badge> : <Badge cls="border-amber-200 bg-amber-50 text-amber-800">{row.monthly ? "Monthly" : "Pending"}</Badge>}
+                      {isPaid ? <Badge cls="border-emerald-200 bg-emerald-50 text-emerald-800">Paid</Badge> : <Badge cls="border-amber-200 bg-amber-50 text-amber-800">{row.monthly ? "Monthly" : periodType === "monthly" ? "Weekly overview" : "Pending"}</Badge>}
                     </div>
                     <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
                       <div><p className="text-muted-foreground">Gross</p><p className="mt-1 font-mono font-semibold">{fmtMoney(row.grossCents / 100)}</p></div>
@@ -723,10 +740,11 @@ export default function SalariesManagement() {
                       </label>
                       <div className="flex flex-wrap gap-2">
                         <Btn size="sm" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })}><Landmark size={13} /> Add balance</Btn>
-                        <Btn size="sm" onClick={() => saveCut(employee)} disabled={!!row.payment || (row.monthly && periodType !== "monthly")}>Save deduction</Btn>
+                        <Btn size="sm" onClick={() => saveCut(employee)} disabled={!!row.payment || (row.monthly && periodType !== "monthly") || (!row.monthly && periodType !== "weekly")}>Save deduction</Btn>
                       </div>
                       {row.payment ? <p className="text-xs text-emerald-700">Paid on {row.payment.payment_date} · {fmtMoney(row.payment.net_amount)}</p>
                         : row.monthly && periodType !== "monthly" ? <p className="text-xs text-muted-foreground">Use Monthly payroll to record payment.</p>
+                        : !row.monthly && periodType !== "weekly" ? <p className="text-xs text-muted-foreground">Record payment from the specific Monday–Saturday week.</p>
                         : <div className="space-y-2">
                           <Input label="Payment date" type="date" value={paymentDates[employee.employee_id] || today()} onChange={(event) => setPaymentDates((current) => ({ ...current, [employee.employee_id]: event.target.value }))} />
                           <Btn className="w-full" onClick={() => markPaid(row)} disabled={!row.included || row.netCents <= 0}> <Check size={14} /> Mark as paid</Btn>
