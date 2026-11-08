@@ -28,7 +28,7 @@ def test_saturday_at_40_pays_all_pieces_at_the_high_rate():
     assert result["piece_pay"] == 1365
 
 
-def test_ayanda_weekly_piece_pay_matches_legacy_calculation():
+def test_ayanda_weekly_piece_pay_includes_saturday_piece_rate():
     result = weekly_result(49, 70, 70, 70, 72, 40)
 
     assert result["piece_pay"] == 1279.5
@@ -36,7 +36,7 @@ def test_ayanda_weekly_piece_pay_matches_legacy_calculation():
     assert result["weeks"][0]["unpaid_saturday_pieces"] == 0
 
 
-def test_asive_weekly_piece_pay_matches_legacy_calculation():
+def test_asive_weekly_piece_pay_includes_saturday_piece_rate():
     result = weekly_result(55, 72, 70, 70, 70, 41)
 
     assert result["piece_pay"] == 1311
@@ -78,7 +78,7 @@ def test_saturday_first_40_pieces_cannot_recover_weekday_deficit():
     assert week["saturday_recovery_pieces"] == 0
     assert week["unrecovered_weekday_deficit"] == 15
     assert week["weekday_low_rate_pieces"] == 15
-    assert result["piece_pay"] == 1157.5
+    assert result["piece_pay"] == 1297.5
 
 
 def test_only_saturday_pieces_above_40_recover_weekday_deficits():
@@ -107,7 +107,7 @@ def test_saturday_surplus_recovers_entire_remaining_weekday_deficit():
     assert result["piece_pay"] == 1382.5
 
 
-def test_saturday_below_target_is_recorded_without_separate_pay():
+def test_saturday_below_40_pays_each_piece_at_low_rate():
     result = weekly_result(0, 0, 0, 0, 0, 39)
 
     week = result["weeks"][0]
@@ -117,7 +117,7 @@ def test_saturday_below_target_is_recorded_without_separate_pay():
     assert week["saturday_recovery_pieces"] == 0
 
 
-def test_saturday_bonus_requires_more_than_40_pieces():
+def test_saturday_at_and_above_40_pays_each_piece_at_high_rate():
     at_target = weekly_result(0, 0, 0, 0, 0, 40)["weeks"][0]
     above_target = weekly_result(0, 0, 0, 0, 0, 41)["weeks"][0]
 
