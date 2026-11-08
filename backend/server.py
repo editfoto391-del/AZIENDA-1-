@@ -8792,6 +8792,18 @@ async def save_salary_cut(body: SalaryCutIn, user=Depends(get_current_user)):
         raise HTTPException(404, "Employee not found")
     if employee["pay_frequency"] == "monthly_fixed" and not employee["is_full_month_period"]:
         raise HTTPException(400, "Select a complete calendar month before saving a salary cut")
+    payment_keys = []
+    if is_full_calendar_month(body.start_date, body.end_date):
+        payment_keys.append("monthly:" + body.start_date[:7])
+    try:
+        payment_keys.append(salary_payroll_key("weekly", body.start_date, body.end_date))
+    except HTTPException:
+        pass
+    if payment_keys and await db.salary_payments.find_one({
+        "employee_id": body.employee_id,
+        "payroll_key": {"$in": payment_keys},
+    }, {"_id": 0}):
+        raise HTTPException(409, "A completed payroll payment is locked; later balance changes apply to a future payroll")
     before = await db.salary_cuts.find_one({
         "employee_id": body.employee_id, "start_date": body.start_date, "end_date": body.end_date,
     }, {"_id": 0})
