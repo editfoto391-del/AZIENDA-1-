@@ -131,7 +131,57 @@ def test_ribbon_shortage_is_distributed_to_existing_named_employees_with_order_r
     ]
     assert [task["total_pieces"] for task in tasks] == [2, 2, 2]
     assert sum(task["total_pieces"] for task in tasks) == 6
-    assert all(task["tasks"][0]["order_reference"] == "RIBBON-ORDER" for task in tasks)
+    assert all(
+        task["tasks"][0]["orders"] == [{
+            "order_id": "ribbon-order",
+            "order_reference": "RIBBON-ORDER",
+            "customer_name": "Customer ribbon-order",
+            "quantity": 2,
+        }]
+        for task in tasks
+    )
+
+
+def test_same_product_and_size_across_orders_shows_one_total_with_order_breakdown():
+    first = order("first", 60, reference="ORDER-X", category="Ribbon Black", size="910x100")
+    second = order("second", 10, reference="ORDER-Y", category="Ribbon Black", size="910x100")
+    employees = [
+        {"id": "asive", "name": "ASIVE TAILOR"},
+        {"id": "ayanda", "name": "AYANDA TAILOR"},
+        {"id": "hassan", "name": "HASSAN TAILOR"},
+    ]
+
+    plan = build_smart_production_plan([first, second], [first, second], [], employees)
+
+    assert len(plan["lines"]) == 1
+    line = plan["lines"][0]
+    assert (line["missing_quantity"], line["size"], line["product"]) == (
+        70, "910x100", "Ribbon Black",
+    )
+    assigned_tasks = [
+        task
+        for employee in plan["employee_tasks"]
+        for task in employee["tasks"]
+    ]
+    assert len(assigned_tasks) == 3
+    assert sum(task["quantity"] for task in assigned_tasks) == 70
+    assert {
+        order["order_reference"]
+        for task in assigned_tasks
+        for order in task["orders"]
+    } == {"ORDER-X", "ORDER-Y"}
+    assert sum(
+        order["quantity"]
+        for task in assigned_tasks
+        for order in task["orders"]
+        if order["order_reference"] == "ORDER-X"
+    ) == 60
+    assert sum(
+        order["quantity"]
+        for task in assigned_tasks
+        for order in task["orders"]
+        if order["order_reference"] == "ORDER-Y"
+    ) == 10
 
 
 def test_simple_shortage_is_not_assigned_to_the_named_production_team():
@@ -188,7 +238,10 @@ def test_candy_strong_boy_and_both_ribbon_colours_are_assigned_to_named_employee
         "Candy", "Strong Boy", "Ribbon Black", "Ribbon Pink",
     }
     assert sum(task["quantity"] for task in assigned_tasks) == 8
-    assert all(task["order_reference"] == "TEAM-ORDERS" for task in assigned_tasks)
+    assert all(
+        all(order["order_reference"] == "TEAM-ORDERS" for order in task["orders"])
+        for task in assigned_tasks
+    )
 
 
 def test_revalidation_uses_actual_stock_after_existing_production_receipt():

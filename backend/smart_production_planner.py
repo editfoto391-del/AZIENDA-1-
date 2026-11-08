@@ -259,31 +259,48 @@ def build_smart_production_plan(
             allocation for allocation in line["orders"]
             if allocation["missing_quantity"] > 0
         ]
-        for allocation in missing_by_order:
-            quantity = allocation["missing_quantity"]
-            if not production_employees:
-                unassigned_employee_quantity += quantity
+        quantity_to_assign = sum(allocation["missing_quantity"] for allocation in missing_by_order)
+        if not production_employees:
+            unassigned_employee_quantity += quantity_to_assign
+            continue
+        base, remainder = divmod(quantity_to_assign, len(production_employees))
+        shares = {employee["id"]: base for employee in production_employees}
+        for employee in sorted(production_employees, key=lambda item: (employee_load[item["id"]], item["id"]))[:remainder]:
+            shares[employee["id"]] += 1
+        remaining_by_order = [
+            {**allocation, "remaining_quantity": allocation["missing_quantity"]}
+            for allocation in missing_by_order
+        ]
+        for employee in production_employees:
+            assigned = shares[employee["id"]]
+            if assigned <= 0:
                 continue
-            base, remainder = divmod(quantity, len(production_employees))
-            shares = {employee["id"]: base for employee in production_employees}
-            for employee in sorted(production_employees, key=lambda item: (employee_load[item["id"]], item["id"]))[:remainder]:
-                shares[employee["id"]] += 1
-            for employee in production_employees:
-                assigned = shares[employee["id"]]
-                if assigned <= 0:
+            assigned_orders = []
+            remaining_assignment = assigned
+            for allocation in remaining_by_order:
+                if remaining_assignment <= 0:
+                    break
+                from_order = min(remaining_assignment, allocation["remaining_quantity"])
+                if from_order <= 0:
                     continue
-                employee_tasks[employee["id"]]["tasks"].append({
-                    "product": line["product"],
-                    "size": line["size"],
-                    "color": line["color"],
-                    "product_type": line["product_type"],
-                    "quantity": assigned,
+                assigned_orders.append({
                     "order_id": allocation["order_id"],
                     "order_reference": allocation["order_reference"],
                     "customer_name": allocation["customer_name"],
+                    "quantity": from_order,
                 })
-                employee_tasks[employee["id"]]["total_pieces"] += assigned
-                employee_load[employee["id"]] += assigned
+                allocation["remaining_quantity"] -= from_order
+                remaining_assignment -= from_order
+            employee_tasks[employee["id"]]["tasks"].append({
+                "product": line["product"],
+                "size": line["size"],
+                "color": line["color"],
+                "product_type": line["product_type"],
+                "quantity": assigned,
+                "orders": assigned_orders,
+            })
+            employee_tasks[employee["id"]]["total_pieces"] += assigned
+            employee_load[employee["id"]] += assigned
 
     order_summaries = []
     for order in selected_orders:

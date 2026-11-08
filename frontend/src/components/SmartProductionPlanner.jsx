@@ -91,17 +91,16 @@ export default function SmartProductionPlanner({ plan, loading, onRefresh, onRel
                       <Badge cls={status.cls}><StatusIcon size={13} /> {status.label}</Badge>
                     </div>
                     <div className="grid grid-cols-3 gap-2 text-xs">
-                      <p>Required <strong>{moneySafeQuantity(line.total_required)}</strong></p>
-                      <p>Available <strong>{moneySafeQuantity(line.available_quantity)}</strong></p>
-                      <p>Missing <strong>{moneySafeQuantity(line.missing_quantity)}</strong></p>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {line.orders.map((allocation) => (
-                        <span key={allocation.order_id} className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600">
-                          {allocation.order_reference}: {moneySafeQuantity(allocation.available_quantity)} available · {moneySafeQuantity(allocation.missing_quantity)} missing
-                        </span>
-                      ))}
-                    </div>
+                              <p>Ordered <strong>{moneySafeQuantity(line.total_required)}</strong></p>
+                              <p>On floor <strong>{moneySafeQuantity(line.available_quantity)}</strong></p>
+                              <p>To make <strong>{moneySafeQuantity(line.missing_quantity)}</strong></p>
+                            </div>
+                            <p className="text-xs text-slate-600">
+                              {line.missing_quantity > 0 ? "Make for: " : "Allocated to: "}
+                              {line.orders.map((allocation) => (
+                                `${allocation.order_reference} (${moneySafeQuantity(line.missing_quantity > 0 ? allocation.missing_quantity : allocation.quantity)} pcs)`
+                              )).filter((entry) => !entry.includes("(0 pcs)")).join(" · ") || "No order allocation"}
+                            </p>
                   </Card>
                 );
               })}
@@ -126,9 +125,9 @@ export default function SmartProductionPlanner({ plan, loading, onRefresh, onRel
                   </div>
                   {employee.tasks.length ? <ul className="mt-3 space-y-3 text-xs">
                     {employee.tasks.map((task, index) => (
-                      <li key={`${task.order_id}-${task.product}-${task.size}-${index}`} className="border-t border-slate-100 pt-2">
+                      <li key={`${task.orders.map((order) => order.order_id).join("-")}-${task.product}-${task.size}-${index}`} className="border-t border-slate-100 pt-2">
                         <p className="font-semibold">Make {moneySafeQuantity(task.quantity)} pcs · {task.product} · {task.size}{task.color ? ` · ${task.color}` : ""}</p>
-                        <p className="mt-1 text-slate-500">For {task.order_reference} · {task.customer_name || "customer unspecified"}</p>
+                        <p className="mt-1 text-slate-500">For {task.orders.map((order) => `${order.order_reference} (${moneySafeQuantity(order.quantity)} pcs)`).join(" · ")}</p>
                       </li>
                     ))}
                   </ul> : <p className="mt-3 text-xs text-slate-500">No pieces currently assigned.</p>}
