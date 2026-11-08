@@ -26,8 +26,13 @@ def install_grv_transfer_mocks(monkeypatch, *, grv=None, stock=None, inventory=N
         stock=MockCollection(stock),
     )
     monkeypatch.setattr(server, "db", database)
+    stock_items = stock if isinstance(stock, list) else ([stock] if stock else [])
     monkeypatch.setattr(server, "listall", lambda collection, *_args, **_kwargs: asyncio.sleep(
-        0, result={"company_inventory": inventory or [], "chemical_inventory": []}.get(collection, []),
+        0, result={
+            "stock": stock_items,
+            "company_inventory": inventory or [],
+            "chemical_inventory": [],
+        }.get(collection, []),
     ))
     inserted = []
     updated = []
@@ -115,6 +120,68 @@ def test_selling_buying_without_size_keeps_size_blank_and_creates_stock_grv(monk
     line = inserted[0][1]["items"][0]
     assert line["size"] == ""
     assert line["new_product"] is True
+    assert confirmed == ["grv-created"]
+
+
+def test_selling_buying_without_stock_id_uses_existing_stock_product(monkeypatch):
+    stock = {"id": "stock-existing", "product": "Foam", "size": "910x100", "code": "F-1"}
+    inserted, _, confirmed = install_grv_transfer_mocks(monkeypatch, stock=stock)
+
+    asyncio.run(server._create_grv_from_buying({
+        "id": "buying-existing-stock",
+        "product": "foam",
+        "size": "910X100",
+        "item_type": "selling_product",
+        "quantity": 3,
+        "unit_price": 120,
+    }, {"email": "owner@example.com", "name": "Owner"}))
+
+    line = inserted[0][1]["items"][0]
+    assert line["stock_id"] == "stock-existing"
+    assert line["new_product"] is False
+    assert line["product"] == "Foam"
+    assert line["size"] == "910x100"
+    assert confirmed == ["grv-created"]
+
+
+def test_selling_buying_with_stale_stock_id_uses_existing_product_match(monkeypatch):
+    stock = {"id": "stock-existing", "product": "Foam", "size": "910x100", "code": "F-1"}
+    inserted, _, confirmed = install_grv_transfer_mocks(monkeypatch, stock=stock)
+
+    asyncio.run(server._create_grv_from_buying({
+        "id": "buying-stale-stock-match",
+        "product": "Foam",
+        "size": "910x100",
+        "stock_id": "stock-deleted",
+        "item_type": "selling_product",
+        "quantity": 3,
+        "unit_price": 120,
+    }, {"email": "owner@example.com", "name": "Owner"}))
+
+    line = inserted[0][1]["items"][0]
+    assert line["stock_id"] == "stock-existing"
+    assert line["new_product"] is False
+    assert confirmed == ["grv-created"]
+
+
+def test_selling_buying_with_stale_stock_id_falls_back_to_new_product(monkeypatch):
+    inserted, _, confirmed = install_grv_transfer_mocks(monkeypatch)
+
+    asyncio.run(server._create_grv_from_buying({
+        "id": "buying-stale-stock",
+        "product": "Custom foam",
+        "size": "910x100",
+        "stock_id": "stock-deleted",
+        "item_type": "selling_product",
+        "quantity": 3,
+        "unit_price": 120,
+    }, {"email": "owner@example.com", "name": "Owner"}))
+
+    line = inserted[0][1]["items"][0]
+    assert line["stock_id"] == ""
+    assert line["new_product"] is True
+    assert line["product"] == "Custom foam"
+    assert line["size"] == "910x100"
     assert confirmed == ["grv-created"]
 
 

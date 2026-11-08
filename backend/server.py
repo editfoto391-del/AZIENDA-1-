@@ -11199,9 +11199,7 @@ async def _buying_grv_line(buying):
         stock_id = (buying.get("stock_id") or "").strip()
         if stock_id:
             stock = await db.stock.find_one({"id": stock_id}, {"_id": 0})
-            if not stock:
-                raise HTTPException(409, f"The linked stock item for {product} is no longer available")
-        else:
+        if not stock:
             stock_size = size
             matches = await listall("stock", {
                 "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
