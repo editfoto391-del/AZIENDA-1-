@@ -8232,6 +8232,19 @@ class SalaryRateIn(BaseModel):
     monthly_salary: Optional[float] = Field(default=None, gt=0)
     work_days_per_week: Optional[int] = Field(default=None, ge=6, le=6)
 
+class SalaryPaymentIn(BaseModel):
+    employee_id: str
+    period_type: Literal["weekly", "monthly"]
+    period_start: str
+    period_end: str
+    payment_date: str = Field(default_factory=today_str)
+    notes: Optional[str] = ""
+
+    @field_validator("period_start", "period_end", "payment_date")
+    @classmethod
+    def salary_payment_dates_valid(cls, value):
+        return validate_iso_date(value)
+
 class PieceProductionIn(BaseModel):
     employee_id: str
     date: str
@@ -8348,7 +8361,7 @@ def is_full_calendar_month(start_date, end_date):
     )
 
 
-async def salary_report(start_date, end_date):
+async def salary_report(start_date, end_date, *, include_monthly_salaries=False):
     salary_period_dates(start_date, end_date)
     full_month_period = is_full_calendar_month(start_date, end_date)
     employees, attendance, piece_records, advances, cuts = await asyncio.gather(
@@ -8366,10 +8379,14 @@ async def salary_report(start_date, end_date):
         is_monthly_fixed = is_monthly_fixed_salary_employee(employee) and not is_piece_paid
         report_start = date.fromisoformat(start_date)
         report_end = date.fromisoformat(end_date)
+        payroll_month_start = report_start.replace(day=1)
+        payroll_month_end = payroll_month_start.replace(
+            day=calendar.monthrange(payroll_month_start.year, payroll_month_start.month)[1]
+        )
         is_yaseen_november_period = (
             is_yaseen_uncle
-            and report_start <= YASEEN_UNCLE_NOVEMBER_END
-            and report_end >= YASEEN_UNCLE_NOVEMBER_START
+            and payroll_month_start <= YASEEN_UNCLE_NOVEMBER_END
+            and payroll_month_end >= YASEEN_UNCLE_NOVEMBER_START
         )
         monthly_salary = (
             YASEEN_UNCLE_NOVEMBER_MONTHLY_SALARY
@@ -8431,7 +8448,8 @@ async def salary_report(start_date, end_date):
         system_november_cut = min(system_november_cut, max(november_yaseen_opening_balance, Decimal("0")))
         if (
             is_yaseen_uncle
-            and report_end >= YASEEN_UNCLE_NOVEMBER_END
+            and is_yaseen_november_period
+            and (report_end >= YASEEN_UNCLE_NOVEMBER_END or include_monthly_salaries)
             and system_november_cut > 0
         ):
             employee_cuts.append({
@@ -8451,6 +8469,8 @@ async def salary_report(start_date, end_date):
                     item.get("start_date") == start_date and item.get("end_date") == end_date
                     or full_month_period and is_yaseen_november_period
                     and YASEEN_UNCLE_NOVEMBER_START.isoformat() <= item.get("end_date", "") <= YASEEN_UNCLE_NOVEMBER_END.isoformat()
+                    or is_monthly_fixed and include_monthly_salaries
+                    and payroll_month_start.isoformat() <= item.get("end_date", "") <= payroll_month_end.isoformat()
                 )
             ),
             Decimal("0"),
@@ -8463,24 +8483,35 @@ async def salary_report(start_date, end_date):
             Decimal("0"),
         )) if not is_monthly_fixed else 0
         overtime_pay = r2(D(overtime_hours) * D(OVERTIME_HOURLY_RATE)) if not is_monthly_fixed else 0
-        monthly_pay = r2(monthly_salary) if is_monthly_fixed and monthly_salary is not None and full_month_period else 0
+        monthly_pay = r2(monthly_salary) if (
+            is_monthly_fixed and monthly_salary is not None
+            and (full_month_period or include_monthly_salaries)
+        ) else 0
         gross = employee_piecework["piece_pay"] if is_piece_paid else (
             monthly_pay if is_monthly_fixed else r2(regular_pay + overtime_pay)
         )
         cut = period_cut
         balance = all_advance_total - all_cut_total
+        balance_period_start = (
+            payroll_month_start.isoformat()
+            if is_monthly_fixed and include_monthly_salaries else start_date
+        )
+        balance_period_end = (
+            payroll_month_end.isoformat()
+            if is_monthly_fixed and include_monthly_salaries else end_date
+        )
         balance_before_period = sum(
-            (D(item.get("amount", 0)) for item in employee_advances if item.get("date", "") < start_date),
+            (D(item.get("amount", 0)) for item in employee_advances if item.get("date", "") < balance_period_start),
             Decimal("0"),
         ) - sum(
-            (D(item.get("amount", 0)) for item in employee_cuts if item.get("end_date", "") < start_date),
+            (D(item.get("amount", 0)) for item in employee_cuts if item.get("end_date", "") < balance_period_start),
             Decimal("0"),
         )
         balance_through_period = sum(
-            (D(item.get("amount", 0)) for item in employee_advances if item.get("date", "") <= end_date),
+            (D(item.get("amount", 0)) for item in employee_advances if item.get("date", "") <= balance_period_end),
             Decimal("0"),
         ) - sum(
-            (D(item.get("amount", 0)) for item in employee_cuts if item.get("end_date", "") <= end_date),
+            (D(item.get("amount", 0)) for item in employee_cuts if item.get("end_date", "") <= balance_period_end),
             Decimal("0"),
         )
         balance_history = [
@@ -8562,9 +8593,114 @@ async def salary_cost_for_period(start_date, end_date):
 
 
 @api.get("/salaries")
-async def get_salaries(start_date: str, end_date: str, user=Depends(get_current_user)):
+async def get_salaries(
+    start_date: str,
+    end_date: str,
+    include_monthly_salaries: bool = Query(False),
+    user=Depends(get_current_user),
+):
     require_admin(user)
-    return await salary_report(start_date, end_date)
+    return await salary_report(
+        start_date, end_date,
+        include_monthly_salaries=include_monthly_salaries,
+    )
+
+
+def salary_payroll_key(period_type, period_start, period_end):
+    salary_period_dates(period_start, period_end)
+    start = date.fromisoformat(period_start)
+    end = date.fromisoformat(period_end)
+    if period_type == "monthly":
+        if not is_full_calendar_month(period_start, period_end):
+            raise HTTPException(400, "Monthly payroll must cover one complete calendar month")
+        return "monthly:" + period_start[:7]
+    if period_type == "weekly":
+        if start.weekday() != 0 or end != start + timedelta(days=5):
+            raise HTTPException(400, "Weekly payroll must cover Monday through Saturday")
+        return "weekly:" + period_start
+    raise HTTPException(400, "Unsupported payroll period type")
+
+
+@api.get("/salaries/payments")
+async def get_salary_payments(
+    period_type: Literal["weekly", "monthly"],
+    period_start: str,
+    period_end: str,
+    user=Depends(get_current_user),
+):
+    require_admin(user)
+    payroll_key = salary_payroll_key(period_type, period_start, period_end)
+    return await listall(
+        "salary_payments", {"payroll_key": payroll_key}, ("payment_date", -1)
+    )
+
+
+@api.get("/salaries/payments/history")
+async def get_salary_payment_history(user=Depends(get_current_user)):
+    require_admin(user)
+    return await listall("salary_payments", sort=("payment_date", -1))
+
+
+@api.post("/salaries/payments")
+async def record_salary_payment(body: SalaryPaymentIn, user=Depends(get_current_user)):
+    require_admin(user)
+    payroll_key = salary_payroll_key(
+        body.period_type, body.period_start, body.period_end
+    )
+    report = await salary_report(
+        body.period_start,
+        body.period_end,
+        include_monthly_salaries=body.period_type == "monthly",
+    )
+    employee = next(
+        (item for item in report["employees"] if item["employee_id"] == body.employee_id),
+        None,
+    )
+    if not employee:
+        raise HTTPException(404, "Employee not found in this payroll period")
+    is_monthly = employee.get("pay_frequency") == "monthly_fixed"
+    if body.period_type == "monthly" and not is_monthly:
+        raise HTTPException(400, "Monthly payment records are only for monthly-paid employees")
+    if body.period_type == "weekly" and is_monthly:
+        raise HTTPException(400, "Monthly-paid employees must be paid from a monthly payroll")
+    gross_amount = r2(D(employee.get("gross_salary", 0)))
+    deduction_amount = r2(D(employee.get("cut", 0)))
+    net_amount = r2(gross_amount - deduction_amount)
+    if gross_amount <= 0 or net_amount <= 0:
+        raise HTTPException(400, "This employee has no positive net amount payable in the selected payroll")
+    existing = await db.salary_payments.find_one(
+        {"employee_id": body.employee_id, "payroll_key": payroll_key},
+        {"_id": 0},
+    )
+    if existing:
+        raise HTTPException(409, "This employee's payroll has already been marked as paid")
+    data = {
+        "employee_id": body.employee_id,
+        "employee_name": employee.get("name", ""),
+        "department": employee.get("department", ""),
+        "period_type": body.period_type,
+        "payroll_key": payroll_key,
+        "period_start": body.period_start,
+        "period_end": body.period_end,
+        "gross_amount": gross_amount,
+        "deduction_amount": deduction_amount,
+        "net_amount": net_amount,
+        "payment_date": body.payment_date,
+        "notes": body.notes or "",
+        "status": "paid",
+        "paid_at": now_iso(),
+        "paid_by": user.get("id"),
+    }
+    try:
+        record = await insert("salary_payments", data)
+    except DuplicateKeyError:
+        raise HTTPException(409, "This employee's payroll has already been marked as paid")
+    await log_audit(
+        "salary_payment", record["id"], "paid", user,
+        before=None, after=record,
+    )
+    return record
+
 
 @api.put("/salaries/rates/{eid}")
 async def save_salary_rate(eid: str, body: SalaryRateIn, user=Depends(get_current_user)):
@@ -16023,6 +16159,15 @@ async def initialize_empty_company(company_id):
     )
     await company_db.intercompany_customer_mappings.create_index(
         "requesting_company_id", unique=True, name="intercompany_customer_mapping_once",
+    )
+    await company_db.salary_payments.create_index(
+        [("employee_id", 1), ("payroll_key", 1)],
+        unique=True,
+        name="salary_payment_once",
+    )
+    await company_db.salary_payments.create_index(
+        [("payment_date", -1)],
+        name="salary_payment_date",
     )
     await ensure_performance_indexes(company_db)
 
