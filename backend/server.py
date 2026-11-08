@@ -8433,9 +8433,7 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
                 for item in employee_cuts
                 if (
                     item.get("start_date") == start_date and item.get("end_date") == end_date
-                    or full_month_period and is_yaseen_november_period
-                    and YASEEN_UNCLE_NOVEMBER_START.isoformat() <= item.get("end_date", "") <= YASEEN_UNCLE_NOVEMBER_END.isoformat()
-                    or is_monthly_fixed and include_monthly_salaries
+                    or is_monthly_fixed and (full_month_period or include_monthly_salaries)
                     and payroll_month_start.isoformat() <= item.get("end_date", "") <= payroll_month_end.isoformat()
                 )
             ),
@@ -8774,28 +8772,6 @@ async def save_salary_cut(body: SalaryCutIn, user=Depends(get_current_user)):
         "employee_id": body.employee_id, "start_date": body.start_date, "end_date": body.end_date,
     }, {"_id": 0})
     stored_cut_amount = body.amount
-    if (
-        employee["pay_frequency"] == "monthly_fixed"
-        and is_yaseen_uncle_employee(employee)
-        and body.start_date == YASEEN_UNCLE_NOVEMBER_START.isoformat()
-        and body.end_date == YASEEN_UNCLE_NOVEMBER_END.isoformat()
-    ):
-        existing_november_cuts = await listall("salary_cuts", {
-            "employee_id": body.employee_id,
-            "voided": {"$ne": True},
-        })
-        other_november_cuts = sum(
-            (
-                D(item.get("amount", 0))
-                for item in existing_november_cuts
-                if item.get("id") != (before or {}).get("id")
-                and YASEEN_UNCLE_NOVEMBER_START.isoformat() <= item.get("end_date", "") <= YASEEN_UNCLE_NOVEMBER_END.isoformat()
-            ),
-            Decimal("0"),
-        )
-        stored_cut_amount = float(D(body.amount) - other_november_cuts)
-        if stored_cut_amount < 0:
-            raise HTTPException(400, "The November balance cut cannot be lower than cuts already recorded for that month")
     available_balance = employee["available_balance"]
     if body.amount > available_balance:
         raise HTTPException(400, f"Cut exceeds the outstanding balance of R {available_balance:.2f}")
