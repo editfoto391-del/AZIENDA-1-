@@ -1,4 +1,3 @@
-
 name: SUPER IQ-FOAM - Automatic Code Checks
 
 on:
@@ -14,7 +13,7 @@ permissions:
 
 jobs:
   backend-tests:
-    name: Backend Tests
+    name: Backend Unit Tests (integration suites reported separately)
     runs-on: ubuntu-latest
 
     steps:
@@ -26,15 +25,117 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install backend dependencies
+      - name: Install backend dependencies available to GitHub Actions
         run: |
-          cd backend
-          pip install -r requirements.txt
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
 
-      - name: Run backend tests
+          requirements = Path("backend/requirements.txt").read_text(encoding="utf-8").splitlines()
+          private_requirement = re.compile(r"emergentintegrations\s*==\s*0\.2\.2", re.IGNORECASE)
+          package_name = re.compile(r"^\s*emergentintegrations(?:\s|[<>=!~;\[]|$)", re.IGNORECASE)
+          matching = []
+          remaining = []
+          for line in requirements:
+              requirement = line.partition("#")[0].strip()
+              if not requirement:
+                  remaining.append(line)
+              elif package_name.match(requirement):
+                  if not private_requirement.fullmatch(requirement):
+                      sys.exit(f"Unexpected emergentintegrations requirement in production requirements: {requirement}")
+                  matching.append(line)
+              else:
+                  remaining.append(line)
+
+          if len(matching) != 1:
+              sys.exit("Expected exactly one emergentintegrations==0.2.2 production requirement; no CI dependency was changed.")
+
+          ci_requirements = Path(os.environ["RUNNER_TEMP"]) / "backend-requirements-ci.txt"
+          ci_requirements.write_text("\n".join(remaining) + "\n", encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(
+                  "### Backend dependency scope\n\n"
+                  "- Installed all requirements from `backend/requirements.txt` except "
+                  "`emergentintegrations==0.2.2`.\n"
+                  "- The production requirement file is unchanged. The excluded package is not published "
+                  "on public PyPI and this workflow has no Emergent package-index configuration or credentials.\n"
+                  "- Backend integration tests requiring the Emergent package or a live isolated API are "
+                  "reported as **NOT RUN / BLOCKED**, not counted as passing.\n\n"
+              )
+          print("The exact Emergent-provided dependency is excluded only from this temporary CI install.")
+          PY
+          python -m pip install -r "$RUNNER_TEMP/backend-requirements-ci.txt"
+
+      - name: Run backend tests that need no live API
+        id: backend_tests
+        env:
+          PYTHON_DOTENV_DISABLED: "1"
+          MONGO_URL: mongodb://127.0.0.1:27017/?serverSelectionTimeoutMS=1000
+          DB_NAME: ci_only_not_connected
+          JWT_SECRET: ci-only-not-a-secret-change-me
+          ADMIN_EMAIL: ci-admin@example.invalid
         run: |
           cd backend
-          python -m pytest -q
+          python -m pytest -n 0 -q \
+            --ignore=tests/test_google_auth_assistant.py \
+            --ignore=tests/test_iqfoam_erp.py \
+            --ignore=tests/test_iter2_customers_ob_assistant.py \
+            --ignore=tests/test_iter3_auth_assistant_data_edit.py \
+            --ignore=tests/test_phase_a_integrity.py \
+            --deselect=tests/test_backup_service.py::test_snapshot_contains_each_company_database_and_uses_private_archive \
+            --junitxml="$RUNNER_TEMP/backend-unit-tests.xml"
+
+      - name: Report backend test scope and results
+        if: always()
+        env:
+          UNIT_TEST_OUTCOME: ${{ steps.backend_tests.outcome }}
+          JUNIT_REPORT: ${{ runner.temp }}/backend-unit-tests.xml
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          report = Path(os.environ["JUNIT_REPORT"])
+          outcome = os.environ.get("UNIT_TEST_OUTCOME", "not_run")
+          if report.is_file():
+              root = ET.parse(report).getroot()
+              cases = list(root.iter("testcase"))
+              failures = sum(case.find("failure") is not None for case in cases)
+              errors = sum(case.find("error") is not None for case in cases)
+              skipped = sum(case.find("skipped") is not None for case in cases)
+              passed = len(cases) - failures - errors - skipped
+              result = (
+                  f"- Runnable backend tests: **{outcome.upper()}** "
+                  f"({passed} passed, {failures} failed, {errors} errors, {skipped} skipped).\n"
+              )
+          else:
+              result = f"- Runnable backend tests: **NOT RUN** (pytest step: {outcome}).\n"
+
+          blocked = [
+              "tests/test_google_auth_assistant.py",
+              "tests/test_iqfoam_erp.py",
+              "tests/test_iter2_customers_ob_assistant.py",
+              "tests/test_iter3_auth_assistant_data_edit.py",
+              "tests/test_phase_a_integrity.py",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### Backend test results\n\n")
+              summary.write(result)
+              summary.write(
+                  "- **NOT RUN / BLOCKED integration suites:** these require a live isolated API and test "
+                  "credentials; assistant integration also relies on the Emergent-provided package. "
+                  "No production API or database is contacted.\n"
+              )
+              summary.write("  - " + "\n  - ".join(f"`{path}`" for path in blocked) + "\n")
+              summary.write(
+                  "- **NOT RUN / BLOCKED database test:** "
+                  "`tests/test_backup_service.py::test_snapshot_contains_each_company_database_and_uses_private_archive` "
+                  "requires an authenticated MongoDB service, which this workflow does not provision.\n"
+              )
+          PY
 
   frontend-build:
     name: Frontend Build
@@ -47,7 +148,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install frontend dependencies
         run: |
