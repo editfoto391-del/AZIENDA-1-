@@ -43,6 +43,7 @@ const AUDIT_FIELD_LABELS = {
   assigned_driver_name: "Assigned driver",
   tax_enabled: "Tax enabled",
   tax_rate: "Tax rate",
+  include_previous_balance: "Show previous invoice BLN",
   total: "Invoice total",
   items: "Products and prices",
   cod_amount_due: "Cash to collect",
@@ -94,6 +95,7 @@ export default function InvoiceEditor({ express = false }) {
   const [loadingDeliveryNotes, setLoadingDeliveryNotes] = useState(false);
   const [selectedDeliveryNote, setSelectedDeliveryNote] = useState("");
   const [previousInvoices, setPreviousInvoices] = useState([]);
+  const [customerBalanceBeforeInvoice, setCustomerBalanceBeforeInvoice] = useState(0);
   const [loadingPreviousInvoices, setLoadingPreviousInvoices] = useState(false);
   const [prices, setPrices] = useState([]);
   const [stockItems, setStockItems] = useState([]);
@@ -104,7 +106,7 @@ export default function InvoiceEditor({ express = false }) {
     discount: 0, extra_charges: 0, delivery_fee: 0, made_by: "",
     client_number: "", assigned_driver_id: "", assigned_driver_name: "",
     idempotency_key: newKey(), tax_enabled: false, tax_rate: 15, status: "draft",
-    amount_paid: 0, number: null,
+    amount_paid: 0, number: null, include_previous_balance: true,
   });
   const [payRecords, setPayRecords] = useState([]);
   const [invoiceAudit, setInvoiceAudit] = useState([]);
@@ -173,6 +175,7 @@ export default function InvoiceEditor({ express = false }) {
       setInv(loaded);
       setPayRecords(d.payment_records || []);
       setPreviousInvoices(d.previous_invoices_pending || []);
+      setCustomerBalanceBeforeInvoice(Number(d.customer_balance_before_invoice) || 0);
       if (sp.get("edit") && d.status !== "void") {
         if (user?.can_edit_invoices_without_supervisor) {
           setSnapshot(loaded);
@@ -231,20 +234,35 @@ export default function InvoiceEditor({ express = false }) {
   }, []);
 
   useEffect(() => {
-    if (id || !inv.customer_id) {
+    if (id) {
       setPreviousInvoices([]);
+      setLoadingPreviousInvoices(false);
+      return;
+    }
+    if (!inv.customer_id) {
+      setPreviousInvoices([]);
+      setCustomerBalanceBeforeInvoice(0);
       setLoadingPreviousInvoices(false);
       return;
     }
 
     let active = true;
+    setCustomerBalanceBeforeInvoice(0);
     setLoadingPreviousInvoices(true);
-    api.get(`/customers/${inv.customer_id}/summary`, {
-      invoice_type: express ? "express" : "standard",
-    })
+    api.getUncached(`/customers/${inv.customer_id}/summary`)
       .then((summary) => {
         if (!active) return;
-        setPreviousInvoices((summary.invoices || [])
+        const customerInvoices = summary.invoices || [];
+        const existingInvoiceBalance = customerInvoices.reduce((total, invoice) => {
+          if (["draft", "void"].includes(invoice.status)) return total;
+          const outstanding = Number(invoice.outstanding);
+          return total + (Number.isFinite(outstanding) && outstanding > 0 ? outstanding : 0);
+        }, 0);
+        const otherBalance = Number(summary.other_balance);
+        setCustomerBalanceBeforeInvoice(
+          Math.round((existingInvoiceBalance + (Number.isFinite(otherBalance) ? otherBalance : 0)) * 100) / 100,
+        );
+        setPreviousInvoices(customerInvoices
           .filter((invoice) =>
             invoice.id !== inv.id
             && !["draft", "void"].includes(invoice.status)
@@ -256,6 +274,7 @@ export default function InvoiceEditor({ express = false }) {
       .catch((error) => {
         if (!active) return;
         setPreviousInvoices([]);
+        setCustomerBalanceBeforeInvoice(0);
         toast.error(`Could not load previous invoice balances: ${apiError(error)}`);
       })
       .finally(() => {
@@ -583,6 +602,7 @@ export default function InvoiceEditor({ express = false }) {
       number: number || "",
       outstanding: Number(outstanding) || 0,
     })),
+    include_previous_balance: inv.include_previous_balance !== false,
     customer_id: inv.customer_id, customer_name: inv.customer_name, date: inv.date,
     due_date: inv.due_date, zone: inv.zone, payment_terms: inv.payment_terms,
     reference: inv.reference, notes: inv.notes, destination: inv.destination || "",
@@ -882,6 +902,7 @@ export default function InvoiceEditor({ express = false }) {
     L.push(`Total: ${fmtMoney(totals.total)}`);
     L.push(`Amount Paid: ${fmtMoney(inv.amount_paid)}`);
     L.push(`Outstanding Balance: ${fmtMoney(totals.outstanding)}`);
+    if (showCustomerBalance) L.push(`BLN Remaining from Previous Invoices: ${fmtMoney(totalCustomerBalance)}`);
     if (inv.notes && !inv.opening_balance) { L.push(""); L.push(`Notes: ${inv.notes}`); }
     if (settings.telephone || settings.email) {
       L.push(""); L.push([settings.telephone, settings.email].filter(Boolean).join(" | "));
@@ -945,6 +966,9 @@ export default function InvoiceEditor({ express = false }) {
     (total, invoice) => total + (Number(invoice.outstanding) || 0),
     0,
   );
+  const showCustomerBalance = inv.include_previous_balance !== false
+    && ((!id && !!inv.customer_id) || (id && inv.customer_balance_before_invoice != null));
+  const totalCustomerBalance = customerBalanceBeforeInvoice;
   const invoiceDeliveryNote = {
     reference: inv.number || "DRAFT",
     expected_ship_date: inv.date,
@@ -1248,6 +1272,15 @@ export default function InvoiceEditor({ express = false }) {
                 <div className="flex justify-between border-t border-border pt-3 text-base"><span className="font-bold text-slate-800">Total</span><span className="font-mono font-bold text-slate-900" data-testid="invoice-total">{fmtMoney(totals.total)}</span></div>
                 <div className="flex justify-between"><span className="text-slate-500">Amount Paid</span><span className="font-mono text-emerald-600">{fmtMoney(inv.amount_paid)}</span></div>
                 <div className="flex justify-between"><span className="font-semibold text-slate-700">BLN (Balance Remaining)</span><span className="font-mono font-bold text-red-600" data-testid="invoice-outstanding">{fmtMoney(totals.outstanding)}</span></div>
+                <label className="flex items-start gap-2 border-t border-border pt-3 text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={inv.include_previous_balance !== false}
+                    onChange={(e) => setInv({ ...inv, include_previous_balance: e.target.checked })}
+                    data-testid="include-previous-balance-checkbox"
+                  />
+                  <span>Show “BLN REMAINING FROM PREVIOUS INVOICES” on invoice</span>
+                </label>
               </fieldset>
             </Card>
             </div>
@@ -1268,7 +1301,7 @@ export default function InvoiceEditor({ express = false }) {
               <button onClick={downloadPDF} disabled={busy || pdfBusy} className="rounded-md py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50" data-testid="tab-pdf">{busy ? "Issuing..." : pdfBusy ? "Generating PDF..." : "Download PDF"}</button>
             </div>
             <Card className="p-3 overflow-hidden"><FitPreview>
-              <InvoiceDocument inv={inv} totals={totals} settings={settings} customer={custObj} previousInvoices={previousInvoices} />
+              <InvoiceDocument inv={inv} totals={totals} settings={settings} customer={custObj} previousInvoices={previousInvoices} customerBalanceBeforeInvoice={customerBalanceBeforeInvoice} showCustomerBalance={showCustomerBalance} />
             </FitPreview></Card>
           </div>
           {loadingPreviousInvoices && !id && inv.customer_id && <p className="no-print text-xs text-slate-500" role="status">Loading previous invoice balances...</p>}
@@ -1286,7 +1319,7 @@ export default function InvoiceEditor({ express = false }) {
               ))}
             </ul>
           </div>}
-          <div style={{ position: "fixed", left: -10000, top: 0 }} aria-hidden="true"><InvoiceDocument ref={docRef} inv={inv} totals={totals} settings={settings} customer={custObj} previousInvoices={previousInvoices} /></div>
+          <div style={{ position: "fixed", left: -10000, top: 0 }} aria-hidden="true"><InvoiceDocument ref={docRef} inv={inv} totals={totals} settings={settings} customer={custObj} previousInvoices={previousInvoices} customerBalanceBeforeInvoice={customerBalanceBeforeInvoice} showCustomerBalance={showCustomerBalance} /></div>
           <div style={{ position: "fixed", left: -10000, top: 0 }} aria-hidden="true">
             <DeliveryNote ref={deliveryNoteRef} order={invoiceDeliveryNote} settings={settings} />
           </div>

@@ -5095,6 +5095,7 @@ class InvoiceIn(BaseModel):
     status: str = "issued"
     invoice_type: Literal["standard", "express"] = "standard"
     previous_invoices_pending: List[PreviousInvoiceBalanceIn] = Field(default_factory=list)
+    include_previous_balance: bool = True
     edit_reason: Optional[str] = ""
     opening_balance: Optional[bool] = None
     deduct_stock: bool = False
@@ -5143,6 +5144,7 @@ INV_DIFF_FIELDS = (
     "customer_name", "date", "due_date", "zone", "payment_terms", "reference",
     "destination", "notes", "discount", "extra_charges", "delivery_fee",
     "made_by", "client_number", "assigned_driver_name", "tax_enabled", "total",
+    "include_previous_balance",
 )
 
 def invoice_submission_hash(body):
@@ -5171,6 +5173,7 @@ INVOICE_AUDIT_FIELDS = (
     "extra_charges", "delivery_fee", "made_by", "client_number",
     "assigned_driver_id", "assigned_driver_name", "tax_enabled", "tax_rate",
     "status", "total", "cod_amount_due", "cod_amount_collected", "opening_balance",
+    "include_previous_balance",
 )
 
 
@@ -5267,23 +5270,22 @@ def invoice_status_list_query(status):
     return {"$and": [active_invoice, condition]}
 
 
-def previous_invoice_query(customer_id, invoice_type, invoice_date, exclude_id=None):
+def previous_invoice_query(customer_id, invoice_date, exclude_id=None):
     query = {
         "customer_id": customer_id,
         "date": {"$lt": invoice_date},
         "archived": {"$ne": True},
         "status": {"$nin": ["draft", "void"]},
-        "invoice_type": "express" if invoice_type == "express" else {"$ne": "express"},
     }
     if exclude_id:
         query["id"] = {"$ne": exclude_id}
     return query
 
-async def previous_invoice_balances(customer_id, invoice_type, invoice_date, exclude_id=None):
+async def previous_invoice_balances(customer_id, invoice_date, exclude_id=None):
     if not customer_id or not invoice_date:
         return []
     records = await db.invoices.find(
-        previous_invoice_query(customer_id, invoice_type, invoice_date, exclude_id),
+        previous_invoice_query(customer_id, invoice_date, exclude_id),
         {"_id": 0},
     ).to_list(None)
     pending = []
@@ -5298,6 +5300,26 @@ async def previous_invoice_balances(customer_id, invoice_type, invoice_date, exc
             "outstanding": r2(invoice.get("outstanding", 0)),
         })
     return sorted(pending, key=lambda invoice: (invoice["date"], invoice.get("number") or ""))
+
+async def customer_balance_before_invoice(customer_id, exclude_id=None):
+    if not customer_id:
+        return 0
+    query = {
+        "customer_id": customer_id,
+        "archived": {"$ne": True},
+        "status": {"$nin": ["draft", "void"]},
+    }
+    if exclude_id:
+        query["id"] = {"$ne": exclude_id}
+    invoices = await db.invoices.find(query, {"_id": 0}).to_list(None)
+    outstanding = Decimal("0")
+    for invoice in invoices:
+        compute_invoice(invoice)
+        if derive_status(invoice) not in ("draft", "void"):
+            outstanding += max(D(invoice.get("outstanding", 0)), Decimal("0"))
+    customer = await db.customers.find_one({"id": customer_id}, {"_id": 0, "other_balance": 1})
+    outstanding += D((customer or {}).get("other_balance", 0))
+    return r2(outstanding)
 
 @api.get("/invoices")
 async def get_invoices(
@@ -5924,8 +5946,10 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
         inv["submission_payload_hash"] = invoice_submission_hash(body)
     inv["previous_invoices_pending"] = await previous_invoice_balances(
         inv.get("customer_id"),
-        inv.get("invoice_type", "standard"),
         inv.get("date"),
+    )
+    inv["customer_balance_before_invoice"] = await customer_balance_before_invoice(
+        inv.get("customer_id"),
     )
     if inv["status"] != "draft":
         inv["status"] = "issued"
@@ -6014,6 +6038,18 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
         inv["submission_payload_hash"] = existing["submission_payload_hash"]
     inv["invoice_type"] = existing.get("invoice_type", "standard")
     inv["previous_invoices_pending"] = existing.get("previous_invoices_pending", [])
+    if existing.get("customer_id") != inv.get("customer_id"):
+        inv["customer_balance_before_invoice"] = await customer_balance_before_invoice(
+            inv.get("customer_id"),
+            iid,
+        )
+    elif "customer_balance_before_invoice" in existing:
+        inv["customer_balance_before_invoice"] = existing["customer_balance_before_invoice"]
+    else:
+        inv["customer_balance_before_invoice"] = await customer_balance_before_invoice(
+            inv.get("customer_id"),
+            iid,
+        )
     inv.pop("edit_reason", None)
     inv["amount_paid"] = existing.get("amount_paid", 0)
     compute_invoice(inv)
@@ -6035,8 +6071,11 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
         inv["status"] = "issued"
         inv["previous_invoices_pending"] = await previous_invoice_balances(
             inv.get("customer_id"),
-            inv.get("invoice_type", "standard"),
             inv.get("date"),
+            iid,
+        )
+        inv["customer_balance_before_invoice"] = await customer_balance_before_invoice(
+            inv.get("customer_id"),
             iid,
         )
         inv["number"] = await next_invoice_number(inv.get("date"), inv.get("invoice_type", "standard"))
@@ -6172,8 +6211,11 @@ async def issue_invoice(iid: str, body: InvoiceIssueIn = InvoiceIssueIn(), user=
     upd["status"] = "issued"
     upd["previous_invoices_pending"] = await previous_invoice_balances(
         inv.get("customer_id"),
-        inv.get("invoice_type", "standard"),
         inv.get("date"),
+        iid,
+    )
+    upd["customer_balance_before_invoice"] = await customer_balance_before_invoice(
+        inv.get("customer_id"),
         iid,
     )
     audit = inv.get("audit", [])

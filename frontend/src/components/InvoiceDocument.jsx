@@ -19,7 +19,15 @@ const Logo = () => (
   </svg>
 );
 
-export const InvoiceDocument = forwardRef(function InvoiceDocument({ inv, totals, customer = {}, settings = {}, previousInvoices = [] }, ref) {
+export const InvoiceDocument = forwardRef(function InvoiceDocument({
+  inv,
+  totals,
+  customer = {},
+  settings = {},
+  previousInvoices = [],
+  customerBalanceBeforeInvoice = 0,
+  showCustomerBalance = false,
+}, ref) {
   const rows = (inv.items || []).filter((it) => (it.size || it.description) &&
     !(!it.category && !it.size && it.description?.trim().toLowerCase() === "opening balance"));
   const shipTo = inv.destination || customer.city || customer.address || "";
@@ -112,6 +120,9 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({ inv, totals
           <div className="flex justify-between py-1 px-2 text-[16px] font-extrabold"><span>Total</span><span data-testid="doc-total">{fmtMoney(totals.total)}</span></div>
           <div className="flex justify-between py-0.5 px-2 mt-1"><span className="font-semibold text-slate-700">Amount Paid</span><span>{fmtMoney(inv.amount_paid)}</span></div>
           <div className="flex justify-between py-1.5 px-2 bg-red-50 text-red-800 font-bold"><span>BLN (Balance Remaining)</span><span>{fmtMoney(totals.outstanding)}</span></div>
+          {showCustomerBalance && <div className="flex justify-between py-1.5 px-2 bg-amber-50 text-amber-900 font-bold" data-testid="doc-total-customer-balance">
+            <span>BLN REMAINING FROM PREVIOUS INVOICES</span><span>{fmtMoney(customerBalanceBeforeInvoice + totals.outstanding)}</span>
+          </div>}
         </div>
       </div>
       <div className="flex justify-between gap-4 mt-4 border-b border-slate-300 pb-3">
