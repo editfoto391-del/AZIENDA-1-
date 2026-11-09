@@ -485,6 +485,22 @@ def require_global_owner(user):
     if not is_global_owner_account(user):
         raise HTTPException(403, "Global Owner access required")
 
+
+def enforce_superiqfoam_read_only(request, user):
+    if (
+        user.get("_active_company_id") == DEFAULT_COMPANY_ID
+        and not is_global_owner_account(user)
+        and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+        and request.url.path not in {
+            "/api/auth/switch-company",
+            "/api/auth/logout",
+            "/api/auth/device",
+        }
+        and not request.url.path.startswith(("/api/notifications/", "/api/assistant/sessions"))
+    ):
+        raise HTTPException(403, "Only the Global Owner can change SuperIQFoam company data")
+
+
 async def user_from_session(token):
     s = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
     if not s:
@@ -923,6 +939,7 @@ async def get_current_user(request: Request):
         if user:
             user = await authorize_company(user, user.get("_active_company_id") or DEFAULT_COMPANY_ID,
                                            user.get("_session_id"))
+            enforce_superiqfoam_read_only(request, user)
             if request.url.path.startswith("/api/workflow-builder"):
                 require_global_owner(user)
             enforce_worker_api_access(request, user)
@@ -944,6 +961,7 @@ async def get_current_user(request: Request):
                 user.get("_active_company_id") or DEFAULT_COMPANY_ID,
                 user.get("_session_id"),
             )
+            enforce_superiqfoam_read_only(request, user)
             if request.url.path.startswith("/api/workflow-builder"):
                 require_global_owner(user)
             enforce_worker_api_access(request, user)
@@ -967,6 +985,7 @@ async def get_current_user(request: Request):
         if expires_at and expires_at < datetime.now(timezone.utc):
             raise HTTPException(401, "Worker session has expired")
     user = await authorize_company(user, payload.get("company_id") or DEFAULT_COMPANY_ID, payload.get("sid"))
+    enforce_superiqfoam_read_only(request, user)
     if request.url.path.startswith("/api/workflow-builder"):
         require_global_owner(user)
     enforce_worker_api_access(request, user)
@@ -5711,6 +5730,46 @@ async def bulk_delete_invoices(body: BulkDeleteIn, user=Depends(get_current_user
         n += await _archive_invoice(iid, user, body.reason or "", body.restore_stock)
     return {"archived": n, "stock_restored": body.restore_stock}
 
+async def validate_invoice_order_ids(order_ids, customer_id, customer_name):
+    normalized_ids = [str(order_id).strip() for order_id in (order_ids or [])]
+    if any(not order_id for order_id in normalized_ids) or len(set(normalized_ids)) != len(normalized_ids):
+        raise HTTPException(400, "Selected orders must be valid and unique")
+
+    for order_id in normalized_ids:
+        order = await db.orders.find_one({"id": order_id}, {"_id": 0})
+        if not order:
+            raise HTTPException(404, "Selected order not found")
+        if order.get("archived") or order.get("status") == "Cancelled":
+            raise HTTPException(409, "Cancelled or archived orders cannot be invoiced")
+        if order.get("invoice_id"):
+            raise HTTPException(409, "Selected order is already linked to an invoice")
+        if order.get("customer_id") and order["customer_id"] != customer_id:
+            raise HTTPException(400, "Selected order must belong to the invoice customer")
+        if not order.get("customer_id") and (order.get("customer_name") or "").strip().casefold() != customer_name.strip().casefold():
+            raise HTTPException(400, "Selected order must belong to the invoice customer")
+    return normalized_ids
+
+
+async def link_invoice_orders(invoice):
+    for order_id in invoice.get("order_ids") or []:
+        result = await db.orders.update_one(
+            {
+                "id": order_id,
+                "$or": [
+                    {"invoice_id": {"$in": [None, ""]}},
+                    {"invoice_id": invoice["id"]},
+                ],
+            },
+            {"$set": {
+                "invoice_id": invoice["id"],
+                "invoice_number": invoice.get("number") or invoice.get("reference") or "",
+                "updated_at": now_iso(),
+            }},
+        )
+        if result.matched_count == 0:
+            raise HTTPException(409, "Selected order is already linked to another invoice")
+
+
 async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
     customer_id = (body.customer_id or "").strip()
     cust = await db.customers.find_one({"id": customer_id}) if customer_id else None
@@ -5726,6 +5785,11 @@ async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
         inv["cod_amount_due"] = None
         inv["cod_amount_collected"] = None
     inv["customer_id"] = customer_id
+    inv["order_ids"] = (
+        list(existing.get("order_ids") or [])
+        if existing is not None
+        else await validate_invoice_order_ids(body.order_ids, customer_id, inv.get("customer_name", ""))
+    )
     if not inv.get("idempotency_key"):
         inv.pop("idempotency_key", None)
     if inv.get("opening_balance") is None or inv.get("opening_balance") is False:
@@ -5843,19 +5907,21 @@ async def validate_invoice_item_price_edits(body, existing, user):
 @api.post("/invoices")
 async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
     await validate_invoice_item_price_edits(body, None, user)
-    deduct_stock = body.deduct_stock
-    inv = await _prepare_invoice(body, user=user)
     if body.idempotency_key:
-        submission_hash = invoice_submission_hash(body)
         existing_submission = await db.invoices.find_one(
             {"idempotency_key": body.idempotency_key}, {"_id": 0},
         )
         if existing_submission:
-            if existing_submission.get("submission_payload_hash") != submission_hash:
+            if existing_submission.get("submission_payload_hash") != invoice_submission_hash(body):
                 raise HTTPException(409, "This invoice submission key was already used for different invoice data")
+            await link_invoice_orders(existing_submission)
             return invoice_for_user(existing_submission, user)
+
+    deduct_stock = body.deduct_stock
+    inv = await _prepare_invoice(body, user=user)
+    if body.idempotency_key:
         inv["idempotency_key"] = body.idempotency_key
-        inv["submission_payload_hash"] = submission_hash
+        inv["submission_payload_hash"] = invoice_submission_hash(body)
     inv["previous_invoices_pending"] = await previous_invoice_balances(
         inv.get("customer_id"),
         inv.get("invoice_type", "standard"),
@@ -5886,7 +5952,9 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
                 raise
             if existing_submission.get("submission_payload_hash") != invoice_submission_hash(body):
                 raise HTTPException(409, "This invoice submission key was already used for different invoice data") from error
+            await link_invoice_orders(existing_submission)
             return invoice_for_user(existing_submission, user)
+        await link_invoice_orders(record)
         await emit_workflow_event("invoice.created", record)
         if record.get("status") != "draft":
             await emit_workflow_event("invoice.issued", record)
@@ -5910,9 +5978,11 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
                 raise
             if existing_submission.get("submission_payload_hash") != invoice_submission_hash(body):
                 raise HTTPException(409, "This invoice submission key was already used for different invoice data") from error
+            await link_invoice_orders(existing_submission)
             return invoice_for_user(existing_submission, user)
         await post_invoice_stock_deductions(rec, deductions, user)
         rec = await update_doc("invoices", rec["id"], {"stock_deducted": True})
+    await link_invoice_orders(rec)
     await emit_workflow_event("invoice.created", rec)
     if rec.get("status") != "draft":
         await emit_workflow_event("invoice.issued", rec)
@@ -7847,6 +7917,7 @@ async def receive_production(pid: str, body: ReceiveIn, user=Depends(get_current
 class EmployeeIn(BaseModel):
     name: str
     department: str = "Production"
+    is_general_worker: bool = False
     skills: Optional[str] = ""
     notes: Optional[str] = ""
     active: bool = True
@@ -7859,6 +7930,48 @@ class EmployeeIn(BaseModel):
             raise ValueError("Employee name is required")
         return value
 
+class DepartmentIn(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def department_name_required(cls, value):
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("Department name is required")
+        if len(value) > 100:
+            raise ValueError("Department name must be 100 characters or fewer")
+        return value
+
+@api.get("/departments")
+async def get_departments(user=Depends(get_current_user)):
+    saved = await listall("departments", sort=("name", 1))
+    employees = await listall("employees")
+    names = {
+        str(item.get("name") or "").strip()
+        for item in saved
+        if str(item.get("name") or "").strip()
+    }
+    names.update(
+        str(employee.get("department") or "").strip()
+        for employee in employees
+        if str(employee.get("department") or "").strip()
+    )
+    return sorted(names, key=str.casefold)
+
+@api.post("/departments")
+async def add_department(body: DepartmentIn, user=Depends(get_current_user)):
+    require_admin(user)
+    name = body.name
+    existing = await listall("departments")
+    match = next(
+        (item for item in existing if str(item.get("name") or "").casefold() == name.casefold()),
+        None,
+    )
+    if match:
+        return match
+    return await insert("departments", {"name": name})
+
 @api.get("/employees")
 async def get_employees(user=Depends(get_current_user)):
     employees = await listall("employees", sort=("name", 1))
@@ -7867,9 +7980,20 @@ async def get_employees(user=Depends(get_current_user)):
         for employee in employees
     ]
 
+def validate_payroll_roster_company(user):
+    company_id = user.get("_active_company_id") or user.get("company_id")
+    if company_id != "superiqfoam":
+        raise HTTPException(403, "The payroll roster is only available for Super IQ-Foam")
+
+def validate_employee_worker_type(body, user):
+    company_id = user.get("_active_company_id") or user.get("company_id")
+    if body.is_general_worker and company_id != "iqfoam-whole-sallers":
+        raise HTTPException(400, "General workers are only available for IQ Foam Wholesalers")
+
 @api.post("/employees/import-roster")
 async def import_employee_roster(user=Depends(get_current_user)):
     require_admin(user)
+    validate_payroll_roster_company(user)
     reconciliation = await reconcile_employee_roster(user)
     reconciliation.pop("employees_by_name")
     return reconciliation
@@ -8023,6 +8147,7 @@ async def reconcile_employee_roster(user):
 @api.post("/employees/reconcile-payroll-roster")
 async def reconcile_payroll_roster(user=Depends(get_current_user)):
     require_admin(user)
+    validate_payroll_roster_company(user)
     reconciliation = await reconcile_employee_roster(user)
     roster_employees_by_name = reconciliation.pop("employees_by_name")
 
@@ -8072,12 +8197,14 @@ async def get_deleted_employees(user=Depends(get_current_user)):
 
 @api.post("/employees")
 async def add_employee(body: EmployeeIn, user=Depends(get_current_user)):
+    validate_employee_worker_type(body, user)
     rec = await insert("employees", body.model_dump())
     await emit_workflow_event("employee.created", rec)
     return rec
 
 @api.put("/employees/{eid}")
 async def edit_employee(eid: str, body: EmployeeIn, user=Depends(get_current_user)):
+    validate_employee_worker_type(body, user)
     rec = await update_doc("employees", eid, body.model_dump())
     await emit_workflow_event("employee.updated", rec)
     return rec
@@ -8514,6 +8641,7 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
         result.append({
             "employee_id": employee["id"], "name": employee.get("name", ""),
             "department": employee.get("department", ""), "active": employee.get("active", True),
+            "is_general_worker": employee.get("is_general_worker", False),
             "hourly_rate": hourly_rate, "weekly_salary": weekly_salary,
             "monthly_salary": monthly_salary,
             "pay_frequency": "piece" if is_piece_paid else ("monthly_fixed" if is_monthly_fixed else "weekly_fixed"),
@@ -8781,18 +8909,6 @@ async def save_salary_cut(body: SalaryCutIn, user=Depends(get_current_user)):
         raise HTTPException(404, "Employee not found")
     if employee["pay_frequency"] == "monthly_fixed" and not employee["is_full_month_period"]:
         raise HTTPException(400, "Select a complete calendar month before saving a salary cut")
-    payment_keys = []
-    if is_full_calendar_month(body.start_date, body.end_date):
-        payment_keys.append("monthly:" + body.start_date[:7])
-    try:
-        payment_keys.append(salary_payroll_key("weekly", body.start_date, body.end_date))
-    except HTTPException:
-        pass
-    if payment_keys and await db.salary_payments.find_one({
-        "employee_id": body.employee_id,
-        "payroll_key": {"$in": payment_keys},
-    }, {"_id": 0}):
-        raise HTTPException(409, "A completed payroll payment is locked; later balance changes apply to a future payroll")
     employee_cuts = await listall("salary_cuts", {
         "employee_id": body.employee_id,
         "voided": {"$ne": True},
@@ -8822,9 +8938,6 @@ async def save_salary_cut(body: SalaryCutIn, user=Depends(get_current_user)):
         ]
     before = period_cuts[-1] if period_cuts else None
     previous_cut_total = sum((D(item.get("amount", 0)) for item in period_cuts), Decimal("0"))
-    available_balance = employee["available_balance"]
-    if amount > available_balance:
-        raise HTTPException(400, f"Cut exceeds the outstanding balance of R {available_balance:.2f}")
     if amount > employee["gross_salary"]:
         raise HTTPException(400, f"Cut exceeds this period's gross salary of R {employee['gross_salary']:.2f}")
     amount_delta = r2(D(amount) - previous_cut_total)

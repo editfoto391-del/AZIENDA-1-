@@ -199,7 +199,7 @@ export default function InvoiceEditor({ express = false }) {
     setLoadingDeliveryNotes(true);
     api.getUncached("/orders")
       .then((orders) => {
-        if (active) setDeliveryNotes((orders || []).filter((order) => order.status !== "Cancelled"));
+        if (active) setDeliveryNotes((orders || []).filter((order) => order.status !== "Cancelled" && !order.invoice_id));
       })
       .catch((error) => {
         if (active) toast.error(`Could not load delivery notes: ${apiError(error)}`);
@@ -586,6 +586,7 @@ export default function InvoiceEditor({ express = false }) {
     customer_id: inv.customer_id, customer_name: inv.customer_name, date: inv.date,
     due_date: inv.due_date, zone: inv.zone, payment_terms: inv.payment_terms,
     reference: inv.reference, notes: inv.notes, destination: inv.destination || "",
+    order_ids: selectedDeliveryNote ? [selectedDeliveryNote] : [],
     cod_amount_due: isCod && inv.cod_amount_due !== "" && inv.cod_amount_due != null ? Number(inv.cod_amount_due) : null,
     cod_amount_collected: isCod && inv.cod_amount_collected !== "" && inv.cod_amount_collected != null ? Number(inv.cod_amount_collected) : null,
     items: inv.items.filter((it) => it.size || it.description).map((it) => {

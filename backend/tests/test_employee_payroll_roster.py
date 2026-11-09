@@ -1,4 +1,32 @@
+import asyncio
+
+import pytest
+from fastapi import HTTPException
+
+import server
 import seed_data
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [server.import_employee_roster, server.reconcile_payroll_roster],
+)
+def test_payroll_roster_endpoints_reject_other_companies(monkeypatch, endpoint):
+    monkeypatch.setattr(server, "require_admin", lambda _user: None)
+
+    async def unexpected_reconciliation(_user):
+        raise AssertionError("The Super IQ-Foam roster must not be reconciled for another company")
+
+    monkeypatch.setattr(server, "reconcile_employee_roster", unexpected_reconciliation)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(endpoint(user={"_active_company_id": "iqfoam-whole-sallers"}))
+
+    assert error.value.status_code == 403
+
+
+def test_payroll_roster_remains_available_to_superiqfoam():
+    server.validate_payroll_roster_company({"_active_company_id": "superiqfoam"})
 
 
 def test_payroll_roster_matches_the_31_employees_in_the_supplied_image():

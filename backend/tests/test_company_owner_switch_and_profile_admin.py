@@ -76,6 +76,63 @@ class Database:
         return self.collections[name]
 
 
+def make_request(method, path):
+    return Request({
+        "type": "http",
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "https",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 1234),
+        "server": ("test", 443),
+    })
+
+
+def test_only_global_owner_can_modify_superiqfoam_data(monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAIL", "global-owner@example.com")
+    request = make_request("DELETE", "/api/stock/stock-1")
+    regular_company_roles = [
+        {"id": "company-owner", "role": "user", "_active_role": "owner"},
+        {"id": "company-admin", "role": "user", "_active_role": "admin"},
+        {"id": "company-user", "role": "user", "_active_role": "user"},
+        {"id": "worker", "role": "user", "is_worker": True, "_active_role": "user"},
+    ]
+
+    for user in regular_company_roles:
+        with pytest.raises(HTTPException) as error:
+            server.enforce_superiqfoam_read_only(
+                request,
+                {**user, "_active_company_id": "superiqfoam"},
+            )
+        assert error.value.status_code == 403
+
+    server.enforce_superiqfoam_read_only(
+        request,
+        {
+            "id": "global-owner",
+            "role": "owner",
+            "email": "global-owner@example.com",
+            "_active_company_id": "superiqfoam",
+        },
+    )
+
+
+def test_superiqfoam_read_only_policy_allows_reads_and_company_switching():
+    user = {"role": "user", "_active_company_id": "superiqfoam"}
+    server.enforce_superiqfoam_read_only(make_request("GET", "/api/stock"), user)
+    server.enforce_superiqfoam_read_only(
+        make_request("POST", "/api/auth/switch-company"),
+        user,
+    )
+    server.enforce_superiqfoam_read_only(
+        make_request("DELETE", "/api/stock/stock-1"),
+        {**user, "_active_company_id": "iqfoam-manufactoring"},
+    )
+
+
 def test_company_owner_can_switch_only_to_an_assigned_company(monkeypatch):
     user = {
         "id": "company-owner",

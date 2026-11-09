@@ -1,8 +1,8 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
-  BadgeCheck, Banknote, Check, ChevronDown, ChevronRight,
-  Download, History, Landmark, ListFilter, Search, Wallet,
+  BadgeCheck, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight,
+  Download, History, Search, SlidersHorizontal, Trash2, Wallet,
 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, today } from "@/lib/format";
@@ -33,8 +33,49 @@ const monthRange = (month) => {
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 };
 
+const addDays = (value, days) => {
+  const date = new Date(String(value || "") + "T00:00:00Z");
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+};
+const shiftMonth = (value, amount) => {
+  const date = new Date(String(value || "") + "-01T00:00:00Z");
+  date.setUTCMonth(date.getUTCMonth() + amount);
+  return date.toISOString().slice(0, 7);
+};
+const isoWeek = (value) => {
+  const date = new Date(String(value || "") + "T00:00:00Z");
+  date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  return Math.ceil((((date - yearStart) / 86400000) + 1) / 7);
+};
+const isoWeekYear = (value) => {
+  const date = new Date(String(value || "") + "T00:00:00Z");
+  date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
+  return date.getUTCFullYear();
+};
+const calendarDays = (month) => {
+  const first = new Date(month + "-01T00:00:00Z");
+  const offset = (first.getUTCDay() + 6) % 7;
+  const gridStart = new Date(first);
+  gridStart.setUTCDate(first.getUTCDate() - offset);
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(gridStart);
+    date.setUTCDate(gridStart.getUTCDate() + index);
+    return date.toISOString().slice(0, 10);
+  });
+};
+const displayDate = (value, options = { day: "2-digit", month: "short" }) =>
+  new Intl.DateTimeFormat("en-GB", { ...options, timeZone: "UTC" })
+    .format(new Date(String(value || "") + "T00:00:00Z"));
+const displayMonth = (value) =>
+  new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "UTC" })
+    .format(new Date(String(value || "") + "-01T00:00:00Z"));
+
 const cents = moneyToCents;
 const monthlyEmployee = (employee) => employee?.pay_frequency === "monthly_fixed";
+const employeeDepartment = (employee) => employee?.department || (employee?.is_general_worker ? "General Worker" : "Other");
+const salaryDepartment = (employee) => employee?.is_general_worker ? "General Worker" : employeeDepartment(employee);
 const periodKey = (type, start) => type === "monthly" ? "monthly:" + start.slice(0, 7) : "weekly:" + start;
 
 const fetchPeriodPayments = async (period, periodType) => {
@@ -57,20 +98,194 @@ const fetchPeriodPayments = async (period, periodType) => {
   return lists.flat();
 };
 
-function SummaryMetric({ label, value, icon: Icon, emphasis = false, helper }) {
+const calculateReportTotals = (report, payments, monthlyIncluded, periodType) => {
+  const paymentByEmployee = Object.fromEntries((payments || []).map((payment) => [payment.employee_id, payment]));
+  const includedRows = (report?.employees || [])
+    .filter((employee) => !monthlyEmployee(employee)
+      || (monthlyIncluded[employee.employee_id] ?? periodType === "monthly"))
+    .map((employee) => {
+      const payment = paymentByEmployee[employee.employee_id];
+      const grossCents = cents(payment ? payment.gross_amount : employee.gross_salary);
+      const cutCents = cents(payment ? payment.deduction_amount : employee.cut);
+      return {
+        grossCents,
+        cutCents,
+        netCents: payment ? cents(payment.net_amount) : grossCents - cutCents,
+      };
+    });
+  return sumPayrollRows(includedRows);
+};
+
+function PayrollEmployeeCard({
+  row,
+  periodType,
+  expanded,
+  onToggleExpanded,
+  onIncludeChange,
+  rateValue,
+  onRateChange,
+  paymentDate,
+  onPaymentDateChange,
+  saving,
+  onSaveRate,
+  onAddAdvance,
+  onCutBalance,
+  onShowBalanceHistory,
+  onMarkPaid,
+}) {
+  const { employee, payment, monthly, included, grossCents, cutCents, netCents } = row;
+  const showPieces = isPieceworkTailor(employee);
+  const initials = String(employee.name || "?")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+  const statusLabel = payment ? "Paid" : monthly && periodType !== "monthly"
+    ? "Monthly" : !monthly && periodType !== "weekly" ? "Weekly overview" : "Pending";
+  const statusClass = payment
+    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+    : statusLabel === "Pending"
+      ? "border-amber-200 bg-amber-50 text-amber-900"
+      : "border-slate-200 bg-slate-50 text-slate-600";
+
   return (
-    <Card className={"p-4 " + (emphasis ? "border-primary/30 bg-primary text-primary-foreground" : "")}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className={"text-[11px] font-semibold uppercase tracking-[0.12em] " + (emphasis ? "text-primary-foreground/70" : "text-muted-foreground")}>{label}</p>
-          <p className={"mt-2 font-mono text-2xl font-semibold tabular-nums " + (emphasis ? "text-primary-foreground" : "text-foreground")}>{value}</p>
-          {helper && <p className={"mt-1 text-xs " + (emphasis ? "text-primary-foreground/70" : "text-muted-foreground")}>{helper}</p>}
+    <article
+      className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_3px_14px_rgba(15,23,42,0.035)] transition-shadow hover:shadow-[0_8px_24px_rgba(15,23,42,0.07)] sm:p-5"
+      data-testid={"salary-row-" + employee.employee_id}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#e7f6f1] text-sm font-bold text-[#26705d]">
+            {initials}
+          </div>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h4 className="font-semibold text-slate-950">{employee.name}</h4>
+              {employee.is_general_worker && <Badge cls="border-[#cae8dc] bg-[#eff9f4] text-[#34725c]">General Worker</Badge>}
+              <Badge cls={statusClass}>{statusLabel}</Badge>
+            </div>
+            <p className="mt-1 truncate text-xs text-slate-500">
+              {salaryDepartment(employee)}
+              {employee.is_general_worker && employee.department ? " · " + employee.department : ""}
+            </p>
+            {employee.salary_rate_missing && <p className="mt-1 text-xs font-medium text-amber-800">Missing configured rate · not payable</p>}
+            {employee.active === false && <p className="mt-1 text-xs text-slate-500">Inactive record</p>}
+          </div>
         </div>
-        <span className={"rounded-lg p-2 " + (emphasis ? "bg-white/10 text-primary-foreground" : "bg-secondary text-primary")}>
-          <Icon size={19} />
-        </span>
+        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+          {monthly && <label className="inline-flex shrink-0 items-center gap-2 text-xs font-medium text-slate-600">
+            <input type="checkbox" checked={included} onChange={(event) => onIncludeChange(event.target.checked)} />
+            Include
+          </label>}
+          <Btn variant="outline" className="h-9 rounded-lg px-3 text-xs" onClick={onAddAdvance} disabled={saving}>Add a balance</Btn>
+          <Btn variant="outline" className="h-9 rounded-lg px-3 text-xs" onClick={onCutBalance} disabled={saving}>Cut balance</Btn>
+          <Btn variant="outline" className="h-9 rounded-lg px-3 text-xs" onClick={onShowBalanceHistory} disabled={saving}>Balance cut/add history</Btn>
+        </div>
       </div>
-    </Card>
+
+      <div className="mt-4 grid grid-cols-2 gap-3 border-y border-slate-100 py-4 sm:grid-cols-5 sm:gap-4">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Salary this period</p>
+          <p className="mt-1 font-mono text-sm font-semibold tabular-nums text-slate-700 sm:text-base">{fmtMoney(grossCents / 100)}</p>
+        </div>
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Days attended</p>
+          <p className="mt-1 text-sm font-semibold tabular-nums text-slate-700 sm:text-base">
+            {showPieces ? `${employee.piece_days?.length || 0} days` : `${employee.present_days || 0} full · ${employee.half_days || 0} half`}
+          </p>
+        </div>
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Balance due</p>
+          <p className="mt-1 font-mono text-sm font-semibold tabular-nums text-slate-700 sm:text-base">{fmtMoney(employee.balance || 0)}</p>
+        </div>
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Deductions</p>
+          <p className="mt-1 font-mono text-sm font-semibold tabular-nums text-slate-700 sm:text-base">{fmtMoney(cutCents / 100)}</p>
+        </div>
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Net payable</p>
+          <p className="mt-1 font-mono text-sm font-bold tabular-nums text-slate-950 sm:text-base">{fmtMoney(netCents / 100)}</p>
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+        <button type="button" onClick={() => onToggleExpanded()} className="inline-flex items-center gap-1.5 rounded-lg px-2 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-950" aria-expanded={expanded}>
+          {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+          {expanded ? "Hide payroll breakdown" : "Payroll breakdown"}
+        </button>
+        {payment
+          ? <Badge cls="border-emerald-200 bg-emerald-50 text-emerald-800"><BadgeCheck size={14} className="mr-1" /> Paid {payment.payment_date}</Badge>
+          : monthly && periodType !== "monthly"
+            ? <span className="text-xs text-slate-500">Pay from Monthly view</span>
+            : !monthly && periodType !== "weekly"
+              ? <span className="text-xs text-slate-500">Pay from Week view</span>
+              : <Btn className="min-w-24 rounded-lg !bg-slate-950 px-5 !text-white hover:!bg-slate-800" onClick={onMarkPaid} disabled={saving || !included || !!employee.salary_rate_missing || netCents <= 0}>
+                <Check size={15} /> Pay
+              </Btn>}
+      </div>
+
+      {expanded && <div className="mt-4 grid gap-4 border-t border-slate-100 pt-4 xl:grid-cols-3">
+        <section className="space-y-3">
+          <div>
+            <h5 className="text-sm font-semibold text-slate-900">Payroll breakdown</h5>
+            <p className="mt-1 text-xs text-slate-500">How this period’s gross pay was calculated.</p>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Attendance pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.regular_pay || 0)}</p></div>
+            <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Overtime</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.overtime_pay || 0)}</p></div>
+            {showPieces ? <>
+              <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Piecework pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.piece_pay || 0)}</p></div>
+              <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Recorded production</p><p className="mt-1 font-mono font-semibold">{employee.total_pieces || 0} pieces</p></div>
+            </> : <>
+              <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Working days</p><p className="mt-1 font-mono font-semibold">{employee.present_days || 0} full · {employee.half_days || 0} half</p></div>
+              <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Hours worked</p><p className="mt-1 font-mono font-semibold">{Number(employee.regular_hours || 0) + Number(employee.overtime_hours || 0)} hours</p></div>
+            </>}
+          </div>
+          {employee.salary_rate_missing && <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">No configured {monthly ? "monthly" : "weekly"} salary rate is available. Payroll is shown as R0.00 and cannot be marked paid.</p>}
+        </section>
+
+        <section className="space-y-3">
+          <div>
+            <h5 className="text-sm font-semibold text-slate-900">Salary &amp; balance</h5>
+            <p className="mt-1 text-xs text-slate-500">Deductions are manual; nothing is taken automatically.</p>
+          </div>
+          <label className="block text-xs font-semibold text-slate-600">
+            Configured {monthly ? "monthly" : "weekly"} salary
+            <span className="mt-1 flex items-center gap-2">
+              <span>R</span>
+              <input type="number" min="0.01" step="0.01" value={rateValue} onChange={(event) => onRateChange(event.target.value)} disabled={saving} className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm" />
+              <Btn className="rounded-lg" disabled={saving} onClick={onSaveRate}>Save</Btn>
+            </span>
+          </label>
+          <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-50 p-3 text-xs">
+            <div><p className="text-slate-500">Balance at period start</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance_before_period || 0)}</p></div>
+            <div><p className="text-slate-500">Balance remaining</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance ?? employee.balance_after_period ?? 0)}</p></div>
+          </div>
+        </section>
+
+        <section className="space-y-3">
+          <div>
+            <h5 className="text-sm font-semibold text-slate-900">Payment</h5>
+            <p className="mt-1 text-xs text-slate-500">Confirm the date and amount paid.</p>
+          </div>
+          {payment ? <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+            <p className="font-semibold"><BadgeCheck size={16} className="mr-1 inline" /> Payment recorded</p>
+            <p className="mt-2">Paid on {payment.payment_date}</p>
+            <p className="mt-1 font-mono text-lg font-semibold">{fmtMoney(payment.net_amount)}</p>
+            <p className="mt-1 text-xs">This record is locked and cannot be paid twice.</p>
+          </div> : monthly && periodType !== "monthly"
+            ? <p className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">This employee can be paid once from the Monthly payroll.</p>
+            : !monthly && periodType !== "weekly"
+              ? <p className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">Record payment from the specific weekly payroll.</p>
+              : <div className="space-y-3 rounded-xl border border-slate-200 p-4">
+                <Input label="Date paid" type="date" value={paymentDate} onChange={(event) => onPaymentDateChange(event.target.value)} disabled={saving} />
+                <div><p className="text-xs text-slate-500">Take-home pay</p><p className="font-mono text-lg font-semibold text-slate-950">{fmtMoney(netCents / 100)}</p></div>
+              </div>}
+        </section>
+      </div>}
+    </article>
   );
 }
 
@@ -95,20 +310,40 @@ export default function SalariesManagement() {
   const [rateDrafts, setRateDrafts] = useState({});
   const [paymentDates, setPaymentDates] = useState({});
   const [savingIds, setSavingIds] = useState({});
+  const [totalWasRecalculated, setTotalWasRecalculated] = useState(false);
   const [advanceModal, setAdvanceModal] = useState(null);
+  const [cutModal, setCutModal] = useState(null);
+  const [balanceHistoryModal, setBalanceHistoryModal] = useState(null);
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(() => today().slice(0, 7));
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   const period = useMemo(
     () => periodType === "monthly" ? monthRange(monthValue) : weekRange(weekStart),
     [periodType, monthValue, weekStart],
   );
   const payrollKey = period ? periodKey(periodType, period.start) : "";
+  const calendarGrid = useMemo(() => calendarDays(calendarMonth), [calendarMonth]);
+  const selectedSunday = addDays(weekStart, 6);
+  const selectedWeekNumber = isoWeek(weekStart);
+  const selectedWeekYear = isoWeekYear(weekStart);
 
-  const reload = async () => {
+  const openCalendar = () => {
+    setCalendarMonth(periodType === "weekly" ? weekStart.slice(0, 7) : monthValue);
+    setCalendarOpen((current) => !current);
+  };
+  const selectCalendarDate = (value) => {
+    if (periodType === "weekly") setWeekStart(mondayOf(value));
+    else setMonthValue(value.slice(0, 7));
+    setCalendarOpen(false);
+  };
+
+  const reload = async ({ showLoading = true, resetExpanded = true } = {}) => {
     if (!period) {
       toast.error(periodType === "weekly" ? "Choose a Monday for the weekly payroll." : "Choose a valid calendar month.");
       return;
     }
-    setLoading(true);
+    if (showLoading) setLoading(true);
     try {
       const params = {
         start_date: period.start,
@@ -137,11 +372,13 @@ export default function SalariesManagement() {
             ? current[employee.employee_id]
             : periodType === "monthly",
         ])));
-      setExpanded({});
+      if (resetExpanded) setExpanded({});
+      return { report: nextReport, payments: nextPayments || [] };
     } catch (error) {
       toast.error(apiError(error));
+      return null;
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   };
 
@@ -159,6 +396,7 @@ export default function SalariesManagement() {
     setCutDrafts({});
     setRateDrafts({});
     setPaymentDates({});
+    setTotalWasRecalculated(false);
     setAdvanceModal(null);
     setLoading(true);
     const params = {
@@ -235,7 +473,7 @@ export default function SalariesManagement() {
       payment,
     };
   }).sort((a, b) =>
-    String(a.employee.department || "Other").localeCompare(String(b.employee.department || "Other"))
+    salaryDepartment(a.employee).localeCompare(salaryDepartment(b.employee))
     || String(a.employee.name || "").localeCompare(String(b.employee.name || "")),
   ), [report, monthlyIncluded, periodType, paymentByEmployee]);
 
@@ -243,11 +481,12 @@ export default function SalariesManagement() {
   const totals = sumPayrollRows(reportRows);
   const includedPaidRows = reportRows.filter((row) => row.payment);
   const paidCents = includedPaidRows.reduce((sum, row) => sum + cents(row.payment.net_amount), 0);
-  const departments = [...new Set(rows.map(({ employee }) => employee.department || "Other"))]
+  const paidGrossCents = includedPaidRows.reduce((sum, row) => sum + cents(row.payment.gross_amount), 0);
+  const departments = [...new Set(rows.map(({ employee }) => salaryDepartment(employee)))]
     .sort((a, b) => a.localeCompare(b));
   const filteredRows = rows.filter(({ employee }) =>
-    (department === "" || (employee.department || "Other") === department)
-    && (String(employee.name || "") + " " + String(employee.department || ""))
+    (department === "" || salaryDepartment(employee) === department)
+    && (String(employee.name || "") + " " + String(employee.employee_id || "") + " " + salaryDepartment(employee) + " " + employeeDepartment(employee))
       .toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
   );
 
@@ -275,24 +514,28 @@ export default function SalariesManagement() {
     }
   };
 
-  const saveCut = async (employee) => {
+  const saveCut = async (employee, details = cutModal) => {
     if (monthlyEmployee(employee) && periodType !== "monthly") {
-      return toast.error("Select the complete month to save a monthly balance deduction.");
+      toast.error("Select the complete month to save a monthly balance deduction.");
+      return false;
     }
     if (!monthlyEmployee(employee) && periodType !== "weekly") {
-      return toast.error("Select a Monday–Saturday week to save this employee's deduction.");
+      toast.error("Select a Monday–Saturday week to save this employee's deduction.");
+      return false;
     }
-    const amount = Number(cutDrafts[employee.employee_id] ?? employee.cut ?? 0);
-    if (!Number.isFinite(amount) || amount < 0) return toast.error("Deduction must be zero or more.");
+    const amount = Number(details?.amount ?? cutDrafts[employee.employee_id] ?? employee.cut ?? 0);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      toast.error("Enter a cut amount greater than zero.");
+      return false;
+    }
     const currentRate = monthlyEmployee(employee) ? employee.monthly_salary : employee.weekly_salary;
     if (cents(rateDrafts[employee.employee_id]) !== cents(currentRate)) {
-      return toast.error("Save the salary rate before saving a deduction.");
-    }
-    if (amount > Number(employee.available_balance || 0)) {
-      return toast.error("Deduction cannot exceed the available borrowed balance.");
+      toast.error("Save the salary rate before saving a deduction.");
+      return false;
     }
     if (amount > Number(employee.gross_salary || 0)) {
-      return toast.error("Deduction cannot exceed this employee's gross salary.");
+      toast.error("Deduction cannot exceed this employee's gross salary.");
+      return false;
     }
     setSavingIds((current) => ({ ...current, [employee.employee_id]: true }));
     try {
@@ -301,11 +544,16 @@ export default function SalariesManagement() {
         start_date: period.start,
         end_date: period.end,
         amount,
+        notes: details?.notes || "",
       });
       toast.success("Manual balance deduction saved.");
-      await reload();
+      setCutDrafts((current) => ({ ...current, [employee.employee_id]: String(amount) }));
+      setCutModal(null);
+      await reload({ showLoading: false, resetExpanded: false });
+      return true;
     } catch (error) {
       toast.error(apiError(error));
+      return false;
     } finally {
       setSavingIds((current) => ({ ...current, [employee.employee_id]: false }));
     }
@@ -320,9 +568,34 @@ export default function SalariesManagement() {
       });
       toast.success("Borrowed balance added. Previous paid payrolls were not changed.");
       setAdvanceModal(null);
-      await reload();
+      await reload({ showLoading: false, resetExpanded: false });
     } catch (error) {
       toast.error(apiError(error));
+    }
+  };
+
+  const clearBalanceHistory = async () => {
+    if (!balanceHistoryModal) return;
+    const employee = balanceHistoryModal;
+    if (!employee.balance_history?.length) return;
+    const confirmed = window.confirm(
+      "Delete all balance additions and cuts for " + employee.name
+      + "? This resets the outstanding balance to zero. The change will be recorded in the audit history.",
+    );
+    if (!confirmed) return;
+    setSavingIds((current) => ({ ...current, [employee.employee_id]: true }));
+    try {
+      await api.del("/salaries/history/" + employee.employee_id);
+      toast.success("Balance history cleared for " + employee.name);
+      const refreshed = await reload({ showLoading: false, resetExpanded: false });
+      const updatedEmployee = refreshed?.report?.employees?.find(
+        (item) => item.employee_id === employee.employee_id,
+      );
+      if (updatedEmployee) setBalanceHistoryModal(updatedEmployee);
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setSavingIds((current) => ({ ...current, [employee.employee_id]: false }));
     }
   };
 
@@ -351,6 +624,7 @@ export default function SalariesManagement() {
       + " for this " + label + " payroll on " + paymentDate + "? This cannot be recorded twice.",
     );
     if (!confirmed) return;
+    const previousGrossCents = totals.grossCents;
     setSavingIds((current) => ({ ...current, [employee.employee_id]: true }));
     try {
       await api.post("/salaries/payments", {
@@ -362,7 +636,16 @@ export default function SalariesManagement() {
       });
       toast.success("Payment recorded for " + employee.name);
       setHistoryLoaded(false);
-      await reload();
+      const refreshed = await reload({ showLoading: false, resetExpanded: false });
+      if (refreshed) {
+        const recalculatedTotals = calculateReportTotals(
+          refreshed.report,
+          refreshed.payments,
+          monthlyIncluded,
+          periodType,
+        );
+        setTotalWasRecalculated(recalculatedTotals.grossCents !== previousGrossCents);
+      }
     } catch (error) {
       toast.error(apiError(error));
     } finally {
@@ -441,7 +724,7 @@ export default function SalariesManagement() {
             : String(employee.present_days || 0) + " full / " + String(employee.half_days || 0) + " half";
         const values = [
           employee.name || "Unnamed",
-          employee.department || "Other",
+          salaryDepartment(employee),
           row.monthly ? "Monthly" : (showPieces ? "Piecework" : "Weekly"),
           basis,
           fmtMoney(row.grossCents / 100),
@@ -472,339 +755,209 @@ export default function SalariesManagement() {
   };
 
   return (
-    <div className="space-y-5" data-testid="salary-management">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <div className="mx-auto max-w-7xl space-y-6 pb-6" data-testid="salary-management">
+      <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary">Finance &amp; team</p>
-          <h2 className="mt-1 font-display text-2xl font-semibold text-foreground sm:text-3xl">Payroll Overview</h2>
-          <p className="mt-1 text-sm text-muted-foreground">A clear, auditable view of every salary and payment.</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#39806b]">Payroll Management</p>
+          <h2 className="mt-1 font-display text-3xl font-semibold tracking-tight text-slate-950 sm:text-4xl">Salaries</h2>
+          <p className="mt-2 text-sm text-slate-500">Manage employee salaries and payroll periods.</p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Btn variant={view === "payroll" ? "primary" : "outline"} onClick={() => setView("payroll")} data-testid="salary-view-payroll"><Wallet size={15} /> Payroll</Btn>
-          <Btn variant={view === "history" ? "primary" : "outline"} onClick={() => setView("history")} data-testid="salary-view-history"><History size={15} /> Payment history</Btn>
+        <div className="flex flex-wrap items-center gap-2">
+          <Btn variant={view === "payroll" ? "primary" : "outline"} className="rounded-xl" onClick={() => setView("payroll")} data-testid="salary-view-payroll"><Wallet size={15} /> Payroll</Btn>
+          <Btn variant={view === "history" ? "primary" : "outline"} className="rounded-xl" onClick={() => setView("history")} data-testid="salary-view-history"><History size={15} /> Payment history</Btn>
+          {view === "payroll" && <Btn variant="outline" className="rounded-xl" disabled={loading || !report} onClick={reload} data-testid="salary-refresh"><History size={15} /> Recalculate</Btn>}
+          {view === "payroll" && <Btn className="rounded-xl bg-slate-950 text-white hover:bg-slate-800" disabled={loading || !report || !reportRows.length} onClick={downloadReport} data-testid="salary-download-report"><Download size={15} /> Download report</Btn>}
         </div>
       </div>
 
       {view === "payroll" ? <>
-        <Card className="p-4 sm:p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="font-display text-lg font-semibold text-foreground">Pay period</h3>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {periodType === "weekly" ? "Weekly payroll always covers Monday through Saturday." : "Monthly payroll covers one complete calendar month."}
+        <section className="relative rounded-3xl border border-slate-200/80 bg-white p-4 shadow-[0_8px_32px_rgba(15,23,42,0.045)] sm:p-6" aria-label="Pay period selector">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="inline-flex w-full rounded-xl bg-slate-100 p-1 sm:w-auto">
+              <button type="button" onClick={() => changePeriodType("weekly")} className={"flex-1 rounded-lg px-5 py-2.5 text-xs font-bold tracking-[0.12em] transition-all sm:flex-none " + (periodType === "weekly" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500 hover:text-slate-900")} data-testid="salary-weekly-mode">Week</button>
+              <button type="button" onClick={() => changePeriodType("monthly")} className={"flex-1 rounded-lg px-5 py-2.5 text-xs font-bold tracking-[0.12em] transition-all sm:flex-none " + (periodType === "monthly" ? "bg-white text-slate-950 shadow-sm" : "text-slate-500 hover:text-slate-900")} data-testid="salary-monthly-mode">Month</button>
+            </div>
+            <button type="button" onClick={() => periodType === "weekly" ? setWeekStart(mondayOf(today())) : setMonthValue(today().slice(0, 7))} className="rounded-lg px-3 py-2 text-xs font-semibold text-[#34725c] transition-colors hover:bg-[#eff9f4]" data-testid="salary-today">Today</button>
+          </div>
+
+          <div className="mt-5 flex items-center justify-center gap-2 sm:mt-6 sm:gap-4">
+            <button
+              type="button"
+              onClick={() => periodType === "weekly" ? setWeekStart(addDays(weekStart, -7)) : setMonthValue(shiftMonth(monthValue, -1))}
+              aria-label={periodType === "weekly" ? "Previous week" : "Previous month"}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 transition-colors hover:border-[#cbe7db] hover:bg-[#f1faf6] hover:text-[#286a56]"
+            ><ChevronLeft size={18} /></button>
+            <div className="min-w-0 flex-1 text-center sm:flex-none sm:min-w-[280px]">
+              <p className="truncate text-lg font-semibold tracking-tight text-slate-950 sm:text-2xl" data-testid="salary-period-label">
+                {periodType === "weekly"
+                  ? `${displayDate(weekStart)} – ${displayDate(selectedSunday)}`
+                  : displayMonth(monthValue)}
+              </p>
+              <p className="mt-1 text-xs font-medium text-slate-500">
+                {periodType === "weekly" ? `Week ${selectedWeekNumber} · ${selectedWeekYear} · Payroll runs Monday–Saturday` : "Full calendar month"}
               </p>
             </div>
-            <div className="inline-flex rounded-lg border border-border bg-secondary/70 p-1">
-              <button type="button" onClick={() => changePeriodType("weekly")} className={"rounded-md px-3 py-2 text-xs font-semibold transition-colors " + (periodType === "weekly" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground")} data-testid="salary-weekly-mode">Weekly</button>
-              <button type="button" onClick={() => changePeriodType("monthly")} className={"rounded-md px-3 py-2 text-xs font-semibold transition-colors " + (periodType === "monthly" ? "bg-card text-primary shadow-sm" : "text-muted-foreground hover:text-foreground")} data-testid="salary-monthly-mode">Monthly</button>
+            <button
+              type="button"
+              onClick={() => periodType === "weekly" ? setWeekStart(addDays(weekStart, 7)) : setMonthValue(shiftMonth(monthValue, 1))}
+              aria-label={periodType === "weekly" ? "Next week" : "Next month"}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 transition-colors hover:border-[#cbe7db] hover:bg-[#f1faf6] hover:text-[#286a56]"
+            ><ChevronRight size={18} /></button>
+            <div className="relative">
+              <button type="button" onClick={openCalendar} aria-label="Open calendar" aria-expanded={calendarOpen} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 transition-colors hover:border-[#cbe7db] hover:bg-[#f1faf6] hover:text-[#286a56]" data-testid="salary-calendar-toggle"><CalendarDays size={18} /></button>
+              {calendarOpen && <div className="absolute right-0 top-12 z-30 w-[min(22rem,calc(100vw-2rem))] rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_18px_50px_rgba(15,23,42,0.16)]" data-testid="salary-calendar">
+                <div className="flex items-center justify-between gap-3">
+                  <button type="button" onClick={() => setCalendarMonth(shiftMonth(calendarMonth, -1))} aria-label="Previous calendar month" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><ChevronLeft size={17} /></button>
+                  <h3 className="text-sm font-semibold text-slate-950">{displayMonth(calendarMonth)}</h3>
+                  <button type="button" onClick={() => setCalendarMonth(shiftMonth(calendarMonth, 1))} aria-label="Next calendar month" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><ChevronRight size={17} /></button>
+                </div>
+                <div className="mt-3 grid grid-cols-7 text-center text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                  {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => <span key={day} className="py-2">{day}</span>)}
+                </div>
+                <div className="grid grid-cols-7 gap-y-1">
+                  {calendarGrid.map((date) => {
+                    const inMonth = date.slice(0, 7) === calendarMonth;
+                    const inSelectedWeek = periodType === "weekly" && mondayOf(date) === weekStart;
+                    const selected = periodType === "weekly" ? inSelectedWeek : date === monthValue + "-01";
+                    const isToday = date === today();
+                    return <button
+                      type="button"
+                      key={date}
+                      onClick={() => selectCalendarDate(date)}
+                      aria-label={displayDate(date, { day: "numeric", month: "long", year: "numeric" })}
+                      aria-pressed={selected}
+                      className={"relative mx-auto flex h-9 w-9 items-center justify-center rounded-full text-xs transition-colors "
+                        + (selected ? "bg-[#dff2e9] font-bold text-[#276b56] "
+                          : inSelectedWeek ? "rounded-lg bg-[#f0f8f4] text-[#34725c] "
+                            : "text-slate-700 hover:bg-slate-100 ")
+                        + (!inMonth ? "text-slate-300 " : "")
+                        + (isToday && !selected ? "font-bold ring-1 ring-[#8fc8ad] " : "")}
+                      data-testid={"salary-calendar-day-" + date}
+                    >{Number(date.slice(-2))}</button>;
+                  })}
+                </div>
+                <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">
+                  <span className="text-[11px] text-slate-500">{periodType === "weekly" ? "Select any date to choose its week" : "Select any date to choose its month"}</span>
+                  <button type="button" onClick={() => { selectCalendarDate(today()); setCalendarMonth(today().slice(0, 7)); }} className="rounded-lg px-3 py-1.5 text-xs font-semibold text-[#34725c] hover:bg-[#eff9f4]">Today</button>
+                </div>
+              </div>}
             </div>
           </div>
-          <div className="mt-4 flex flex-wrap items-end gap-3">
-            {periodType === "weekly" ? <>
-              <div className="w-full max-w-xs">
-                <Input label="Week starting (Monday)" type="date" value={weekStart} onChange={(event) => setWeekStart(event.target.value)} data-testid="salary-week-start" />
-              </div>
-              <div className="rounded-md border border-border bg-secondary/50 px-3 py-2.5 text-sm">
-                <span className="text-muted-foreground">Week ends </span>
-                <strong className="font-mono">{period?.end || "Choose a Monday"}</strong>
-              </div>
-              <Btn variant="outline" onClick={() => setWeekStart(mondayOf(today()))}>This week</Btn>
-              <Btn variant="outline" onClick={() => {
-                const previous = new Date(mondayOf(today()) + "T00:00:00Z");
-                previous.setUTCDate(previous.getUTCDate() - 7);
-                setWeekStart(previous.toISOString().slice(0, 10));
-              }}>Last week</Btn>
-            </> : <>
-              <div className="w-full max-w-xs">
-                <Input label="Payroll month" type="month" value={monthValue} onChange={(event) => setMonthValue(event.target.value)} data-testid="salary-month-picker" />
-              </div>
-              <Btn variant="outline" onClick={() => setMonthValue(today().slice(0, 7))}>This month</Btn>
-              <Btn variant="outline" onClick={() => {
-                const previous = new Date(monthValue + "-01T00:00:00Z");
-                previous.setUTCMonth(previous.getUTCMonth() - 1);
-                setMonthValue(previous.toISOString().slice(0, 7));
-              }}>Previous month</Btn>
-            </>}
-            <div className="ml-auto flex gap-2">
-              <Btn variant="outline" disabled={loading || !report} onClick={reload} data-testid="salary-refresh"><History size={15} /> Recalculate</Btn>
-              <Btn disabled={loading || !report || !reportRows.length} onClick={downloadReport} data-testid="salary-download-report"><Download size={15} /> Download report</Btn>
+
+          {periodType === "weekly" && <div className="mt-5 grid grid-cols-7 gap-1.5 sm:mt-6 sm:gap-2" aria-label="Selected week days">
+            {Array.from({ length: 7 }, (_, index) => {
+              const date = addDays(weekStart, index);
+              return <button type="button" key={date} onClick={() => { setCalendarMonth(date.slice(0, 7)); setCalendarOpen(true); }} className="min-w-0 rounded-xl bg-[#eff8f3] px-1 py-2 text-center transition-colors hover:bg-[#dff2e9] sm:px-2 sm:py-2.5" data-testid={"salary-week-day-" + date}>
+                <span className="block text-[9px] font-semibold uppercase tracking-wide text-[#6b8f80] sm:text-[10px]">{displayDate(date, { weekday: "short" })}</span>
+                <span className="mt-0.5 block text-xs font-semibold tabular-nums text-[#315d4c] sm:text-sm">{Number(date.slice(-2))}</span>
+              </button>;
+            })}
+          </div>}
+        </section>
+
+        <section className="overflow-hidden rounded-3xl bg-[#111312] p-5 text-white shadow-[0_16px_40px_rgba(15,23,42,0.16)] sm:p-7" aria-label="Payroll summary">
+          <div className="grid gap-5 sm:grid-cols-3 sm:gap-0">
+            <div className="sm:px-5 sm:first:pl-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">Total salaries</p>
+              <p className="mt-2 font-mono text-2xl font-semibold tabular-nums sm:text-3xl">{fmtMoney(totals.grossCents / 100)}</p>
+              <p className="mt-1 text-xs text-white/45">Net payable {fmtMoney(totals.netCents / 100)}</p>
+            </div>
+            <div className="border-t border-white/10 pt-5 sm:border-l sm:border-t-0 sm:px-6 sm:pt-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">Employees included</p>
+              <p className="mt-2 font-mono text-2xl font-semibold tabular-nums sm:text-3xl">{report ? reportRows.length : "—"}</p>
+              <p className="mt-1 text-xs text-white/45">{report ? `of ${rows.length} employees in this report` : "Loading payroll report"}</p>
+            </div>
+            <div className="border-t border-white/10 pt-5 sm:border-l sm:border-t-0 sm:px-6 sm:pt-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">Settled</p>
+              <p className="mt-2 font-mono text-2xl font-semibold tabular-nums sm:text-3xl">{includedPaidRows.length}</p>
+              <p className="mt-1 text-xs text-white/45">{fmtMoney(paidGrossCents / 100)} salary · {fmtMoney(paidCents / 100)} net paid</p>
             </div>
           </div>
-        </Card>
+        </section>
 
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <SummaryMetric label="Employees in report" value={String(reportRows.length)} icon={ListFilter} helper="Monthly employees can be included individually." />
-          <SummaryMetric label="Gross payroll" value={fmtMoney(totals.grossCents / 100)} icon={Banknote} />
-          <SummaryMetric label="Balance deductions" value={fmtMoney(totals.cutCents / 100)} icon={Landmark} />
-          <SummaryMetric label="Net payable" value={fmtMoney(totals.netCents / 100)} icon={Wallet} emphasis helper={"Paid: " + fmtMoney(paidCents / 100) + " · " + includedPaidRows.length + " recorded payments"} />
-        </div>
+        {totalWasRecalculated && <p role="status" className="text-xs text-amber-800" data-testid="salary-total-recalculated">
+          Please recalculate salaries. The total shown before payment was incorrect and has been updated.
+        </p>}
 
-        {!!report?.unmatched_attendance_records?.length && <Card role="alert" className="border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
-          <p className="font-semibold">Attendance records need reconciliation</p>
-          <p className="mt-1 text-xs">These saved records do not match an employee profile and are not included in payroll:</p>
-          <ul className="mt-2 space-y-1 text-xs">
-            {report.unmatched_attendance_records.map((record, index) => <li key={record.employee_id + "-" + record.date + "-" + index}>
-              {record.date} · {record.employee_name || "Unknown employee"} · ID {record.employee_id || "missing"} · {record.status || "No status"}
-            </li>)}
-          </ul>
-        </Card>}
-
-        <Card className="overflow-hidden">
-          <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border p-4">
+        <section className="space-y-4" aria-label="Employee payroll">
+          <div className="flex flex-wrap items-end justify-between gap-3">
             <div>
-              <h3 className="font-display text-lg font-semibold text-foreground">Employee payroll</h3>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {period ? period.start + " – " + period.end : "Select a valid pay period"}
-                {report ? " · " + report.employees.length + " employees" : ""}
+              <h3 className="font-display text-xl font-semibold text-slate-950">Employee payroll</h3>
+              <p className="mt-1 text-xs text-slate-500">
+                {periodType === "weekly"
+                  ? `${displayDate(weekStart)} – ${displayDate(selectedSunday)}`
+                  : displayMonth(monthValue)}
+                {report ? ` · ${report.employees.length} employees` : ""}
               </p>
             </div>
-            <div className="flex w-full flex-wrap items-end gap-2 sm:w-auto">
-              <div className="relative min-w-[210px] flex-1 sm:w-60 sm:flex-none">
-                <Search size={15} className="absolute left-3 top-[2.35rem] text-muted-foreground" />
-                <Input label="Search employees" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name or department" className="pl-9" data-testid="salary-search" />
+            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+              <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
+                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search employee"
+                  aria-label="Search employee"
+                  className="h-11 w-full rounded-xl border border-slate-200 bg-white pl-10 pr-3 text-sm text-slate-800 outline-none transition focus:border-[#9fcfba] focus:ring-4 focus:ring-[#e7f6ef]"
+                  data-testid="salary-search"
+                />
               </div>
-              <div className="min-w-[170px] flex-1 sm:w-48 sm:flex-none">
-                <Select label="Department" value={department} onChange={(event) => setDepartment(event.target.value)} data-testid="salary-department">
-                  <option value="">All departments</option>
-                  {departments.map((item) => <option key={item} value={item}>{item}</option>)}
-                </Select>
+              <div className="relative">
+                <button type="button" onClick={() => setFiltersOpen((current) => !current)} aria-expanded={filtersOpen} className={"inline-flex h-11 items-center gap-2 rounded-xl border px-4 text-sm font-semibold transition-colors " + (department ? "border-[#b8ddca] bg-[#eff9f4] text-[#34725c]" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50")} data-testid="salary-filter-toggle">
+                  <SlidersHorizontal size={16} /> Filters{department ? " · 1" : ""}
+                </button>
+                {filtersOpen && <div className="absolute right-0 top-12 z-20 w-64 rounded-2xl border border-slate-200 bg-white p-4 shadow-xl">
+                  <Select label="Department" value={department} onChange={(event) => setDepartment(event.target.value)} data-testid="salary-department">
+                    <option value="">All departments</option>
+                    {departments.map((item) => <option key={item} value={item}>{item}</option>)}
+                  </Select>
+                  {department && <button type="button" onClick={() => setDepartment("")} className="mt-3 text-xs font-semibold text-[#34725c] hover:underline">Clear filter</button>}
+                </div>}
               </div>
             </div>
           </div>
 
-          {loading ? <div className="p-12 text-center text-sm text-muted-foreground">Calculating payroll from saved records…</div>
-            : !report ? <Empty icon={Wallet} title="Choose a valid pay period" hint="Select a Monday–Saturday week or a complete calendar month." />
-            : filteredRows.length === 0 ? <Empty icon={Search} title="No employees match your search" />
-            : <>
-              <div className="hidden overflow-x-auto md:block">
-                <table className="w-full min-w-[1120px] text-sm">
-                  <thead>
-                    <tr className="bg-primary text-left text-[10px] font-bold uppercase tracking-[0.12em] text-primary-foreground">
-                      <th className="px-3 py-3">Employee</th>
-                      <th className="px-3 py-3">Department</th>
-                      <th className="px-3 py-3">Pay type</th>
-                      <th className="px-3 py-3">Days / pieces</th>
-                      <th className="px-3 py-3 text-right">Gross</th>
-                      <th className="px-3 py-3 text-right">Deduction</th>
-                      <th className="px-3 py-3 text-right">Net payable</th>
-                      <th className="px-3 py-3">Report</th>
-                      <th className="px-3 py-3">Status</th>
-                      <th className="px-3 py-3 text-right">Details</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredRows.map((row) => {
-                      const employee = row.employee;
-                      const isPaid = !!row.payment;
-                      const expandedRow = !!expanded[employee.employee_id];
-                      const showPieces = isPieceworkTailor(employee);
-                      const payLabel = row.monthly ? "Monthly" : showPieces ? "Piecework" : "Weekly";
-                      const basis = row.monthly
-                        ? "Monthly salary"
-                        : showPieces
-                          ? String(employee.total_pieces || 0) + " pieces"
-                          : String(employee.present_days || 0) + " full / " + String(employee.half_days || 0) + " half";
-                      return <Fragment key={employee.employee_id}>
-                        <tr key={employee.employee_id} className="border-b border-border/70 transition-colors hover:bg-secondary/40" data-testid={"salary-row-" + employee.employee_id}>
-                          <td className="px-3 py-3">
-                            <div className="flex items-center gap-2">
-                              <button type="button" onClick={() => setExpanded((current) => ({ ...current, [employee.employee_id]: !current[employee.employee_id] }))} aria-label={"Toggle details for " + employee.name} className="rounded p-1 text-muted-foreground hover:bg-secondary">
-                                {expandedRow ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-                              </button>
-                              <div>
-                                <p className="font-semibold text-foreground">{employee.name}</p>
-                                {employee.active === false && <p className="text-[10px] text-muted-foreground">Inactive record</p>}
-                                {employee.salary_rate_missing && <p className="text-[10px] font-medium text-amber-700">Missing configured rate · not payable</p>}
-                              </div>
-                            </div>
-                          </td>
-                          <td className="px-3 py-3 text-muted-foreground">{employee.department || "Other"}</td>
-                          <td className="px-3 py-3"><Badge cls={row.monthly ? "border-primary/20 bg-primary/10 text-primary" : "border-border bg-secondary text-secondary-foreground"}>{payLabel}</Badge></td>
-                          <td className="px-3 py-3 text-muted-foreground">{basis}</td>
-                          <td className="px-3 py-3 text-right font-mono tabular-nums">{fmtMoney(row.grossCents / 100)}</td>
-                          <td className="px-3 py-3 text-right font-mono tabular-nums">{fmtMoney(row.cutCents / 100)}</td>
-                          <td className="px-3 py-3 text-right font-mono font-semibold tabular-nums text-foreground">{fmtMoney(row.netCents / 100)}</td>
-                          <td className="px-3 py-3">
-                            {row.monthly ? <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-                              <input type="checkbox" checked={row.included} onChange={(event) => setMonthlyIncluded((current) => ({ ...current, [employee.employee_id]: event.target.checked }))} data-testid={"salary-include-" + employee.employee_id} />
-                              Include
-                            </label> : <span className="text-xs text-muted-foreground">Included</span>}
-                          </td>
-                          <td className="px-3 py-3">
-                            {isPaid ? <Badge cls="border-emerald-200 bg-emerald-50 text-emerald-800"><Check size={11} className="mr-1" /> Paid</Badge>
-                              : row.monthly && periodType !== "monthly" ? <Badge cls="border-border bg-secondary text-secondary-foreground">Monthly</Badge>
-                              : !row.monthly && periodType !== "weekly" ? <Badge cls="border-border bg-secondary text-secondary-foreground">Weekly payroll</Badge>
-                              : <Badge cls="border-amber-200 bg-amber-50 text-amber-800">Pending</Badge>}
-                            {isPaid && <p className="mt-1 text-[10px] text-muted-foreground">{row.payment.payment_date}</p>}
-                          </td>
-                          <td className="px-3 py-3 text-right">
-                            <button type="button" onClick={() => setExpanded((current) => ({ ...current, [employee.employee_id]: !current[employee.employee_id] }))} className="rounded-md border border-border bg-card p-2 text-muted-foreground hover:bg-secondary" aria-label={"Open " + employee.name + " salary details"}>
-                              {expandedRow ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-                            </button>
-                          </td>
-                        </tr>
-                        {expandedRow && <tr key={employee.employee_id + "-details"} className="border-b border-border bg-secondary/25">
-                          <td colSpan={10} className="p-4">
-                            <div className="grid gap-4 xl:grid-cols-[1.2fr_1fr_1fr]">
-                              <section className="space-y-3">
-                                <div>
-                                  <h4 className="font-display font-semibold text-foreground">Pay breakdown</h4>
-                                  <p className="mt-1 text-xs text-muted-foreground">How this period’s gross pay was calculated.</p>
-                                </div>
-                                <div className="grid grid-cols-2 gap-2 text-xs">
-                                  <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Attendance pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.regular_pay || 0)}</p></div>
-                                  <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Overtime <span className="font-normal">(R20/hour)</span></p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.overtime_pay || 0)}</p></div>
-                                  {showPieces ? <>
-                                    <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Piecework pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.piece_pay || 0)}</p></div>
-                                    <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Recorded production</p><p className="mt-1 font-mono font-semibold">{employee.total_pieces || 0} pieces</p></div>
-                                  </> : <>
-                                    <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Working days</p><p className="mt-1 font-mono font-semibold">{employee.present_days || 0} full · {employee.half_days || 0} half</p></div>
-                                    <div className="rounded-md border border-border bg-card p-3"><p className="text-muted-foreground">Hours worked</p><p className="mt-1 font-mono font-semibold">{Number(employee.regular_hours || 0) + Number(employee.overtime_hours || 0)} hours</p></div>
-                                  </>}
-                                </div>
-                                {employee.salary_rate_missing && <p role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">
-                                No configured {row.monthly ? "monthly" : "weekly"} salary rate is available. Payroll is shown as R0.00 and cannot be marked paid; enter only the owner-approved configured rate.
-                                </p>}
-                                {showPieces && <p className="text-xs text-muted-foreground">Pay is based on the saved daily production and approved piecework rates.</p>}
-                              </section>
-
-                              <section className="space-y-3">
-                                <div>
-                                  <h4 className="font-display font-semibold text-foreground">Salary &amp; balance</h4>
-                                  <p className="mt-1 text-xs text-muted-foreground">Deductions are manual; nothing is taken automatically.</p>
-                                </div>
-                                <div className="rounded-md border border-border bg-card p-3">
-                                  <label className="block text-xs font-semibold text-muted-foreground">Configured {row.monthly ? "monthly" : "weekly"} salary
-                                    <span className="mt-1 flex items-center gap-2">
-                                      <span className="text-muted-foreground">R</span>
-                                      <input type="number" min="0.01" step="0.01" value={rateDrafts[employee.employee_id] ?? ""} onChange={(event) => setRateDrafts((current) => ({ ...current, [employee.employee_id]: event.target.value }))} className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-2 font-mono text-sm text-foreground" disabled={!!savingIds[employee.employee_id]} />
-                                      <Btn size="sm" disabled={!!savingIds[employee.employee_id]} onClick={() => saveRate(employee)}>Save</Btn>
-                                    </span>
-                                  </label>
-                                </div>
-                                <div className="rounded-md border border-border bg-card p-3">
-                                  <div className="grid grid-cols-2 gap-2 text-xs">
-                                    <div><p className="text-muted-foreground">Balance at period start</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance_before_period || 0)}</p></div>
-                                    <div><p className="text-muted-foreground">Balance remaining</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.balance ?? employee.balance_after_period ?? 0)}</p></div>
-                                  </div>
-                                  <label className="mt-3 block text-xs font-semibold text-muted-foreground">Deduction for this period
-                                    <input type="number" min="0" step="0.01" max={Number(employee.available_balance || 0)} value={cutDrafts[employee.employee_id] ?? "0"} onChange={(event) => setCutDrafts((current) => ({ ...current, [employee.employee_id]: event.target.value }))} disabled={!!savingIds[employee.employee_id] || (!!row.payment)} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground" />
-                                  </label>
-                                  {!row.payment && <p className="mt-1 text-[11px] text-muted-foreground">Save the deduction to update take-home pay.</p>}
-                                  {row.monthly && periodType !== "monthly" && <p className="mt-2 text-[11px] text-muted-foreground">Switch to Monthly payroll to edit or save this deduction.</p>}
-                                  <div className="mt-3 flex flex-wrap gap-2">
-                                    <Btn className="px-3 py-1.5 text-xs" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })} disabled={!!savingIds[employee.employee_id]}> <Landmark size={13} /> Add borrowed amount</Btn>
-                                    <Btn className="px-3 py-1.5 text-xs" onClick={() => saveCut(employee)} disabled={!!savingIds[employee.employee_id] || !!row.payment || (row.monthly && periodType !== "monthly") || (!row.monthly && periodType !== "weekly")}>Save deduction</Btn>
-                                  </div>
-                                </div>
-                                {employee.balance_history?.length > 0 && <details className="rounded-md border border-border bg-card p-3 text-xs">
-                                  <summary className="cursor-pointer font-semibold text-foreground">Borrowed balance history · {employee.balance_history.length} entries</summary>
-                                  <div className="mt-2 max-h-40 space-y-2 overflow-y-auto">
-                                    {employee.balance_history.map((entry) => <div key={entry.type + "-" + entry.id} className="flex justify-between gap-3 border-t border-border pt-2">
-                                      <span>{entry.date} · {entry.type === "advance" ? "Borrowed" : "Deduction"} · {entry.notes || "—"}</span>
-                                      <strong className="shrink-0 font-mono">{fmtMoney(entry.amount)}</strong>
-                                    </div>)}
-                                  </div>
-                                </details>}
-                              </section>
-
-                              <section className="space-y-3">
-                                <div>
-                                  <h4 className="font-display font-semibold text-foreground">Payment</h4>
-                                  <p className="mt-1 text-xs text-muted-foreground">Confirm the date and amount paid.</p>
-                                </div>
-                                {row.payment ? <div className="rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-                                  <p className="font-semibold"><BadgeCheck size={16} className="mr-1 inline" /> Payment recorded</p>
-                                  <p className="mt-2">Paid on {row.payment.payment_date}</p>
-                                  <p className="mt-1 font-mono text-lg font-semibold">{fmtMoney(row.payment.net_amount)}</p>
-                                  <p className="mt-1 text-xs">This record is locked and cannot be paid twice.</p>
-                                </div> : row.monthly && periodType !== "monthly" ? <div className="rounded-md border border-border bg-card p-4 text-sm">
-                                  <p className="font-semibold text-foreground">Monthly salary</p>
-                                  <p className="mt-1 text-xs text-muted-foreground">This employee can be paid once from the Monthly payroll. Include or exclude them from this report using the checkbox.</p>
-                                </div> : !row.monthly && periodType !== "weekly" ? <div className="rounded-md border border-border bg-card p-4 text-sm">
-                                  <p className="font-semibold text-foreground">Weekly earnings overview</p>
-                                  <p className="mt-1 text-xs text-muted-foreground">This monthly report summarizes weekly earnings. Record payment from the specific Monday–Saturday week.</p>
-                                </div> : <div className="rounded-md border border-border bg-card p-4">
-                                  <label className="block text-xs font-semibold text-muted-foreground">Date paid
-                                    <input type="date" value={paymentDates[employee.employee_id] || today()} onChange={(event) => setPaymentDates((current) => ({ ...current, [employee.employee_id]: event.target.value }))} disabled={!!savingIds[employee.employee_id]} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground" />
-                                  </label>
-                                  <div className="mt-3 flex items-center justify-between gap-2">
-                                    <div><p className="text-xs text-muted-foreground">Take-home pay</p><p className="font-mono text-xl font-semibold text-primary">{fmtMoney(row.netCents / 100)}</p></div>
-                                    <Btn size="sm" className="px-3 py-1.5 text-xs" onClick={() => markPaid(row)} disabled={!!savingIds[employee.employee_id] || !row.included || !!employee.salary_rate_missing || row.netCents <= 0}><Check size={14} /> Mark as paid</Btn>
-                                  </div>
-                                </div>}
-                              </section>
-                            </div>
-                          </td>
-                        </tr>}
-                      </Fragment>;
-                    })}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="divide-y divide-border md:hidden">
-                {filteredRows.map((row) => {
-                  const employee = row.employee;
-                  const isPaid = !!row.payment;
-                  const expandedRow = !!expanded[employee.employee_id];
-                  const showPieces = isPieceworkTailor(employee);
-                  return <article key={employee.employee_id} className="p-4" data-testid={"salary-mobile-row-" + employee.employee_id}>
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="font-semibold text-foreground">{employee.name}</p>
-                        <p className="mt-0.5 text-xs text-muted-foreground">{employee.department || "Other"} · {row.monthly ? "Monthly" : showPieces ? "Piecework" : "Weekly"}</p>
-                        {employee.salary_rate_missing && <p className="mt-1 text-[11px] font-medium text-amber-700">Missing configured rate · not payable</p>}
-                      </div>
-                      {isPaid ? <Badge cls="border-emerald-200 bg-emerald-50 text-emerald-800">Paid</Badge> : <Badge cls="border-amber-200 bg-amber-50 text-amber-800">{row.monthly ? "Monthly" : periodType === "monthly" ? "Weekly overview" : "Pending"}</Badge>}
-                    </div>
-                    <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                      <div><p className="text-muted-foreground">Gross pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(row.grossCents / 100)}</p></div>
-                      <div><p className="text-muted-foreground">Deduction</p><p className="mt-1 font-mono font-semibold">{fmtMoney(row.cutCents / 100)}</p></div>
-                      <div><p className="text-muted-foreground">Take-home pay</p><p className="mt-1 font-mono font-semibold text-primary">{fmtMoney(row.netCents / 100)}</p></div>
-                    </div>
-                    {row.monthly && <label className="mt-3 inline-flex items-center gap-2 text-xs text-muted-foreground">
-                      <input type="checkbox" checked={row.included} onChange={(event) => setMonthlyIncluded((current) => ({ ...current, [employee.employee_id]: event.target.checked }))} />
-                      Include in this salary report
-                    </label>}
-                    <button type="button" onClick={() => setExpanded((current) => ({ ...current, [employee.employee_id]: !current[employee.employee_id] }))} className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-primary">
-                      {expandedRow ? <ChevronDown size={14} /> : <ChevronRight size={14} />} {expandedRow ? "Hide details" : "More details"}
-                    </button>
-                    {expandedRow && <div className="mt-3 space-y-3 rounded-lg border border-border bg-secondary/30 p-3">
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div><p className="text-muted-foreground">Attendance pay</p><strong className="font-mono">{fmtMoney(employee.regular_pay || 0)}</strong></div>
-                        <div><p className="text-muted-foreground">Overtime · R20/hour</p><strong className="font-mono">{fmtMoney(employee.overtime_pay || 0)}</strong></div>
-                        {showPieces
-                          ? <div><p className="text-muted-foreground">Piecework · pieces</p><strong className="font-mono">{fmtMoney(employee.piece_pay || 0)} · {employee.total_pieces || 0}</strong></div>
-                          : <div><p className="text-muted-foreground">Working days · hours</p><strong className="font-mono">{employee.present_days || 0} full · {employee.half_days || 0} half · {Number(employee.regular_hours || 0) + Number(employee.overtime_hours || 0)}h</strong></div>}
-                        <div><p className="text-muted-foreground">Balance remaining</p><strong className="font-mono">{fmtMoney(employee.balance ?? employee.balance_after_period ?? 0)}</strong></div>
-                      </div>
-                      <p className="text-xs text-muted-foreground">Deductions are manual; nothing is taken automatically.</p>
-                      <label className="block text-xs font-semibold text-muted-foreground">Deduction for this period
-                        <input type="number" min="0" step="0.01" value={cutDrafts[employee.employee_id] ?? "0"} onChange={(event) => setCutDrafts((current) => ({ ...current, [employee.employee_id]: event.target.value }))} disabled={!!row.payment || (row.monthly && periodType !== "monthly")} className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-foreground" />
-                      </label>
-                      {!row.payment && <p className="text-xs text-muted-foreground">Save the deduction to update take-home pay.</p>}
-                      <div className="flex flex-wrap gap-2">
-                        <Btn className="px-3 py-1.5 text-xs" variant="outline" onClick={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })}><Landmark size={13} /> Add borrowed amount</Btn>
-                        <Btn className="px-3 py-1.5 text-xs" onClick={() => saveCut(employee)} disabled={!!row.payment || (row.monthly && periodType !== "monthly") || (!row.monthly && periodType !== "weekly")}>Save deduction</Btn>
-                      </div>
-                      {row.payment ? <p className="text-xs text-emerald-700">Paid on {row.payment.payment_date} · {fmtMoney(row.payment.net_amount)}</p>
-                        : row.monthly && periodType !== "monthly" ? <p className="text-xs text-muted-foreground">Use Monthly payroll to record payment.</p>
-                        : !row.monthly && periodType !== "weekly" ? <p className="text-xs text-muted-foreground">Record payment from the specific Monday–Saturday week.</p>
-                        : <div className="space-y-2">
-                          <Input label="Date paid" type="date" value={paymentDates[employee.employee_id] || today()} onChange={(event) => setPaymentDates((current) => ({ ...current, [employee.employee_id]: event.target.value }))} />
-                          <Btn className="w-full" onClick={() => markPaid(row)} disabled={!!savingIds[employee.employee_id] || !row.included || !!employee.salary_rate_missing || row.netCents <= 0}> <Check size={14} /> Mark as paid</Btn>
-                        </div>}
-                    </div>}
-                  </article>;
-                })}
-              </div>
-            </>}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-secondary/20 px-4 py-3 text-xs text-muted-foreground">
-            <span>{reportRows.length} employees included in report · {payments.length} marked paid for this period</span>
+          {loading
+            ? <div className="rounded-2xl border border-slate-200 bg-white p-12 text-center text-sm text-slate-500">Calculating payroll from saved records…</div>
+            : !report ? <Card className="rounded-2xl"><Empty icon={Wallet} title="Choose a valid pay period" hint="Select a week or complete calendar month." /></Card>
+              : filteredRows.length === 0 ? <Card className="rounded-2xl"><Empty icon={Search} title="No employees match your search" /></Card>
+                : <div className="grid gap-3">
+                  {filteredRows.map((row) => {
+                    const employee = row.employee;
+                    return <PayrollEmployeeCard
+                      key={employee.employee_id}
+                      row={row}
+                      periodType={periodType}
+                      expanded={!!expanded[employee.employee_id]}
+                      onToggleExpanded={(forceOpen = false) => setExpanded((current) => ({
+                        ...current,
+                        [employee.employee_id]: forceOpen ? true : !current[employee.employee_id],
+                      }))}
+                      onIncludeChange={(included) => setMonthlyIncluded((current) => ({ ...current, [employee.employee_id]: included }))}
+                      rateValue={rateDrafts[employee.employee_id] ?? ""}
+                      onRateChange={(value) => setRateDrafts((current) => ({ ...current, [employee.employee_id]: value }))}
+                      paymentDate={paymentDates[employee.employee_id] || today()}
+                      onPaymentDateChange={(value) => setPaymentDates((current) => ({ ...current, [employee.employee_id]: value }))}
+                      saving={!!savingIds[employee.employee_id]}
+                      onSaveRate={() => saveRate(employee)}
+                      onAddAdvance={() => setAdvanceModal({ employee_id: employee.employee_id, employee_name: employee.name, amount: "", date: today(), notes: "" })}
+                      onCutBalance={() => setCutModal({
+                        employee,
+                        amount: "",
+                        notes: "",
+                      })}
+                      onShowBalanceHistory={() => setBalanceHistoryModal(employee)}
+                      onMarkPaid={() => markPaid(row)}
+                    />;
+                  })}
+                </div>}
+          <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-slate-500">
+            <span>{reportRows.length} employees included · {includedPaidRows.length} settled</span>
             <span>Paid records are snapshots; new borrowed balances carry forward separately.</span>
           </div>
-        </Card>
+        </section>
+
       </> : <Card className="overflow-hidden">
         <div className="border-b border-border p-4">
           <h3 className="font-display text-lg font-semibold text-foreground">Payment history</h3>
@@ -812,21 +965,22 @@ export default function SalariesManagement() {
         </div>
         {historyLoading ? <div className="p-10 text-center text-sm text-muted-foreground">Loading payment history…</div>
           : history.length === 0 ? <Empty icon={History} title="No salary payments recorded yet" hint="Mark a payroll as paid to create the first payment record." />
-          : <div className="overflow-x-auto">
-            <table className="w-full min-w-[820px] text-sm">
-              <thead><tr className="bg-primary text-left text-[10px] font-bold uppercase tracking-[0.12em] text-primary-foreground">
-                <th className="px-4 py-3">Payment date</th><th className="px-4 py-3">Employee</th><th className="px-4 py-3">Period</th><th className="px-4 py-3 text-right">Gross</th><th className="px-4 py-3 text-right">Deduction</th><th className="px-4 py-3 text-right">Net paid</th><th className="px-4 py-3">Status</th>
-              </tr></thead>
-              <tbody>{history.map((payment) => <tr key={payment.id} className="border-b border-border/70 hover:bg-secondary/30">
-                <td className="px-4 py-3 font-mono">{payment.payment_date}</td>
-                <td className="px-4 py-3 font-semibold">{payment.employee_name}</td>
-                <td className="px-4 py-3 text-muted-foreground">{payment.period_type === "monthly" ? "Month " + payment.period_start.slice(0, 7) : payment.period_start + " – " + payment.period_end}</td>
-                <td className="px-4 py-3 text-right font-mono">{fmtMoney(payment.gross_amount)}</td>
-                <td className="px-4 py-3 text-right font-mono">{fmtMoney(payment.deduction_amount)}</td>
-                <td className="px-4 py-3 text-right font-mono font-semibold">{fmtMoney(payment.net_amount)}</td>
-                <td className="px-4 py-3"><Badge cls="border-emerald-200 bg-emerald-50 text-emerald-800">Paid</Badge></td>
-              </tr>)}</tbody>
-            </table>
+          : <div className="grid gap-3 p-4 sm:grid-cols-2">
+            {history.map((payment) => <article key={payment.id} className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate font-semibold text-slate-950">{payment.employee_name}</p>
+                  <p className="mt-1 text-xs text-slate-500">{payment.period_type === "monthly" ? "Month " + payment.period_start.slice(0, 7) : payment.period_start + " – " + payment.period_end}</p>
+                </div>
+                <Badge cls="border-emerald-200 bg-emerald-50 text-emerald-800">Paid</Badge>
+              </div>
+              <div className="mt-4 grid grid-cols-3 gap-2 border-t border-slate-100 pt-3 text-xs">
+                <div><p className="text-slate-500">Gross</p><p className="mt-1 font-mono font-semibold">{fmtMoney(payment.gross_amount)}</p></div>
+                <div><p className="text-slate-500">Deduction</p><p className="mt-1 font-mono font-semibold">{fmtMoney(payment.deduction_amount)}</p></div>
+                <div><p className="text-slate-500">Net paid</p><p className="mt-1 font-mono font-semibold">{fmtMoney(payment.net_amount)}</p></div>
+              </div>
+              <p className="mt-3 text-[11px] text-slate-500">Paid {payment.payment_date}</p>
+            </article>)}
           </div>}
       </Card>}
 
@@ -838,6 +992,79 @@ export default function SalariesManagement() {
           <div className="flex justify-end gap-2">
             <Btn variant="outline" onClick={() => setAdvanceModal(null)}>Cancel</Btn>
             <Btn onClick={saveAdvance}>Save borrowed balance</Btn>
+          </div>
+        </div>}
+      </Modal>
+      <Modal open={!!cutModal} onClose={() => setCutModal(null)} title={"Cut balance — " + (cutModal?.employee?.name || "")}>
+        {cutModal && <div className="space-y-4">
+          <p className="rounded-lg bg-slate-50 p-3 text-xs text-slate-600">
+            Payroll period: {period?.start} – {period?.end}. This cut will be recorded against this period.
+          </p>
+          <Input
+            label="Amount to cut (R)"
+            type="number"
+            min="0.01"
+            step="0.01"
+            max={Number(cutModal.employee.gross_salary || 0)}
+            value={cutModal.amount}
+            onChange={(event) => setCutModal({ ...cutModal, amount: event.target.value })}
+            data-testid="salary-cut-amount"
+          />
+          <Input
+            label="Notes"
+            value={cutModal.notes}
+            onChange={(event) => setCutModal({ ...cutModal, notes: event.target.value })}
+            data-testid="salary-cut-notes"
+          />
+          <div className="flex justify-end gap-2">
+            <Btn variant="outline" onClick={() => setCutModal(null)}>Cancel</Btn>
+            <Btn
+              onClick={() => saveCut(cutModal.employee, cutModal)}
+              disabled={!!savingIds[cutModal.employee.employee_id]}
+              data-testid="salary-cut-save"
+            >Save cut</Btn>
+          </div>
+        </div>}
+      </Modal>
+      <Modal
+        open={!!balanceHistoryModal}
+        onClose={() => setBalanceHistoryModal(null)}
+        title={"Balance cut/add history — " + (balanceHistoryModal?.name || "")}
+      >
+        {balanceHistoryModal && <div className="space-y-4">
+          <div className="rounded-xl bg-slate-50 p-4">
+            <p className="text-xs font-medium text-slate-500">Current balance due</p>
+            <p className="mt-1 font-mono text-lg font-semibold text-slate-950">{fmtMoney(balanceHistoryModal.balance || 0)}</p>
+          </div>
+          {balanceHistoryModal.balance_history?.length ? (
+            <ol className="max-h-[55vh] space-y-3 overflow-y-auto">
+              {[...balanceHistoryModal.balance_history].reverse().map((entry) => (
+                <li key={entry.type + "-" + entry.id} className="flex items-start justify-between gap-4 rounded-xl border border-slate-200 p-3">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-slate-900">
+                      {entry.type === "advance" ? "Borrowed amount added" : "Balance cut"}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {entry.type === "advance" ? "Taken" : "Cut"} on {entry.date || "Date unavailable"}
+                    </p>
+                    {entry.notes && <p className="mt-1 break-words text-xs text-slate-600">{entry.notes}</p>}
+                  </div>
+                  <strong className={"shrink-0 font-mono " + (entry.type === "advance" ? "text-amber-700" : "text-emerald-700")}>
+                    {entry.type === "advance" ? "+" : "−"}{fmtMoney(entry.amount)}
+                  </strong>
+                </li>
+              ))}
+            </ol>
+          ) : <p className="rounded-xl border border-slate-200 p-4 text-sm text-slate-500">No balance additions or cuts recorded yet.</p>}
+          <div className="flex flex-wrap justify-between gap-2">
+            <Btn
+              variant="outline"
+              className="border-red-200 text-red-700 hover:bg-red-50"
+              onClick={clearBalanceHistory}
+              disabled={!balanceHistoryModal.balance_history?.length || !!savingIds[balanceHistoryModal.employee_id]}
+              data-testid="salary-clear-balance-history"
+            ><Trash2 size={14} /> Delete all history</Btn>
+            <Btn variant="outline" onClick={() => setBalanceHistoryModal(null)}>Close</Btn>
           </div>
         </div>}
       </Modal>

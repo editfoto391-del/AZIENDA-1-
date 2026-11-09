@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useSearchParams } from "react-router-dom";
-import { Building2, CircleAlert, Download, LoaderCircle, Plus, RefreshCw, Search, Send } from "lucide-react";
+import { Building2, CircleAlert, Download, LoaderCircle, Plus, RefreshCw, Send } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { companyProfileName } from "@/lib/company";
 import { InvoiceDocument } from "@/components/InvoiceDocument";
@@ -41,6 +41,8 @@ function intercompanyError(error) {
   );
   return [detail.message, ...shortages].join(" ");
 }
+
+const intercompanyProductLabel = (product) => [product.product, product.dimensions].filter(Boolean).join(" · ");
 
 function Panel({ title, children, icon: Icon }) {
   return (
@@ -152,6 +154,7 @@ export default function Intercompany() {
         supplying_company_id: supplierId, items, notes,
       });
       setDraftItems([{ stock_id: "", quantity: "1" }]);
+      setSearch("");
       setNotes("");
       toast.success("Intercompany request submitted.");
       await loadRequests(requestPage);
@@ -271,45 +274,55 @@ export default function Intercompany() {
       <div className="grid min-w-0 items-start gap-6 xl:grid-cols-[minmax(20rem,0.88fr)_minmax(0,1.62fr)]">
       <Panel title="Create a request" icon={Plus}>
         <form onSubmit={createRequest} className="space-y-4">
-          <div className="grid gap-4 2xl:grid-cols-2">
+          <div className="grid gap-4">
             <label className="space-y-1 text-sm font-medium text-slate-700">
               Supplying company
               <select value={supplierId} onChange={(event) => {
                 setSupplierId(event.target.value);
                 setDraftItems([{ stock_id: "", quantity: "1" }]);
+                setSearch("");
               }} className="w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm">
                 {suppliers.map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}
               </select>
-            </label>
-            <label className="space-y-1 text-sm font-medium text-slate-700">
-              Search supplier stock
-              <span className="relative block">
-                <Search size={16} className="absolute left-3 top-2.5 text-slate-400" />
-                <input value={search} onChange={(event) => {
-                  setSearch(event.target.value);
-                }} placeholder="Product or dimensions" className="w-full min-w-0 rounded-lg border border-slate-300 py-2.5 pl-9 pr-3 text-sm" />
-              </span>
             </label>
           </div>
           {draftItems.map((item, index) => (
             <div key={index} className="grid min-w-0 gap-3 rounded-lg border border-border bg-muted/30 p-3 sm:grid-cols-[minmax(0,1fr)_7rem_auto]">
               <label className="space-y-1 text-sm font-medium text-slate-700">
                 Product {index + 1}
-                <select value={item.stock_id} onChange={(event) => {
-                  const selectedProduct = products.find((product) => product.stock_id === event.target.value) || null;
-                  setDraftItems((current) => current.map((line, lineIndex) =>
-                    lineIndex === index
-                      ? { ...line, stock_id: event.target.value, selected_product: selectedProduct }
-                      : line,
-                  ));
-                }} className="w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm">
-                  <option value="">{productsLoading ? "Loading stock..." : "Select product"}</option>
-                  {[
-                    ...products,
-                    ...(item.selected_product && !products.some((product) => product.stock_id === item.stock_id)
-                      ? [item.selected_product] : []),
-                  ].map((product) => <option key={product.stock_id} value={product.stock_id}>{product.product} · {product.dimensions} · available {product.available_quantity}</option>)}
-                </select>
+                <input
+                  type="search"
+                  value={item.search ?? (item.selected_product ? intercompanyProductLabel(item.selected_product) : "")}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    const selectedProduct = products.find((product) =>
+                      intercompanyProductLabel(product).toLowerCase() === value.trim().toLowerCase()
+                    ) || null;
+                    setSearch(value);
+                    setDraftItems((current) => current.map((line, lineIndex) =>
+                      lineIndex === index
+                        ? {
+                          ...line,
+                          search: value,
+                          stock_id: selectedProduct?.stock_id || "",
+                          selected_product: selectedProduct,
+                        }
+                        : line,
+                    ));
+                  }}
+                  list={`intercompany-product-options-${index}`}
+                  placeholder={productsLoading ? "Loading supplier stock..." : "Search product or dimensions"}
+                  className="w-full min-w-0 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"
+                  data-testid={`intercompany-product-search-${index}`}
+                />
+                <datalist id={`intercompany-product-options-${index}`}>
+                  {products.map((product) => <option key={product.stock_id} value={intercompanyProductLabel(product)} />)}
+                  {item.selected_product && !products.some((product) => product.stock_id === item.stock_id) && (
+                    <option value={intercompanyProductLabel(item.selected_product)} />
+                  )}
+                </datalist>
+                {productsLoading && <span className="block text-xs font-normal text-slate-500" role="status">Searching supplier stock...</span>}
+                {!productsLoading && search.trim() && products.length === 0 && <span className="block text-xs font-normal text-slate-500" role="status">No matching products.</span>}
               </label>
               <label className="space-y-1 text-sm font-medium text-slate-700">
                 Quantity
@@ -319,7 +332,10 @@ export default function Intercompany() {
             </div>
           ))}
           <div className="grid gap-3">
-            <button type="button" disabled={draftItems.length >= 100} onClick={() => setDraftItems((current) => [...current, { stock_id: "", quantity: "1" }])} className="inline-flex w-fit items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-semibold text-foreground hover:bg-muted disabled:opacity-50"><Plus size={15} /> Add product</button>
+            <button type="button" disabled={draftItems.length >= 100} onClick={() => {
+              setSearch("");
+              setDraftItems((current) => [...current, { stock_id: "", quantity: "1" }]);
+            }} className="inline-flex w-fit items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-semibold text-foreground hover:bg-muted disabled:opacity-50"><Plus size={15} /> Add product</button>
             <input value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={2000} placeholder="Optional notes for the supplier" className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2.5 text-sm" />
             <button disabled={busy === "create-request"} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-60">
               {busy === "create-request" ? <LoaderCircle size={16} className="animate-spin" /> : <Send size={16} />} Submit request

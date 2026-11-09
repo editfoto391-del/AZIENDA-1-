@@ -17,6 +17,7 @@ const DEPTS = [
   "DRIVING",
   "SECURITY",
 ];
+const employeeDepartment = (employee) => employee?.department || (employee?.is_general_worker ? "General Worker" : "Other");
 
 const weekPeriodForDate = (value) => {
   const start = new Date(`${value}T00:00:00Z`);
@@ -28,7 +29,11 @@ const weekPeriodForDate = (value) => {
 
 export default function Attendance() {
   const { user } = useAuth();
+  const isIqfoamWholesaler = user?.company_id === "iqfoam-whole-sallers";
+  const canManageDepartments = user?.is_owner || user?.is_company_owner || user?.is_admin || user?.role === "admin"
+    || user?.company_roles?.[user?.company_id] === "admin";
   const [employees, setEmployees] = useState([]);
+  const [companyDepartments, setCompanyDepartments] = useState([]);
   const [deletedEmployees, setDeletedEmployees] = useState([]);
   const [records, setRecords] = useState([]);
   const [pieceRecords, setPieceRecords] = useState([]);
@@ -39,9 +44,9 @@ export default function Attendance() {
   const [loading, setLoading] = useState(true);
   const [date, setDate] = useState(today());
   const [empModal, setEmpModal] = useState(null);
+  const [newDepartmentName, setNewDepartmentName] = useState("");
+  const [departmentSaving, setDepartmentSaving] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [rosterImporting, setRosterImporting] = useState(false);
-  const [rosterResetting, setRosterResetting] = useState(false);
   const [attendanceReportDownloading, setAttendanceReportDownloading] = useState(false);
   const [attendanceSaving, setAttendanceSaving] = useState({});
   const [section, setSection] = useState("attendance");
@@ -68,6 +73,21 @@ export default function Attendance() {
   };
   useEffect(() => { load(); }, [date, user?.company_id]);
   useEffect(() => {
+    if (!isIqfoamWholesaler) {
+      setCompanyDepartments([]);
+      return undefined;
+    }
+    let activeRequest = true;
+    api.get("/departments")
+      .then((departments) => {
+        if (activeRequest) setCompanyDepartments(departments);
+      })
+      .catch((error) => {
+        if (activeRequest) toast.error(`Could not load departments: ${apiError(error)}`);
+      });
+    return () => { activeRequest = false; };
+  }, [isIqfoamWholesaler]);
+  useEffect(() => {
     let activeRequest = true;
     setPieceLoading(true);
     api.get("/piece-production", { start_date: date, end_date: date })
@@ -81,7 +101,10 @@ export default function Attendance() {
   const statusOf = (eid) => records.find((r) => r.employee_id === eid && r.date === date)?.status;
   const groups = useMemo(() => {
     const g = {};
-    active.forEach((e) => { (g[e.department || "Other"] ||= []).push(e); });
+    active.forEach((e) => {
+      const department = employeeDepartment(e);
+      (g[department] ||= []).push(e);
+    });
     return Object.entries(g).sort(([a], [b]) => a.localeCompare(b));
   }, [active]);
   const present = active.filter((e) => ["Present", "Half Day"].includes(statusOf(e.id))).length;
@@ -259,39 +282,37 @@ export default function Attendance() {
     try { await api.post("/attendance/bulk", { date, status: "Present", employee_ids: active.map((e) => e.id) }); toast.success("All marked present"); load(); }
     catch (e) { toast.error(apiError(e)); } finally { setBusy(false); }
   };
-  const importPayrollRoster = async () => {
-    if (!window.confirm("Update the employee list to match the supplied 31-person roster? This updates salaries and departments, merges duplicate profiles, and archives employees not on the list. Attendance and salary history will be kept.")) return;
-    setRosterImporting(true);
-    try {
-      const result = await api.post("/employees/import-roster", {});
-      toast.success(`Employee list updated: ${result.added} added, ${result.updated} updated, ${result.duplicates_archived} duplicates merged, ${result.unlisted_archived} unlisted archived`);
-      load();
-    } catch (error) {
-      toast.error(apiError(error));
-    } finally {
-      setRosterImporting(false);
-    }
-  };
-  const resetPayrollRosterAndAttendance = async () => {
-    if (!window.confirm("This will archive employees not shown in the supplied roster, merge duplicate profiles with the same name, permanently delete all attendance history, and mark the roster present for the full current work week. This cannot be undone. Continue?")) return;
-    setRosterResetting(true);
-    try {
-      const result = await api.post("/employees/reconcile-payroll-roster", {});
-      toast.success(
-        `Roster updated: ${result.added} added, ${result.duplicates_archived} duplicates merged, ${result.unlisted_archived} unlisted archived. ${result.attendance_deleted} attendance records deleted; ${result.attendance_created} present records created for ${result.week_start}–${result.week_end}.`,
-      );
-      load();
-    } catch (error) {
-      toast.error(apiError(error));
-    } finally {
-      setRosterResetting(false);
-    }
-  };
   const saveEmp = async () => {
     if (!empModal.name.trim()) return toast.error("Name required");
-    if (!DEPTS.includes(empModal.department)) return toast.error("Select a standard department");
+    if (isIqfoamWholesaler) {
+      const validDepartment = !empModal.department || companyDepartments.includes(empModal.department);
+      if (!validDepartment || (!empModal.is_general_worker && !empModal.department)) {
+        return toast.error(empModal.is_general_worker
+          ? "Select a department from this company or leave it blank."
+          : "Select or create a department for this worker.");
+      }
+    } else if (!DEPTS.includes(empModal.department)) {
+      return toast.error("Select a standard department");
+    }
     try { empModal.id ? await api.put(`/employees/${empModal.id}`, empModal) : await api.post("/employees", empModal); setEmpModal(null); load(); toast.success("Employee saved"); }
     catch (e) { toast.error(apiError(e)); }
+  };
+  const createDepartment = async () => {
+    if (departmentSaving) return;
+    const name = newDepartmentName.trim();
+    if (!name) return toast.error("Enter a department name");
+    setDepartmentSaving(true);
+    try {
+      const department = await api.post("/departments", { name });
+      setCompanyDepartments((current) => [...new Set([...current, department.name])].sort((a, b) => a.localeCompare(b)));
+      setEmpModal((current) => current ? { ...current, department: department.name } : current);
+      setNewDepartmentName("");
+      toast.success(`${department.name} added to this company’s departments`);
+    } catch (error) {
+      toast.error(`Could not create department: ${apiError(error)}`);
+    } finally {
+      setDepartmentSaving(false);
+    }
   };
   const deleteEmployee = async (employee) => {
     if (!window.confirm(`Permanently delete ${employee.name} from this profile? The employee will appear in Deleted employees; attendance and salary history will be retained.`)) return;
@@ -359,7 +380,7 @@ export default function Attendance() {
       const periodLabel = `${reportDate(start)} – ${reportDate(end)}`;
       const columns = [
         { label: "Employee", width: 38, value: (row) => row.employee.name },
-        { label: "Department", width: 30, value: (row) => row.employee.department || "-" },
+        { label: "Department", width: 30, value: (row) => employeeDepartment(row.employee) },
         ...days.map((day, index) => ({
           label: `${reportDate(day, { weekday: "short" })} ${reportDate(day, { day: "numeric", month: "short" })}`,
           width: 21,
@@ -495,10 +516,10 @@ export default function Attendance() {
           <Btn variant="outline" disabled={attendanceReportDownloading || loading} onClick={downloadWeeklyAttendanceReport} data-testid="attendance-weekly-report">
             <Download size={16} /> {attendanceReportDownloading ? "Preparing report..." : "Weekly Attendance Report"}
           </Btn>
-          <Btn variant="outline" onClick={() => setEmpModal({ name: "", department: "", active: true })} data-testid="add-employee-btn"><Plus size={16} /> Employee</Btn>
-          {(user?.is_admin || user?.role === "admin" || user?.is_owner) && <>
-            <Btn variant="outline" disabled={rosterImporting} onClick={importPayrollRoster} data-testid="import-payroll-roster-btn">{rosterImporting ? "Updating list…" : "Update employee list"}</Btn>
-          </>}
+          <Btn variant="outline" onClick={() => {
+            setNewDepartmentName("");
+            setEmpModal({ name: "", department: "", active: true, is_general_worker: false });
+          }} data-testid="add-employee-btn"><Plus size={16} /> Employee</Btn>
           <Btn disabled={loading || busy || !active.length} onClick={markAll} data-testid="mark-all-present-btn"><CheckCheck size={16} /> Mark All Present</Btn>
         </>}
       </PageHeader>
@@ -517,7 +538,7 @@ export default function Attendance() {
             <table className="w-full text-sm">
               <thead><tr className="bg-slate-50 text-left text-xs text-slate-400"><th className="px-4 py-3">Name</th><th className="px-4 py-3">Department</th><th className="px-4 py-3">Deleted</th></tr></thead>
               <tbody>{deletedEmployees.map((employee) => <tr key={employee.id} className="border-t border-border/60" data-testid={`deleted-employee-row-${employee.id}`}>
-                <td className="px-4 py-3 font-semibold text-slate-800">{employee.name}</td><td className="px-4 py-3 text-slate-500">{employee.department || "—"}</td><td className="px-4 py-3 text-slate-500">{employee.deleted_at ? new Date(employee.deleted_at).toLocaleString() : "—"}</td>
+                <td className="px-4 py-3 font-semibold text-slate-800">{employee.name}</td><td className="px-4 py-3 text-slate-500">{employeeDepartment(employee)}</td><td className="px-4 py-3 text-slate-500">{employee.deleted_at ? new Date(employee.deleted_at).toLocaleString() : "—"}</td>
               </tr>)}</tbody>
             </table>
           </div>}
@@ -528,7 +549,6 @@ export default function Attendance() {
       <>
       <div className="flex flex-wrap items-end gap-4">
         <div className="w-48"><Input label="Date" type="date" value={date} onChange={(e) => { setDate(e.target.value); setOvertimeDraft({}); setWorkTimeDraft({}); setShiftModeDraft({}); }} data-testid="attendance-date-input" /></div>
-        <p className="pb-2 text-sm text-slate-500">Select a shift for hourly employees. Ayanda Tailor and Asive Tailor are paid by weekly piece count.</p>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <Stat l="Present (day)" v={loading ? "..." : present} cls="text-emerald-600" k="day-present" />
@@ -556,7 +576,13 @@ export default function Attendance() {
             );
             return (
               <div key={e.id} className="flex flex-wrap items-center gap-3 rounded-xl border border-border px-3 py-2" data-testid={`att-row-${e.id}`}>
-                <div className="flex-1 min-w-[140px]"><p className="font-semibold text-slate-800">{e.name}</p><p className="text-[11px] text-slate-400">Week {per?.week ?? 0} · Month {per?.month ?? 0} days</p></div>
+                <div className="flex-1 min-w-[140px]">
+                  <p className="flex flex-wrap items-center gap-2 font-semibold text-slate-800">
+                    {e.name}
+                    {e.is_general_worker && <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-600">General Worker</span>}
+                  </p>
+                  <p className="text-[11px] text-slate-400">Week {per?.week ?? 0} · Month {per?.month ?? 0} days</p>
+                </div>
                 {e.pay_type === "piece" && <>
                   <div className="w-32"><Input label="Pieces today" type="number" min="0" step="1"
                     value={pieceDraft[e.id] ?? pieceRecords.find((item) => item.employee_id === e.id && item.date === date)?.pieces ?? 0}
@@ -605,7 +631,10 @@ export default function Attendance() {
                   {!((record?.start_time && record?.end_time) || shiftMode !== "custom") && <div className="w-32"><Input label="Overtime hours" type="number" min="0" step="0.25" value={overtimeDraft[e.id] ?? record?.overtime_hours ?? 0}
                   onChange={(event) => setOvertimeDraft((current) => ({ ...current, [e.id]: event.target.value }))} onBlur={() => saveOvertime(e)} data-testid={`attendance-overtime-${e.id}`} /></div>}
                 </>}
-                <button onClick={() => setEmpModal({ ...e })} className="text-slate-300 hover:text-primary" data-testid={`edit-employee-${e.id}`}><Pencil size={15} /></button>
+                <button onClick={() => {
+                  setNewDepartmentName("");
+                  setEmpModal({ ...e });
+                }} className="text-slate-300 hover:text-primary" data-testid={`edit-employee-${e.id}`}><Pencil size={15} /></button>
                 {user?.is_owner && <button onClick={() => deleteEmployee(e)} className="text-slate-300 hover:text-red-600" aria-label={`Permanently delete ${e.name}`} title="Permanently delete employee" data-testid={`delete-employee-${e.id}`}><Trash2 size={15} /></button>}
               </div>);
           })}</div>
@@ -613,11 +642,41 @@ export default function Attendance() {
       <Modal open={!!empModal} onClose={() => setEmpModal(null)} title={empModal?.id ? "Edit Employee" : "Add Employee"}>
         {empModal && <div className="space-y-4">
           <Input label="Name *" value={empModal.name} onChange={(e) => setEmpModal({ ...empModal, name: e.target.value })} data-testid="employee-name-input" />
-          <Select label="Department" value={empModal.department || ""} onChange={(e) => setEmpModal({ ...empModal, department: e.target.value })} data-testid="employee-dept-select">
-            <option value="">Select a department</option>
-            {empModal.department && !DEPTS.includes(empModal.department) && <option value={empModal.department}>{empModal.department} (legacy)</option>}
-            {DEPTS.map((d) => <option key={d} value={d}>{d}</option>)}
+          {isIqfoamWholesaler && <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={!!empModal.is_general_worker}
+              onChange={(event) => setEmpModal({ ...empModal, is_general_worker: event.target.checked })}
+              data-testid="employee-general-worker"
+            />
+            General worker
+          </label>}
+          <Select
+            label="Department"
+            value={isIqfoamWholesaler && empModal.is_general_worker && !empModal.department ? "__general_worker__" : empModal.department || ""}
+            onChange={(event) => setEmpModal(event.target.value === "__general_worker__"
+              ? { ...empModal, department: "", is_general_worker: true }
+              : { ...empModal, department: event.target.value })}
+            data-testid="employee-dept-select"
+          >
+            <option value="">{empModal.is_general_worker ? "No department (optional)" : "Select a department"}</option>
+            {isIqfoamWholesaler && <option value="__general_worker__">General Worker</option>}
+            {empModal.department && !(isIqfoamWholesaler ? companyDepartments : DEPTS).includes(empModal.department) && <option value={empModal.department}>{empModal.department} (legacy)</option>}
+            {(isIqfoamWholesaler ? companyDepartments : DEPTS).map((department) => <option key={department} value={department}>{department}</option>)}
           </Select>
+          {isIqfoamWholesaler && canManageDepartments && <div className="flex items-end gap-2">
+            <Input
+              label="Create department"
+              value={newDepartmentName}
+              onChange={(event) => setNewDepartmentName(event.target.value)}
+              maxLength={100}
+              placeholder="Department name"
+              data-testid="employee-new-department"
+            />
+            <Btn type="button" variant="outline" onClick={createDepartment} disabled={departmentSaving} data-testid="employee-create-department">
+              {departmentSaving ? "Adding..." : "Add"}
+            </Btn>
+          </div>}
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={empModal.active !== false} onChange={(e) => setEmpModal({ ...empModal, active: e.target.checked })} /> Active</label>
           <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setEmpModal(null)}>Cancel</Btn><Btn onClick={saveEmp} data-testid="save-employee-btn">Save</Btn></div>
         </div>}

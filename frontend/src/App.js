@@ -1,5 +1,6 @@
 import "@/App.css";
 import { Component, lazy, Suspense, useEffect, useState } from "react";
+import * as Sentry from "@sentry/react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
 import { ThemeProvider } from "next-themes";
@@ -49,6 +50,7 @@ class AppErrorBoundary extends Component {
 
   componentDidCatch(error) {
     console.error("Application error", error);
+    Sentry.captureException(error);
   }
 
   render() {
@@ -73,6 +75,10 @@ class SharedInvoiceErrorBoundary extends Component {
 
   static getDerivedStateFromError() {
     return { hasError: true };
+  }
+
+  componentDidCatch(error) {
+    Sentry.captureException(error);
   }
 
   render() {

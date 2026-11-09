@@ -181,3 +181,92 @@ def test_yaseen_november_balance_cut_saves_only_the_remaining_monthly_target(mon
     ))
 
     assert inserted["amount"] == 800
+
+
+def test_balance_cut_can_exceed_borrowed_balance_after_payroll_is_paid(monkeypatch):
+    async def weekly_employee_report(_start_date, _end_date):
+        return {"employees": [{
+            "employee_id": "employee-weekly",
+            "pay_frequency": "weekly",
+            "is_full_month_period": False,
+            "available_balance": 100,
+            "gross_salary": 6500,
+        }]}
+
+    async def find_one(*_args, **_kwargs):
+        raise AssertionError("Saving a balance cut must not depend on payroll payment status")
+
+    async def no_cuts(*_args, **_kwargs):
+        return []
+
+    inserted = {}
+
+    async def capture_insert(_collection, data):
+        inserted.update(data)
+        return {"id": "new-cut", **data}
+
+    async def no_audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(server, "require_admin", lambda _user: None)
+    monkeypatch.setattr(server, "salary_report", weekly_employee_report)
+    monkeypatch.setattr(server, "listall", no_cuts)
+    monkeypatch.setattr(server, "insert", capture_insert)
+    monkeypatch.setattr(server, "log_audit", no_audit)
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(salary_payments=SimpleNamespace(find_one=find_one)),
+    )
+
+    asyncio.run(server.save_salary_cut(
+        server.SalaryCutIn(
+            employee_id="employee-weekly",
+            start_date="2026-11-02",
+            end_date="2026-11-07",
+            amount=500,
+        ),
+        user={"role": "admin"},
+    ))
+
+    assert inserted["amount"] == 500
+
+
+def test_balance_advance_can_be_added_after_payroll_is_paid(monkeypatch):
+    async def find_employee(_query, _projection=None):
+        return {"id": "employee-weekly"}
+
+    async def find_payment(*_args, **_kwargs):
+        raise AssertionError("Adding a balance must not depend on payroll payment status")
+
+    inserted = {}
+
+    async def capture_insert(_collection, data):
+        inserted.update(data)
+        return {"id": "new-advance", **data}
+
+    async def no_audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(server, "require_admin", lambda _user: None)
+    monkeypatch.setattr(server, "insert", capture_insert)
+    monkeypatch.setattr(server, "log_audit", no_audit)
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(
+            employees=SimpleNamespace(find_one=find_employee),
+            salary_payments=SimpleNamespace(find_one=find_payment),
+        ),
+    )
+
+    asyncio.run(server.add_salary_advance(
+        server.SalaryAdvanceIn(
+            employee_id="employee-weekly",
+            amount=250,
+            date="2026-11-08",
+        ),
+        user={"role": "admin"},
+    ))
+
+    assert inserted["amount"] == 250

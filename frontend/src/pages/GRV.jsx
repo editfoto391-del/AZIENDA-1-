@@ -57,6 +57,7 @@ const blankGRV = () => ({
   purpose: "selling", is_chemical: false,
 });
 const lineValue = (line) => (Number(line.accepted_quantity) || 0) * (Number(line.unit_cost) || 0);
+const stockItemLabel = (item) => [item.size, item.product].filter(Boolean).join(" ");
 
 function Metric({ label, value, icon: Icon, tone = "text-slate-800" }) {
   return (
@@ -232,6 +233,9 @@ export default function GRV() {
   const [suppliers, setSuppliers] = useState([]);
   const [orders, setOrders] = useState([]);
   const [stock, setStock] = useState([]);
+  const [stockLoading, setStockLoading] = useState(true);
+  const [stockError, setStockError] = useState("");
+  const [stockLoadKey, setStockLoadKey] = useState(0);
   const [stockSearchByLine, setStockSearchByLine] = useState({});
   const [settings, setSettings] = useState({});
   const [filters, setFilters] = useState({ date_from: "", date_to: "", supplier_id: "", status: "" });
@@ -280,9 +284,30 @@ export default function GRV() {
     const load = (path, apply) => api.get(path).then(apply).catch((error) => toast.error(apiError(error)));
     load("/suppliers", (list) => setSuppliers(list || []));
     load("/grvs/purchase-orders", (list) => setOrders(list || []));
-    load("/stock", (list) => setStock(list || []));
     load("/settings", (value) => setSettings(value || {}));
   }, [companyId]);
+
+  useEffect(() => {
+    let active = true;
+    setStockLoading(true);
+    setStockError("");
+    api.getUncached("/stock")
+      .then((list) => {
+        if (!Array.isArray(list)) throw new Error("The stock list response is not valid.");
+        if (active) setStock(list);
+      })
+      .catch((error) => {
+        if (!active) return;
+        const message = apiError(error);
+        setStock([]);
+        setStockError(message);
+        toast.error(`Could not load stock products: ${message}`);
+      })
+      .finally(() => {
+        if (active) setStockLoading(false);
+      });
+    return () => { active = false; };
+  }, [companyId, stockLoadKey]);
 
   const totalValue = useMemo(
     () => (records || []).reduce((sum, grv) =>
@@ -309,10 +334,6 @@ export default function GRV() {
           : { ...line, [key]: value }
         : line),
     }));
-  };
-
-  const updateStockSearch = (index, value) => {
-    setStockSearchByLine((current) => ({ ...current, [index]: value }));
   };
 
   const removeLine = (index) => {
@@ -358,8 +379,8 @@ export default function GRV() {
   };
 
   const chooseStock = (index, stockId) => {
-    updateStockSearch(index, "");
     if (stockId === "__new_product__") {
+      setStockSearchByLine((current) => ({ ...current, [index]: "" }));
       setDraft((current) => ({
         ...current,
         items: current.items.map((line, lineIndex) => lineIndex === index
@@ -371,16 +392,17 @@ export default function GRV() {
       }));
       return;
     }
-    const selected = stock.find((item) => item.id === stockId);
+    const selected = stock.find((item) => String(item.id) === String(stockId));
     if (!selected) {
       setDraft((current) => ({
         ...current,
         items: current.items.map((line, lineIndex) => lineIndex === index
-          ? { ...line, stock_id: "", new_product: false }
+          ? { ...line, stock_id: "", product_code: "", new_product: false, product: "", size: "" }
           : line),
       }));
       return;
     }
+    setStockSearchByLine((current) => ({ ...current, [index]: stockItemLabel(selected) }));
     setDraft((current) => ({
       ...current,
       items: current.items.map((line, lineIndex) => lineIndex === index
@@ -850,53 +872,44 @@ export default function GRV() {
                       ? <div className="grid min-w-[360px] grid-cols-2 gap-1">
                         <input placeholder="New product / category *" value={line.product} onChange={(event) => updateLine(index, "product", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-new-product-name-${index}`} />
                         <input placeholder="Size / measurement *" value={line.size} onChange={(event) => updateLine(index, "size", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-new-product-size-${index}`} />
-                        <button type="button" onClick={() => chooseStock(index, "")} className="col-span-2 text-left text-xs text-primary hover:underline" data-testid={`grv-select-existing-product-${index}`}>Choose an existing stock product instead</button>
+                        <button type="button" onClick={() => chooseStock(index, "")} className="col-span-2 w-full text-left text-xs text-primary underline underline-offset-2" data-testid={`grv-select-existing-product-${index}`}>Choose an existing stock product instead</button>
                       </div>
                       : <div className="min-w-[220px] space-y-1.5" data-testid={`grv-stock-${index}`}>
                         <input
                           type="search"
-                          aria-label="Search stock products"
-                          placeholder="Type product, size or code..."
-                          value={stockSearchByLine[index] || ""}
-                          onChange={(event) => updateStockSearch(index, event.target.value)}
-                          className="w-full rounded border border-input px-2 py-1.5"
+                          aria-label={`Search product and size for line ${index + 1}`}
+                          placeholder={stockLoading ? "Loading stock..." : stockError ? "Stock unavailable" : "Search product or size..."}
+                          list={`grv-stock-options-${index}`}
+                          value={stockSearchByLine[index] ?? (line.stock_id
+                            ? stockItemLabel({ product: line.product, size: line.size, code: line.product_code })
+                            : "")}
+                          disabled={stockLoading || !!stockError || stock.length === 0}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            setStockSearchByLine((current) => ({ ...current, [index]: value }));
+                            const selected = stock.find((item) =>
+                              stockItemLabel(item).toLowerCase() === value.trim().toLowerCase()
+                            );
+                            if (selected) chooseStock(index, selected.id);
+                            else if (line.stock_id) chooseStock(index, "");
+                          }}
+                          className="w-full rounded border border-input bg-white px-2 py-1.5 text-sm text-slate-800 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500"
                           data-testid={`grv-stock-search-${index}`}
                         />
-                        {line.stock_id && !stockSearchByLine[index] && <span className="block text-xs text-slate-600">
-                          Selected: {line.product} · {line.size}
-                        </span>}
-                        {stockSearchByLine[index]?.trim() && (() => {
-                          const query = stockSearchByLine[index].trim().toLowerCase();
-                          const matches = stock.filter((item) =>
-                            [item.product, item.size, item.code, item.sku, item.id]
-                              .some((value) => String(value || "").toLowerCase().includes(query))
-                          );
-                          return matches.length
-                            ? <div className="max-h-40 overflow-y-auto rounded border border-border bg-white shadow-sm" role="listbox" aria-label="Stock search results">
-                              {matches.slice(0, 20).map((item) => (
-                                <button
-                                  key={item.id}
-                                  type="button"
-                                  role="option"
-                                  aria-selected={line.stock_id === item.id}
-                                  onClick={() => chooseStock(index, item.id)}
-                                  className="block w-full border-b border-border/60 px-2 py-1.5 text-left text-xs last:border-0 hover:bg-primary/5"
-                                  data-testid={`grv-stock-result-${index}-${item.id}`}
-                                >
-                                  <span className="block font-semibold text-slate-800">{item.product} · {item.size}</span>
-                                  {(item.code || item.sku) && <span className="text-slate-500">{item.code || item.sku}</span>}
-                                </button>
-                              ))}
-                              {matches.length > 20 && <span className="block px-2 py-1 text-xs text-slate-500">Showing first 20 results. Refine your search.</span>}
-                            </div>
-                            : <span className="text-xs text-slate-500">No stock item matches that search.</span>;
-                        })()}
+                        <datalist id={`grv-stock-options-${index}`}>
+                          {stock.map((item) => <option key={item.id} value={stockItemLabel(item)} />)}
+                        </datalist>
+                        {stockError && <div className="flex items-center gap-2 text-xs">
+                          <span className="text-red-700" role="alert">Stock could not be loaded.</span>
+                          <button type="button" onClick={() => setStockLoadKey((key) => key + 1)} className="font-semibold text-primary underline underline-offset-2">Retry</button>
+                        </div>}
+                        {!stockLoading && !stockError && stock.length === 0 && <span className="text-xs text-slate-500" role="status">No stock products available.</span>}
                         <button
                           type="button"
                           onClick={() => chooseStock(index, "__new_product__")}
-                          className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-sm font-bold text-primary transition-colors hover:border-primary hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                          className="col-span-2 w-full text-left text-xs text-primary underline underline-offset-2"
                           data-testid={`grv-create-stock-product-${index}`}
-                        ><Plus size={15} /> Create new product / category</button>
+                        >Create new product / category</button>
                       </div>
                       : <><span className="block font-semibold text-slate-800">{line.product}</span><span className="text-slate-500">{line.size} · {line.product_code}</span></>}
                   </td>

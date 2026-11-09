@@ -1,5 +1,4 @@
 const NAVY = [19, 43, 65];
-const ORANGE = [181, 83, 43];
 const BRAND = [31, 54, 70];
 const GRID = [205, 212, 216];
 const SECTION_STYLES = {
@@ -7,13 +6,12 @@ const SECTION_STYLES = {
   "02": { accent: [77, 149, 107], background: [223, 241, 229] },
   "03": { accent: [177, 132, 84], background: [247, 233, 216] },
   "04": { accent: [112, 100, 155], background: [231, 227, 242] },
-  H: { accent: [67, 141, 138], background: [220, 239, 237] },
 };
 const ROWS_PER_PAGE = 12;
-const ROW_HEIGHT = 4.65;
 const CELL_FONT_SIZE = 5.8;
 const LINE_HEIGHT = 2.7;
 const BODY_HEIGHT = 49.5;
+const ROW_HEIGHT = BODY_HEIGHT / ROWS_PER_PAGE;
 
 function sectionRows(report, mainInvoiceNo) {
   return [
@@ -62,7 +60,7 @@ function sectionRows(report, mainInvoiceNo) {
       number: "04",
       title: "DIESEL USAGE (BY VEHICLE)",
       columns: [
-        { label: "VEHICLE", width: 0.56, value: (row) => row.vehicle },
+        { label: "VEHICLE", width: 0.56, value: (row, index) => `${index + 1}. ${row.vehicle}` },
         { label: "AMOUNT", width: 0.2, value: (row) => money(row.amount), align: "right" },
         { label: "NOTES", width: 0.24, value: (row) => row.notes },
       ],
@@ -71,22 +69,6 @@ function sectionRows(report, mainInvoiceNo) {
       total: money(report.totals?.diesel),
     },
   ];
-}
-
-function homeSection(report) {
-  return {
-    number: "H",
-    title: "HOME",
-    columns: [
-      { label: "NO", width: 0.08, value: (_row, index) => index + 1 },
-      { label: "CATEGORY", width: 0.25, value: (row) => row.category },
-      { label: "DESCRIPTION", width: 0.41, value: (row) => row.description },
-      { label: "AMOUNT", width: 0.26, value: (row) => money(row.amount), align: "right" },
-    ],
-    rows: report.home_expenses || [],
-    totalLabel: "Total Home",
-    total: money(report.totals?.home_expenses),
-  };
 }
 
 function money(value) {
@@ -185,8 +167,10 @@ function drawSection(pdf, section, pageRows, x, y, width, height, pageIndex) {
       pdf.setDrawColor(...GRID);
       pdf.rect(cellX, currentRowY, cellWidth, row.height);
       const lines = [...row.lines[columnIndex]];
-      if (columnIndex === 0 && section.number !== "05") {
+      if (columnIndex === 0 && column.label === "NO") {
         lines[0] = row.continuation ? "" : String(row.sourceIndex + 1);
+      } else if (columnIndex === 0 && row.continuation) {
+        lines[0] = "";
       }
       pdf.setTextColor(25, 33, 40);
       pdf.setFont("helvetica", "normal");
@@ -200,44 +184,24 @@ function drawSection(pdf, section, pageRows, x, y, width, height, pageIndex) {
     currentRowY += row.height;
   }
 
-  if (!rows.length) {
-    const blankRowHeight = bodyHeight / ROWS_PER_PAGE;
-    for (let rowIndex = 0; rowIndex < ROWS_PER_PAGE; rowIndex += 1) {
-      let cellX = x;
-      section.columns.forEach((column, columnIndex) => {
-        const cellWidth = width * column.width;
-        pdf.setDrawColor(...GRID);
-        pdf.rect(cellX, currentRowY, cellWidth, blankRowHeight);
-        if (columnIndex === 0 && section.number !== "05") {
-          pdf.setTextColor(25, 33, 40);
-          pdf.setFont("helvetica", "normal");
-          pdf.setFontSize(CELL_FONT_SIZE);
-          pdf.text(String(rowIndex + 1), cellX + 1.2, currentRowY + blankRowHeight * 0.65);
-        }
-        cellX += cellWidth;
-      });
-      currentRowY += blankRowHeight;
-    }
-  } else {
-    let nextRowNumber = (rows[rows.length - 1]?.sourceIndex || 0) + 2;
-    while (currentRowY < rowsY + bodyHeight - 0.2) {
-      const blankHeight = Math.min(ROW_HEIGHT, rowsY + bodyHeight - currentRowY);
-      let cellX = x;
-      section.columns.forEach((column, columnIndex) => {
-        const cellWidth = width * column.width;
-        pdf.setDrawColor(...GRID);
-        pdf.rect(cellX, currentRowY, cellWidth, blankHeight);
-        if (columnIndex === 0 && section.number !== "04") {
-          pdf.setTextColor(25, 33, 40);
-          pdf.setFont("helvetica", "normal");
-          pdf.setFontSize(CELL_FONT_SIZE);
-          pdf.text(String(nextRowNumber), cellX + 1.2, currentRowY + blankHeight * 0.65);
-        }
-        cellX += cellWidth;
-      });
-      currentRowY += blankHeight;
-      nextRowNumber += 1;
-    }
+  const emptyRowCount = Math.max(0, ROWS_PER_PAGE - rows.length);
+  for (let rowIndex = 0; rowIndex < emptyRowCount; rowIndex += 1) {
+    const remainingHeight = rowsY + bodyHeight - currentRowY;
+    const blankHeight = remainingHeight / (emptyRowCount - rowIndex);
+    let cellX = x;
+    section.columns.forEach((column, columnIndex) => {
+      const cellWidth = width * column.width;
+      pdf.setDrawColor(...GRID);
+      pdf.rect(cellX, currentRowY, cellWidth, blankHeight);
+      if (columnIndex === 0) {
+        pdf.setTextColor(25, 33, 40);
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(CELL_FONT_SIZE);
+        pdf.text(String(rows.length + rowIndex + 1), cellX + 1.2, currentRowY + blankHeight * 0.65);
+      }
+      cellX += cellWidth;
+    });
+    currentRowY += blankHeight;
   }
 
   const footerY = rowsY + bodyHeight;
@@ -258,53 +222,6 @@ function drawSection(pdf, section, pageRows, x, y, width, height, pageIndex) {
     pdf.text("Main Invoice No.", x + 2, footerY + 11.5);
     pdf.setFont("helvetica", "normal");
     pdf.text(String(section.footerNote).replace(/^Main Invoice No\.\s*/, ""), x + 28, footerY + 11.5);
-  }
-}
-
-function drawAppendixPages(pdf, report, pageWidth, title, items, descriptionLabel) {
-  const pageSize = 18;
-  for (let start = 0; start < items.length; start += pageSize) {
-    pdf.addPage("a4", "landscape");
-    pdf.setTextColor(...BRAND);
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(14);
-    pdf.text(report.company_name || "SUPER IQ-FOAM", pageWidth / 2, 12, { align: "center" });
-    pdf.setTextColor(38, 43, 48);
-    pdf.setFontSize(10);
-    pdf.text(title, pageWidth / 2, 20, { align: "center" });
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(7);
-    pdf.text(`Date: ${report.date}`, 14, 29);
-
-    const x = 14;
-    const tableWidth = pageWidth - 28;
-    const descriptionWidth = tableWidth * 0.78;
-    let y = 35;
-    pdf.setFillColor(...NAVY);
-    pdf.rect(x, y, tableWidth, 7, "F");
-    pdf.setTextColor(255, 255, 255);
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(6.5);
-    pdf.text(descriptionLabel, x + 2, y + 4.5);
-    pdf.text("AMOUNT", x + tableWidth - 2, y + 4.5, { align: "right" });
-    y += 7;
-
-    for (const item of items.slice(start, start + pageSize)) {
-      const descriptionLines = pdf.splitTextToSize(
-        String(item.description || item.client_name || "Fuel expense"),
-        descriptionWidth - 4,
-      );
-      const rowHeight = Math.max(7, descriptionLines.length * 2.8 + 1);
-      pdf.setDrawColor(...GRID);
-      pdf.rect(x, y, descriptionWidth, rowHeight);
-      pdf.rect(x + descriptionWidth, y, tableWidth - descriptionWidth, rowHeight);
-      pdf.setTextColor(25, 33, 40);
-      pdf.setFont("helvetica", "normal");
-      pdf.setFontSize(CELL_FONT_SIZE);
-      pdf.text(descriptionLines, x + 2, y + 3.2, { lineHeightFactor: 1 });
-      pdf.text(money(item.amount), x + tableWidth - 2, y + rowHeight * 0.65, { align: "right" });
-      y += rowHeight;
-    }
   }
 }
 
@@ -348,46 +265,6 @@ export async function downloadDailyReportPdf(report, mainInvoiceNo) {
     });
   }
 
-  drawAppendixPages(
-    pdf,
-    report,
-    pageWidth,
-    "PENDING INVOICES - NOT INCLUDED IN SENDING TOTAL",
-    report.pending_invoices || [],
-    "CLIENT / DESCRIPTION - NO INVOICE NUMBER",
-  );
   const companyFileName = (report.company_name || "SUPERIQFOAM").replace(/[^a-z0-9]+/gi, "_");
   pdf.save(`${companyFileName}_Daily_Report_${report.date}.pdf`);
-}
-
-export async function downloadHomeReportPdf(report) {
-  if (!report) throw new Error("Daily report data is not available.");
-  const { jsPDF } = await import("jspdf");
-  const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
-  const section = homeSection(report);
-  const pageWidth = pdf.internal.pageSize.getWidth();
-  const margin = 9;
-  const top = 36;
-  const sectionHeight = 78.5;
-  const pages = paginateRows(pdf, section, pageWidth - margin * 2);
-
-  pages.forEach((_, pageIndex) => {
-    if (pageIndex > 0) pdf.addPage("a4", "landscape");
-    pdf.setTextColor(...BRAND);
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(15);
-    pdf.text("HOME", pageWidth / 2, 10, { align: "center" });
-    pdf.setTextColor(38, 43, 48);
-    pdf.setFontSize(11);
-    pdf.text(pageIndex ? "DAILY REPORT (CONTINUED)" : "DAILY REPORT", pageWidth / 2, 17, { align: "center" });
-    pdf.setDrawColor(90, 96, 101);
-    pdf.line(margin, 25, pageWidth - margin, 25);
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(7);
-    pdf.text(`Date: ${report.date}`, margin, 31);
-    pdf.text(`Day: ${report.day || ""}`, pageWidth - margin, 31, { align: "right" });
-    drawSection(pdf, section, pages, margin, top, pageWidth - margin * 2, sectionHeight, pageIndex);
-  });
-
-  pdf.save(`HOME_Daily_Report_${report.date}.pdf`);
 }

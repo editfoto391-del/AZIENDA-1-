@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { today, TZ } from "@/lib/format";
-import { downloadDailyReportPdf, downloadHomeReportPdf } from "@/lib/dailyReportPdf";
+import { downloadDailyReportPdf } from "@/lib/dailyReportPdf";
 import { companyDailyReportName, companyProfileName } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Btn } from "@/components/common";
@@ -55,7 +55,7 @@ function formatMoney(value) {
   })}`;
 }
 
-function ReportTable({ number, columns, rows, totalLabel, total, mainInvoiceNo, emptyMessage = "No records for this section." }) {
+function ReportTable({ number, columns, rows, totalLabel, total, mainInvoiceNo }) {
   const amountColumnIndex = columns.findIndex((column) => column.key === "amount");
   const trailingColumnCount = columns.length - amountColumnIndex - 1;
   return (
@@ -65,7 +65,7 @@ function ReportTable({ number, columns, rows, totalLabel, total, mainInvoiceNo, 
           <tr>{columns.map((column) => <th key={column.key} className={column.align === "right" ? "text-right" : ""}>{column.label}</th>)}</tr>
         </thead>
         <tbody>
-          {rows.length ? rows.map((row, index) => (
+          {rows.map((row, index) => (
             <tr key={row.id || `${number}-row-${index}`}>
               {columns.map((column) => (
                 <td key={column.key} className={column.align === "right" ? "text-right" : ""}>
@@ -73,9 +73,14 @@ function ReportTable({ number, columns, rows, totalLabel, total, mainInvoiceNo, 
                 </td>
               ))}
             </tr>
-          )) : (
-            <tr className="daily-report-empty-row"><td colSpan={columns.length}>{emptyMessage}</td></tr>
-          )}
+          ))}
+          {Array.from({ length: Math.max(0, 12 - rows.length) }, (_, index) => (
+            <tr className="daily-report-blank-row" key={`${number}-blank-${index}`}>
+              {columns.map((column, columnIndex) => (
+                <td key={column.key}>{columnIndex === 0 ? rows.length + index + 1 : ""}</td>
+              ))}
+            </tr>
+          ))}
           {totalLabel && <tr className="daily-report-total">
             <td colSpan={amountColumnIndex}>{totalLabel}</td>
             <td className="text-right">{formatMoney(total)}</td>
@@ -109,44 +114,24 @@ function ReportSection({ number, title, columns, rows, totalLabel, total, mainIn
 }
 
 function ExpenseReportSection({ rows, total }) {
-  const groupedExpenses = rows.reduce((groups, row) => {
-    const category = String(row.category || "General").trim() || "General";
-    const key = category.toLocaleLowerCase();
-    if (!groups.has(key)) groups.set(key, { category, rows: [] });
-    groups.get(key).rows.push(row);
-    return groups;
-  }, new Map());
-  const categories = [...groupedExpenses.values()].sort((a, b) => a.category.localeCompare(b.category));
-  const columns = [
-    { key: "no", label: "NO.", render: (_row, index) => index + 1 },
-    { key: "description", label: "DESCRIPTION", render: (row) => row.description || "—" },
-    { key: "amount", label: "AMOUNT", align: "right", render: (row) => formatMoney(row.amount) },
-  ];
-
   return (
     <section className="daily-report-section daily-report-expenses-section" aria-label="Expenses by category">
       <div className="daily-report-section-title">
         <span className="daily-report-number">03</span>
-        <span>EXPENSES BY CATEGORY</span>
+        <span>EXPENSES BREAKDOWN</span>
       </div>
-      {categories.length ? <div className="daily-report-expense-groups">
-        {categories.map(({ category, rows: categoryRows }) => (
-          <div className="daily-report-expense-group" key={category.toLocaleLowerCase()}>
-            <h3 className="daily-report-expense-category">{category}</h3>
-            <ReportTable
-              number="03"
-              columns={columns}
-              rows={categoryRows}
-              totalLabel={`Total ${category}`}
-              total={categoryRows.reduce((sum, row) => sum + Number(row.amount || 0), 0)}
-            />
-          </div>
-        ))}
-      </div> : <ReportTable number="03" columns={columns} rows={[]} emptyMessage="No expenses recorded for this date." />}
-      <div className="daily-report-expenses-total">
-        <span>Total Expenses</span>
-        <strong>{formatMoney(total)}</strong>
-      </div>
+      <ReportTable
+        number="03"
+        columns={[
+          { key: "no", label: "NO", render: (_row, index) => index + 1 },
+          { key: "category", label: "CATEGORY", render: (row) => row.category || "General" },
+          { key: "description", label: "DESCRIPTION", render: (row) => row.description || "—" },
+          { key: "amount", label: "AMOUNT", align: "right", render: (row) => formatMoney(row.amount) },
+        ]}
+        rows={rows}
+        totalLabel="Total Expenses"
+        total={total}
+      />
     </section>
   );
 }
@@ -187,42 +172,13 @@ function ReportTables({ report }) {
         number="04"
         title="DIESEL USAGE (BY VEHICLE)"
         columns={[
-          { key: "vehicle", label: "VEHICLE", render: (row) => row.vehicle },
+          { key: "vehicle", label: "VEHICLE", render: (row, index) => `${index + 1}. ${row.vehicle}` },
           { key: "amount", label: "AMOUNT", align: "right", render: (row) => formatMoney(row.amount) },
           { key: "notes", label: "NOTES", render: (row) => row.notes },
         ]}
         rows={report.diesel_usage || []}
         totalLabel="Total Diesel"
         total={report.totals?.diesel}
-      />
-    </div>
-  );
-}
-
-function HomeReportTable({ report }) {
-  return (
-    <div className="daily-report-paper daily-report-home-paper" data-testid="home-daily-report">
-      <header className="daily-report-heading">
-        <div className="daily-report-company">HOME</div>
-        <div className="daily-report-title">DAILY REPORT</div>
-        <div className="daily-report-meta">
-          <span><strong>Date:</strong> {report.date}</span>
-          <span><strong>Day:</strong> {report.day || ""}</span>
-          <span><strong>Section:</strong> Home expenses</span>
-        </div>
-      </header>
-      <ReportSection
-        number="H"
-        title="HOME"
-        columns={[
-          { key: "no", label: "NO", render: (_row, index) => index + 1 },
-          { key: "category", label: "CATEGORY", render: (row) => row.category },
-          { key: "description", label: "DESCRIPTION", render: (row) => row.description },
-          { key: "amount", label: "AMOUNT", align: "right", render: (row) => formatMoney(row.amount) },
-        ]}
-        rows={report.home_expenses || []}
-        totalLabel="Total Home"
-        total={report.totals?.home_expenses}
       />
     </div>
   );
@@ -527,7 +483,6 @@ export default function DailyReport() {
   const [financialLoading, setFinancialLoading] = useState(false);
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(false);
-  const [downloadingHome, setDownloadingHome] = useState(false);
   const reportRequestId = useRef(0);
   const companyName = report?.company_name || companyDailyReportName(user?.company_id);
   const accessibleCompanies = Array.isArray(user?.company_ids) && user.company_ids.length
@@ -547,11 +502,18 @@ export default function DailyReport() {
     setError("");
     try {
       const data = await api.getUncached("/daily-report", { report_date: reportDate });
-      if (requestId === reportRequestId.current) setReport(data);
+      if (requestId === reportRequestId.current) {
+        setReport(data);
+      }
     } catch (requestError) {
-      if (requestId === reportRequestId.current) setError(apiError(requestError));
+      if (requestId === reportRequestId.current) {
+        setError(apiError(requestError));
+        toast.error(apiError(requestError));
+      }
     } finally {
-      if (requestId === reportRequestId.current) setLoading(false);
+      if (requestId === reportRequestId.current) {
+        setLoading(false);
+      }
     }
   }, [reportDate]);
 
@@ -622,17 +584,6 @@ export default function DailyReport() {
     }
   };
 
-  const downloadHomePdf = async () => {
-    setDownloadingHome(true);
-    try {
-      await downloadHomeReportPdf(report);
-    } catch (pdfError) {
-      toast.error(apiError(pdfError));
-    } finally {
-      setDownloadingHome(false);
-    }
-  };
-
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -687,17 +638,13 @@ export default function DailyReport() {
           className="inline-flex h-12 items-center justify-center rounded-lg border border-slate-300 bg-white px-5 text-base font-semibold text-slate-700 shadow-sm transition hover:border-primary/50 hover:bg-primary/5 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-default disabled:bg-slate-100 disabled:text-slate-400"
           data-testid="daily-report-date-today"
         >Today</button>}
-        {viewMode === "daily" && <Btn className="min-h-12 px-5 text-base" onClick={generateDailyReport} disabled={loading} data-testid="daily-report-generate">
+        {viewMode === "daily" && <Btn className="min-h-12 px-5 text-base" onClick={generateDailyReport} disabled={loading || downloading} data-testid="daily-report-generate">
           {loading ? <RefreshCw size={16} className="animate-spin" /> : <CalendarDays size={16} />}
           {loading ? "Generating report..." : "GENERATE DAILY REPORT"}
         </Btn>}
         {viewMode === "daily" && <Btn className="min-h-12 px-5 text-base" onClick={downloadPdf} disabled={!report || loading || downloading} data-testid="daily-report-download-pdf">
           {downloading ? <RefreshCw size={16} className="animate-spin" /> : <Download size={16} />}
           {downloading ? "Preparing PDF..." : "DOWNLOAD COMPANY PDF"}
-        </Btn>}
-        {viewMode === "daily" && <Btn variant="outline" className="min-h-12 px-5 text-base" onClick={downloadHomePdf} disabled={!report || loading || downloadingHome} data-testid="home-daily-report-download-pdf">
-          {downloadingHome ? <RefreshCw size={16} className="animate-spin" /> : <Download size={16} />}
-          {downloadingHome ? "Preparing PDF..." : "DOWNLOAD HOME PDF"}
         </Btn>}
       </div>
       {viewMode !== "daily" && (
@@ -747,7 +694,6 @@ export default function DailyReport() {
         </header>
         <ReportTables report={report} />
       </div>}
-      {viewMode === "daily" && report && <HomeReportTable report={report} />}
       {viewMode !== "daily" && <FinancialReport
         report={financialReport}
         mode={accountingMode}
