@@ -30,3 +30,15 @@ export const companyDisplayName = (name) => {
   if (/iq\s*[- ]?foam/i.test(name)) return "IQFOAM";
   return name;
 };
+
+export const invoiceCustomerBalanceLabels = (companyName) => (
+  /wholesale/i.test(companyName || "")
+    ? {
+      option: "SHOW REMAINING BLN ON INVOICE",
+      invoice: "REMAINING BLN ON INVOICE",
+    }
+    : {
+      option: "SHOW REMAINING BLN FROM PREVIOUS INVOICES ON INVOICE",
+      invoice: "REMAINING BLN FROM PREVIOUS INVOICES",
+    }
+);

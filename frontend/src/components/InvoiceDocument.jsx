@@ -1,6 +1,6 @@
 import { forwardRef } from "react";
 import { fmtMoney, fmtDate } from "@/lib/format";
-import { companyDisplayName } from "@/lib/company";
+import { companyDisplayName, invoiceCustomerBalanceLabels } from "@/lib/company";
 import shop2shopQr from "@/assets/shop2shop-n29rxh.png";
 
 export const COMPANY = { name: "SUPER IQ-FOAM", address: ["ROCKY RIDGE LODGE", "ROCKY RIDGE FARM", "KOKSTAD, 4700"], phones: "0659279036 - 0634029112" };
@@ -32,6 +32,7 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
     !(!it.category && !it.size && it.description?.trim().toLowerCase() === "opening balance"));
   const shipTo = inv.destination || customer.city || customer.address || "";
   const companyName = companyDisplayName(settings.company_name || COMPANY.name);
+  const customerBalanceLabels = invoiceCustomerBalanceLabels(companyName);
   const previousInvoicesBalance = previousInvoices.reduce(
     (total, invoice) => total + (Number(invoice.outstanding) || 0),
     0,
@@ -121,7 +122,7 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
           <div className="flex justify-between py-0.5 px-2 mt-1"><span className="font-semibold text-slate-700">Amount Paid</span><span>{fmtMoney(inv.amount_paid)}</span></div>
           <div className="flex justify-between py-1.5 px-2 bg-red-50 text-red-800 font-bold"><span>BLN (Balance Remaining)</span><span>{fmtMoney(totals.outstanding)}</span></div>
           {showCustomerBalance && <div className="flex justify-between py-1.5 px-2 bg-amber-50 text-amber-900 font-bold" data-testid="doc-total-customer-balance">
-            <span>BLN REMAINING FROM PREVIOUS INVOICES</span><span>{fmtMoney(customerBalanceBeforeInvoice + totals.outstanding)}</span>
+            <span>{customerBalanceLabels.invoice}</span><span>{fmtMoney(customerBalanceBeforeInvoice + totals.outstanding)}</span>
           </div>}
         </div>
       </div>

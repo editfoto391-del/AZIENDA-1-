@@ -6,7 +6,7 @@ import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, fmtDateTime, today, newKey, STATUS_META, documentFilename } from "@/lib/format";
-import { usesUnifiedPriceList } from "@/lib/company";
+import { invoiceCustomerBalanceLabels, usesUnifiedPriceList } from "@/lib/company";
 import { PAYMENT_METHODS } from "@/lib/paymentMethods";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal } from "@/components/common";
@@ -902,7 +902,7 @@ export default function InvoiceEditor({ express = false }) {
     L.push(`Total: ${fmtMoney(totals.total)}`);
     L.push(`Amount Paid: ${fmtMoney(inv.amount_paid)}`);
     L.push(`Outstanding Balance: ${fmtMoney(totals.outstanding)}`);
-    if (showCustomerBalance) L.push(`BLN Remaining from Previous Invoices: ${fmtMoney(totalCustomerBalance)}`);
+    if (showCustomerBalance) L.push(`${customerBalanceLabels.invoice}: ${fmtMoney(totalCustomerBalance)}`);
     if (inv.notes && !inv.opening_balance) { L.push(""); L.push(`Notes: ${inv.notes}`); }
     if (settings.telephone || settings.email) {
       L.push(""); L.push([settings.telephone, settings.email].filter(Boolean).join(" | "));
@@ -968,7 +968,8 @@ export default function InvoiceEditor({ express = false }) {
   );
   const showCustomerBalance = inv.include_previous_balance !== false
     && ((!id && !!inv.customer_id) || (id && inv.customer_balance_before_invoice != null));
-  const totalCustomerBalance = customerBalanceBeforeInvoice;
+  const totalCustomerBalance = customerBalanceBeforeInvoice + (Number(totals.outstanding) || 0);
+  const customerBalanceLabels = invoiceCustomerBalanceLabels(settings.company_name);
   const invoiceDeliveryNote = {
     reference: inv.number || "DRAFT",
     expected_ship_date: inv.date,
@@ -1188,6 +1189,16 @@ export default function InvoiceEditor({ express = false }) {
 
             <Card className="p-5 space-y-2 no-print">
               <h3 className="font-bold text-slate-800 mb-3 font-display">4. Payment Information</h3>
+              <label className="flex items-start gap-2 border-b border-border pb-3 text-sm text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={inv.include_previous_balance !== false}
+                  disabled={locked}
+                  onChange={(e) => setInv({ ...inv, include_previous_balance: e.target.checked })}
+                  data-testid="include-previous-balance-checkbox"
+                />
+                <span>{customerBalanceLabels.option}</span>
+              </label>
               {inv.status === "void" ? <p className="text-sm text-slate-400" data-testid="void-reason">This invoice is voided.{inv.void_reason ? ` Reason: ${inv.void_reason}` : ""}</p> : (
                 <div className="grid grid-cols-2 gap-2">
                   {id && inv.status === "draft" && !editing && <p className="col-span-2 text-sm text-amber-700" data-testid="draft-payment-guidance">Draft invoices cannot accept payments. Issue this invoice first.</p>}
@@ -1272,15 +1283,6 @@ export default function InvoiceEditor({ express = false }) {
                 <div className="flex justify-between border-t border-border pt-3 text-base"><span className="font-bold text-slate-800">Total</span><span className="font-mono font-bold text-slate-900" data-testid="invoice-total">{fmtMoney(totals.total)}</span></div>
                 <div className="flex justify-between"><span className="text-slate-500">Amount Paid</span><span className="font-mono text-emerald-600">{fmtMoney(inv.amount_paid)}</span></div>
                 <div className="flex justify-between"><span className="font-semibold text-slate-700">BLN (Balance Remaining)</span><span className="font-mono font-bold text-red-600" data-testid="invoice-outstanding">{fmtMoney(totals.outstanding)}</span></div>
-                <label className="flex items-start gap-2 border-t border-border pt-3 text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={inv.include_previous_balance !== false}
-                    onChange={(e) => setInv({ ...inv, include_previous_balance: e.target.checked })}
-                    data-testid="include-previous-balance-checkbox"
-                  />
-                  <span>Show “BLN REMAINING FROM PREVIOUS INVOICES” on invoice</span>
-                </label>
               </fieldset>
             </Card>
             </div>
