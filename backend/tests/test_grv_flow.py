@@ -161,7 +161,7 @@ class FakeCursor:
 
 def _install_fake_grv_dependencies(monkeypatch, fake_db):
     class NoopStockLock:
-        def __init__(self, ids):
+        def __init__(self, ids, **kwargs):
             self.ids = ids
 
         async def __aenter__(self):
@@ -370,6 +370,143 @@ def test_permanent_grv_delete_reverses_full_stock_quantity_even_if_already_used(
         deepcopy(fake_db.stock.documents[0]), fake_db.stock_movements.documents,
     )
     assert stock["current"] == -15
+
+
+def test_permanent_grv_delete_waits_for_stock_operation_to_finish(monkeypatch):
+    fake_db = FakeDatabase()
+    fake_db.grvs.documents.append({
+        "id": "grv-locked-stock",
+        "grv_number": "GRV-LOCKED-STOCK",
+        "status": "completed",
+        "items": [{
+            "stock_id": "stock-1",
+            "product": "Simple",
+            "size": "910x100",
+            "accepted_quantity": 2,
+            "actual_received_quantity": 2,
+            "unit_cost": 10,
+        }],
+    })
+    fake_db.stock.documents[0].update({
+        "opening": 0,
+        "lock": True,
+        "lock_at": server.datetime.now(server.timezone.utc),
+        "lock_token": "another-operation",
+    })
+    fake_db.stock_movements.documents.append({
+        "id": "receipt-2",
+        "stock_id": "stock-1",
+        "type": "purchase",
+        "direction": 1,
+        "quantity": 2,
+        "dedupe_key": "grv:grv-locked-stock:stock-1",
+        "unit_cost": 10,
+        "historical_cost_status": "verified",
+    })
+    real_stock_lock = server.StockLock
+    lock_options = {}
+    lock_attempts = 0
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+
+    class TrackingStockLock(real_stock_lock):
+        def __init__(self, ids, **kwargs):
+            lock_options.update(kwargs)
+            super().__init__(ids, **kwargs)
+
+    async def release_lock_after_retry(_):
+        nonlocal lock_attempts
+        lock_attempts += 1
+        if lock_attempts == 55:
+            await fake_db.stock.update_one(
+                {"id": "stock-1"},
+                {"$unset": {"lock": "", "lock_at": "", "lock_token": ""}},
+            )
+
+    monkeypatch.setattr(server, "StockLock", TrackingStockLock)
+    monkeypatch.setattr(server.asyncio, "sleep", release_lock_after_retry)
+    owner = {
+        "id": "owner", "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": "test-company",
+    }
+
+    asyncio.run(server.delete_grv(
+        "grv-locked-stock", server.GRVDeleteIn(), owner,
+    ))
+
+    assert lock_options == {"wait_seconds": 30, "skip_missing": True}
+    assert lock_attempts == 55
+    assert not any(item["id"] == "grv-locked-stock" for item in fake_db.grvs.documents)
+
+
+def test_permanent_grv_delete_succeeds_when_stock_item_was_removed(monkeypatch):
+    fake_db = FakeDatabase()
+    fake_db.grvs.documents.append({
+        "id": "grv-missing-stock",
+        "grv_number": "GRV-MISSING-STOCK",
+        "status": "reversing",
+        "items": [{
+            "stock_id": "deleted-stock",
+            "product": "GLUE",
+            "size": "",
+            "accepted_quantity": 3,
+            "actual_received_quantity": 3,
+        }],
+    })
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    owner = {
+        "id": "owner", "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": "test-company",
+    }
+
+    asyncio.run(server.delete_grv(
+        "grv-missing-stock", server.GRVDeleteIn(), owner,
+    ))
+
+    assert not any(item["id"] == "grv-missing-stock" for item in fake_db.grvs.documents)
+    assert fake_db.stock_movements.documents == []
+
+
+def test_permanent_raw_grv_delete_succeeds_when_inventory_item_was_removed(monkeypatch):
+    fake_db = FakeDatabase()
+    line = {
+        "product": "GLUE",
+        "size": "",
+        "unit": "",
+        "category": "Other",
+        "accepted_quantity": 3,
+    }
+    key = server._raw_key(line)
+    fake_db.grvs.documents.append({
+        "id": "grv-missing-raw-inventory",
+        "grv_number": "GRV-MISSING-RAW-INVENTORY",
+        "status": "reversing",
+        "purpose": "raw_material",
+        "items": [line],
+    })
+    fake_db.raw_material_movements.documents.append({
+        "id": "raw-receipt",
+        "dedupe_key": f"grv-raw:in:grv-missing-raw-inventory:{key}",
+        "grv_id": "grv-missing-raw-inventory",
+        "collection": "company_inventory",
+        "target_id": "deleted-inventory-item",
+        "quantity": 3,
+        "direction": 1,
+    })
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    owner = {
+        "id": "owner", "email": "owner@example.test", "_active_role": "owner",
+        "_active_company_id": "test-company",
+    }
+
+    asyncio.run(server.delete_grv(
+        "grv-missing-raw-inventory", server.GRVDeleteIn(), owner,
+    ))
+
+    assert not any(
+        item["id"] == "grv-missing-raw-inventory"
+        for item in fake_db.grvs.documents
+    )
+    assert len(fake_db.raw_material_movements.documents) == 1
 
 
 def test_raw_grv_delete_removes_full_company_inventory_quantity_even_if_used(monkeypatch):

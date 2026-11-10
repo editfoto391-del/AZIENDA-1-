@@ -254,15 +254,17 @@ class StockLock:
     LEASE_DURATION = timedelta(minutes=2)
     HEARTBEAT_INTERVAL = 30
 
-    def __init__(self, ids):
+    def __init__(self, ids, *, wait_seconds=5, skip_missing=False):
         self.ids = sorted(set(ids))
         self.held = []
         self.token = new_id()
         self.heartbeat_task = None
+        self.max_attempts = max(1, math.ceil(wait_seconds / 0.1))
+        self.skip_missing = skip_missing
 
     async def __aenter__(self):
         for sid in self.ids:
-            for _ in range(50):
+            for _ in range(self.max_attempts):
                 now = datetime.now(timezone.utc)
                 stale_before = now - self.LEASE_DURATION
                 lock_query = {
@@ -278,6 +280,8 @@ class StockLock:
                     {"$set": {"lock": True, "lock_at": now, "lock_token": self.token}},
                 ):
                     self.held.append(sid)
+                    break
+                if self.skip_missing and not await db.stock.find_one({"id": sid}, {"_id": 0}):
                     break
                 await asyncio.sleep(0.1)
             else:
@@ -12206,7 +12210,7 @@ async def _raw_inventory_target(line, is_chemical, create=False):
     })
     return "company_inventory", created
 
-async def _apply_raw_grv(grv, user, direction, *, allow_negative=False):
+async def _apply_raw_grv(grv, user, direction, *, allow_negative=False, allow_missing_target=False):
     """Post (direction=1) or reverse (direction=-1) accepted raw-material quantities; idempotent per GRV line group."""
     is_chemical = bool(grv.get("is_chemical"))
     grouped = {}
@@ -12235,6 +12239,8 @@ async def _apply_raw_grv(grv, user, direction, *, allow_negative=False):
             collection, target_id = original["collection"], original["target_id"]
             target = await getattr(db, collection).find_one({"id": target_id}, {"_id": 0})
             if not target:
+                if allow_missing_target:
+                    continue
                 raise HTTPException(409, f"Inventory item no longer exists: {entry['line']['product']}")
         if collection == "chemical_inventory":
             field = "count"
@@ -12903,7 +12909,9 @@ async def cancel_grv(grv_id: str, body: ReasonIn, user=Depends(get_current_user)
     })
     return before
 
-async def _reverse_grv(grv_id: str, body: ReasonIn, user, *, allow_negative=False):
+async def _reverse_grv(
+    grv_id: str, body: ReasonIn, user, *, allow_negative=False, allow_missing_items=False,
+):
     if not allow_negative:
         require_admin(user)
     reason = body.reason.strip()
@@ -12931,7 +12939,11 @@ async def _reverse_grv(grv_id: str, body: ReasonIn, user, *, allow_negative=Fals
             raise HTTPException(409, "GRV reversal is already in progress")
 
     if grv.get("purpose") == "raw_material":
-        await _apply_raw_grv(grv, user, -1, allow_negative=allow_negative)
+        await _apply_raw_grv(
+            grv, user, -1,
+            allow_negative=allow_negative,
+            allow_missing_target=allow_missing_items,
+        )
         updated = await update_doc("grvs", grv_id, {
             "status": "cancelled", "reversed_by": user["email"], "reversed_at": now_iso(),
             "reversal_reason": reason, "reversal_movement_ids": [], "edited_by": user["email"],
@@ -12948,13 +12960,27 @@ async def _reverse_grv(grv_id: str, body: ReasonIn, user, *, allow_negative=Fals
         if not po:
             raise HTTPException(409, "Linked purchase order is no longer available")
 
-    async with StockLock([item["stock_id"] for item in accepted]), PurchaseOrderReceiptLock(
+    requested_stock_ids = list({item["stock_id"] for item in accepted})
+    stock_cursor = db.stock.find({"id": {"$in": requested_stock_ids}}, {"_id": 0})
+    existing_stock_ids = {stock["id"] async for stock in stock_cursor}
+    missing_stock_items = [item for item in accepted if item["stock_id"] not in existing_stock_ids]
+    if missing_stock_items and not allow_missing_items:
+        item = missing_stock_items[0]
+        raise HTTPException(409, f"Stock item no longer exists: {item['product']} {item['size']}")
+
+    async with StockLock(
+        existing_stock_ids,
+        wait_seconds=30 if allow_missing_items else 5,
+        skip_missing=allow_missing_items,
+    ), PurchaseOrderReceiptLock(
         po["id"] if po else "", grv_id,
     ):
-        stock_ids = list({item["stock_id"] for item in accepted})
-        stock_cursor = db.stock.find({"id": {"$in": stock_ids}}, {"_id": 0})
+        stock_cursor = db.stock.find({"id": {"$in": list(existing_stock_ids)}}, {"_id": 0})
         stocks = {stock["id"]: stock async for stock in stock_cursor}
+        stock_ids = list(stocks)
         for item in accepted:
+            if item["stock_id"] not in stocks and allow_missing_items:
+                continue
             if item["stock_id"] not in stocks:
                 raise HTTPException(409, f"Stock item no longer exists: {item['product']} {item['size']}")
 
@@ -12970,6 +12996,8 @@ async def _reverse_grv(grv_id: str, body: ReasonIn, user, *, allow_negative=Fals
 
         reverse_ids = []
         for item in accepted:
+            if item["stock_id"] not in stocks and allow_missing_items:
+                continue
             stock = stocks[item["stock_id"]]
             key = f"grv-reversal:{grv_id}:{item['stock_id']}"
             movement = movements_by_key.get(key)
@@ -13102,6 +13130,7 @@ async def _delete_grv_record(grv_id, user):
             ReasonIn(reason="GRV permanently deleted by an authorized owner"),
             user,
             allow_negative=True,
+            allow_missing_items=True,
         )
         grv = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
     if grv.get("status") not in ("draft", "pending_inspection", "cancelled"):
