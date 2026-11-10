@@ -496,139 +496,165 @@ export default function Intercompany() {
       </div>}
 
       {confirmInvoice && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="intercompany-invoice-title">
-        <div className="w-full max-w-xl rounded-xl bg-white p-6 shadow-xl">
+        <div className="w-full max-w-4xl rounded-xl bg-white p-6 shadow-xl">
           <h2 id="intercompany-invoice-title" className="text-lg font-bold">{confirmInvoice.step === "create" ? "Create intercompany invoice?" : "Send intercompany invoice?"}</h2>
           <p className="mt-2 text-sm text-slate-600">{confirmInvoice.step === "create"
             ? `The invoice will use the supplier's saved price list and its customer record for your company.`
             : `The created invoice will be released to ${companyName(confirmInvoice.request.requesting_company_id)}. Once sent, the requesting company can view its details.`}</p>
           {confirmInvoice.step === "create" && <div className="mt-4 space-y-3">
-            <p className="text-sm font-semibold text-slate-700">Invoice quantities (change them if the delivered pieces differ from the request)</p>
-            {confirmInvoice.request.items.map((item) => <label key={item.id} className="grid grid-cols-[minmax(0,1fr)_8rem] items-center gap-3 text-sm">
-              <span className="min-w-0 text-slate-700">{intercompanyProductLabel(item)} <span className="text-slate-400">(requested {item.quantity})</span></span>
-              <input
-                type="number"
-                min="0.001"
-                max="1000000"
-                step="any"
-                value={confirmInvoice.quantities[item.id] ?? ""}
-                onChange={(event) => setConfirmInvoice((current) => ({
-                  ...current,
-                  quantities: { ...current.quantities, [item.id]: event.target.value },
-                }))}
-                aria-label={`Invoice quantity for ${intercompanyProductLabel(item)}`}
-                data-testid={`intercompany-invoice-quantity-${item.id}`}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              />
-            </label>)}
-            <div className="space-y-3 border-t border-slate-200 pt-4">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-slate-700">Add products from supplier stock</p>
-                <button
-                  type="button"
-                  disabled={(confirmInvoice.additionalItems || []).length + confirmInvoice.request.items.length >= 100}
-                  onClick={() => setConfirmInvoice((current) => {
-                    if (!current) return current;
-                    const additionalItems = current.additionalItems || [];
-                    return {
-                      ...current,
-                      additionalItems: [...additionalItems, {
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-slate-700">Invoice products</p>
+              <button
+                type="button"
+                disabled={(confirmInvoice.additionalItems || []).length + confirmInvoice.request.items.length >= 100}
+                onClick={() => setConfirmInvoice((current) => {
+                  if (!current) return current;
+                  const additionalItems = current.additionalItems || [];
+                  return {
+                    ...current,
+                    additionalItems: [...additionalItems, {
                       key: `new-product-${Date.now()}-${additionalItems.length}`,
                       stock_id: "",
                       quantity: "1",
-                      }],
-                    };
-                  })}
-                  className="rounded-lg border px-3 py-1.5 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50"
-                  data-testid="intercompany-invoice-add-product"
-                >
-                  <Plus size={14} className="mr-1 inline" /> Add product
-                </button>
-              </div>
-              {(confirmInvoice.additionalItems || []).length > 0 && <>
-                {invoiceProductsLoading && <p className="text-xs text-slate-500" role="status">Loading supplier products...</p>}
-                {!invoiceProductsLoading && invoiceProducts.length === 0 && <p className="text-xs text-slate-500" role="status">No supplier products found.</p>}
-                {(confirmInvoice.additionalItems || []).map((line, index) => (
-                  <div key={line.key} className="grid grid-cols-[minmax(0,1fr)_6rem_auto] items-end gap-2">
-                    <label className="min-w-0 space-y-1 text-xs font-medium text-slate-600">
-                      Product
-                      <input
-                        type="search"
-                        value={line.search ?? (line.selected_product ? intercompanyProductLabel(line.selected_product) : "")}
-                        onChange={(event) => {
-                          const value = event.target.value;
-                          setInvoiceProductSearch(value);
-                          setConfirmInvoice((current) => current && ({
-                            ...current,
-                            additionalItems: current.additionalItems.map((item, itemIndex) => {
-                              if (itemIndex !== index) return item;
-                              const selectedProduct = invoiceProducts.find((product) =>
-                                intercompanyProductLabel(product).toLowerCase() === value.trim().toLowerCase()
-                                && Number(product.available_quantity) > 0,
-                              ) || null;
-                              return {
-                                ...item,
-                                search: value,
-                                stock_id: selectedProduct?.stock_id || "",
-                                selected_product: selectedProduct,
-                              };
-                            }),
-                          }));
-                        }}
-                        list={`intercompany-invoice-product-options-${index}`}
-                        placeholder="Search product or dimensions"
-                        data-testid={`intercompany-invoice-product-${index}`}
-                        className="w-full min-w-0 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm"
-                      />
-                      <datalist id={`intercompany-invoice-product-options-${index}`}>
-                        {invoiceProducts.filter((product) => (
-                          (Number(product.available_quantity) > 0 || product.stock_id === line.stock_id)
-                          && (product.stock_id === line.stock_id
-                            || !(confirmInvoice.additionalItems || []).some((other, otherIndex) =>
-                              otherIndex !== index && other.stock_id === product.stock_id))
-                        )).concat(line.selected_product
-                          && !invoiceProducts.some((product) => product.stock_id === line.stock_id)
-                          ? [line.selected_product]
-                          : []).map((product) => (
-                          <option key={product.stock_id} value={intercompanyProductLabel(product)}>
-                            {Number(product.available_quantity || 0)} available
-                          </option>
-                        ))}
-                      </datalist>
-                    </label>
-                    <label className="space-y-1 text-xs font-medium text-slate-600">
-                      Quantity
-                      <input
-                        type="number"
-                        min="0.001"
-                        max="1000000"
-                        step="any"
-                        value={line.quantity}
-                        onChange={(event) => setConfirmInvoice((current) => current && ({
-                          ...current,
-                          additionalItems: current.additionalItems.map((item, itemIndex) =>
-                            itemIndex === index ? { ...item, quantity: event.target.value } : item,
-                          ),
-                        }))}
-                        aria-label={`Additional product quantity ${index + 1}`}
-                        data-testid={`intercompany-invoice-product-quantity-${index}`}
-                        className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setConfirmInvoice((current) => current && ({
-                        ...current,
-                        additionalItems: current.additionalItems.filter((item) => item.key !== line.key),
-                      }))}
-                      className="rounded-lg px-2 py-2 text-xs text-rose-700 hover:bg-rose-50"
-                      aria-label={`Remove additional product ${index + 1}`}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
-              </>}
+                    }],
+                  };
+                })}
+                className="rounded-lg border px-3 py-1.5 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50"
+                data-testid="intercompany-invoice-add-product"
+              >
+                <Plus size={14} className="mr-1 inline" /> Add products from my stock
+              </button>
             </div>
+            <div className="overflow-x-auto rounded-lg border border-slate-200">
+              <table className="w-full min-w-[620px] text-sm">
+                <thead className="bg-slate-50 text-left text-xs text-slate-500">
+                  <tr>
+                    <th className="w-24 px-3 py-2 font-semibold">QTY</th>
+                    <th className="px-3 py-2 font-semibold">PRODUCT / CATEGORY</th>
+                    <th className="px-3 py-2 font-semibold">SIZE / UNIT</th>
+                    <th className="w-20 px-3 py-2" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {confirmInvoice.request.items.map((item) => (
+                    <tr key={item.id}>
+                      <td className="px-3 py-2">
+                        <input
+                          type="number"
+                          min="0.001"
+                          max="1000000"
+                          step="any"
+                          value={confirmInvoice.quantities[item.id] ?? ""}
+                          onChange={(event) => setConfirmInvoice((current) => ({
+                            ...current,
+                            quantities: { ...current.quantities, [item.id]: event.target.value },
+                          }))}
+                          aria-label={`Invoice quantity for ${intercompanyProductLabel(item)}`}
+                          data-testid={`intercompany-invoice-quantity-${item.id}`}
+                          className="w-20 rounded-lg border border-slate-300 px-2 py-2"
+                        />
+                        <span className="mt-1 block text-[10px] text-slate-400">Requested {item.quantity}</span>
+                      </td>
+                      <td className="px-3 py-2 text-slate-700">{item.product_type || item.product}</td>
+                      <td className="px-3 py-2 text-slate-600">{item.dimensions || "—"}</td>
+                      <td className="px-3 py-2 text-xs text-slate-400">Requested</td>
+                    </tr>
+                  ))}
+                  {(confirmInvoice.additionalItems || []).map((line, index) => (
+                    <tr key={line.key}>
+                      <td className="px-3 py-2">
+                        <input
+                          type="number"
+                          min="0.001"
+                          max="1000000"
+                          step="any"
+                          value={line.quantity}
+                          onChange={(event) => setConfirmInvoice((current) => current && ({
+                            ...current,
+                            additionalItems: current.additionalItems.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, quantity: event.target.value } : item,
+                            ),
+                          }))}
+                          aria-label={`Additional product quantity ${index + 1}`}
+                          data-testid={`intercompany-invoice-product-quantity-${index}`}
+                          className="w-20 rounded-lg border border-slate-300 px-2 py-2"
+                        />
+                      </td>
+                      <td className="px-3 py-2">
+                        <input
+                          type="search"
+                          value={line.search ?? (line.selected_product?.product_type || line.selected_product?.product || "")}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            const selectedProduct = invoiceProducts.find((product) =>
+                              intercompanyProductLabel(product).toLowerCase() === value.trim().toLowerCase()
+                              && Number(product.available_quantity) > 0,
+                            ) || null;
+                            setConfirmInvoice((current) => current && ({
+                              ...current,
+                              additionalItems: current.additionalItems.map((item, itemIndex) => {
+                                if (itemIndex !== index) return item;
+                                return {
+                                  ...item,
+                                  search: selectedProduct
+                                    ? selectedProduct.product_type || selectedProduct.product
+                                    : value,
+                                  stock_id: selectedProduct?.stock_id || "",
+                                  selected_product: selectedProduct,
+                                };
+                              }),
+                            }));
+                            setInvoiceProductSearch(selectedProduct
+                              ? selectedProduct.product_type || selectedProduct.product
+                              : value);
+                          }}
+                          list={`intercompany-invoice-product-options-${index}`}
+                          placeholder="Search my stock"
+                          aria-label={`Product or category ${index + 1}`}
+                          data-testid={`intercompany-invoice-product-${index}`}
+                          className="w-full min-w-[220px] rounded-lg border border-slate-300 px-2 py-2"
+                        />
+                        <datalist id={`intercompany-invoice-product-options-${index}`}>
+                          {invoiceProducts.filter((product) => (
+                            Number(product.available_quantity) > 0
+                            && !(confirmInvoice.additionalItems || []).some((other, otherIndex) =>
+                              otherIndex !== index && other.stock_id === product.stock_id)
+                          )).map((product) => (
+                            <option
+                              key={product.stock_id}
+                              value={intercompanyProductLabel(product)}
+                              label={`${product.product_type || product.product} · ${Number(product.available_quantity)} available`}
+                            >
+                              {product.product_type || product.product} · {Number(product.available_quantity)} available
+                            </option>
+                          ))}
+                        </datalist>
+                      </td>
+                      <td className="px-3 py-2 text-slate-600">
+                        {line.selected_product?.dimensions || "—"}
+                      </td>
+                      <td className="px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => setConfirmInvoice((current) => current && ({
+                            ...current,
+                            additionalItems: current.additionalItems.filter((item) => item.key !== line.key),
+                          }))}
+                          className="rounded-lg px-2 py-2 text-xs text-rose-700 hover:bg-rose-50"
+                          aria-label={`Remove additional product ${index + 1}`}
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {(confirmInvoice.additionalItems || []).length > 0 && invoiceProductsLoading
+              && <p className="text-xs text-slate-500" role="status">Loading my stock...</p>}
+            {(confirmInvoice.additionalItems || []).length > 0 && !invoiceProductsLoading && invoiceProducts.length === 0
+              && <p className="text-xs text-slate-500" role="status">No matching products in my stock.</p>}
           </div>}
           <div className="mt-5 flex flex-wrap justify-end gap-2">
             <button type="button" onClick={() => setConfirmInvoice(null)} className="rounded-lg border px-3 py-2 text-sm">Cancel</button>

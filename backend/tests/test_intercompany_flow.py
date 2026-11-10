@@ -137,6 +137,48 @@ def test_request_creation_snapshots_only_supplier_stock_and_rejects_duplicate_li
         server.active_company_id.reset(company_token)
 
 
+def test_intercompany_supplier_catalog_returns_active_company_stock_and_category(monkeypatch):
+    supplier_db = Database(stock=Collection([{
+        "id": "supplier-stock-1",
+        "company_id": "superiqfoam",
+        "product": "Simple",
+        "size": "760x50",
+        "opening": 12,
+    }]))
+    shared_db = Database(product_identifications=Collection([{
+        "company_id": "superiqfoam",
+        "stock_id": "supplier-stock-1",
+        "product_type": "Standard",
+        "description": "Standard foam",
+        "active": True,
+    }]))
+    monkeypatch.setattr(server, "base_db", shared_db)
+    monkeypatch.setattr(server, "tenant_database", lambda *_args: supplier_db)
+    monkeypatch.setattr(
+        server,
+        "intercompany_available_stock",
+        lambda *_args: asyncio.sleep(0, result={"supplier-stock-1": 8}),
+    )
+    company_token = server.active_company_id.set("superiqfoam")
+    try:
+        catalog = asyncio.run(server.get_intercompany_supplier_catalog(
+            q="Standard",
+            page=1,
+            page_size=100,
+            user={"id": "supplier-admin", "company_roles": {"superiqfoam": "admin"}},
+        ))
+        assert catalog["items"] == [{
+            "stock_id": "supplier-stock-1",
+            "product": "Simple",
+            "product_type": "Standard",
+            "dimensions": "760x50",
+            "description": "Standard foam",
+            "available_quantity": 8,
+        }]
+    finally:
+        server.active_company_id.reset(company_token)
+
+
 def test_request_access_is_company_scoped_and_invoice_details_are_hidden_until_sent(monkeypatch):
     request = {
         "id": "ICR-1",

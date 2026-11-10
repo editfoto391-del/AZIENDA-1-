@@ -9569,21 +9569,51 @@ async def get_intercompany_supplier_catalog(
     query = {"company_id": company_id, "archived": {"$ne": True}}
     if q.strip():
         term = re.escape(q.strip()[:80])
-        query["$or"] = [
+        search_options = [
             {"product": {"$regex": term, "$options": "i"}},
             {"size": {"$regex": term, "$options": "i"}},
         ]
+        matching_identities = await base_db.product_identifications.find(
+            {
+                "company_id": company_id,
+                "product_type": {"$regex": term, "$options": "i"},
+                "active": {"$ne": False},
+            },
+            {"_id": 0, "stock_id": 1},
+        ).to_list(1000)
+        matching_stock_ids = [identity["stock_id"] for identity in matching_identities]
+        if matching_stock_ids:
+            search_options.append({"id": {"$in": matching_stock_ids}})
+        query["$or"] = search_options
     total = await company_db.stock.count_documents(query)
     stock_items = await company_db.stock.find(query, {"_id": 0}).sort(
         [("product", 1), ("size", 1)],
     ).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
     stock_ids = [item["id"] for item in stock_items]
+    identities = await base_db.product_identifications.find(
+        {
+            "company_id": company_id,
+            "stock_id": {"$in": stock_ids},
+            "active": {"$ne": False},
+        },
+        {"_id": 0},
+    ).to_list(page_size)
+    identity_by_stock = {identity["stock_id"]: identity for identity in identities}
     availability = await intercompany_available_stock(company_db, company_id, stock_ids)
     return {
         "items": [{
             "stock_id": item["id"],
             "product": item.get("product", ""),
+            "product_type": (
+                identity_by_stock.get(item["id"], {}).get("product_type")
+                or item.get("product_type")
+                or item.get("product", "")
+            ),
             "dimensions": item.get("size", ""),
+            "description": (
+                identity_by_stock.get(item["id"], {}).get("description")
+                or item.get("description", "")
+            ),
             "available_quantity": availability.get(item["id"], 0),
         } for item in stock_items],
         "page": page,
