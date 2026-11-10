@@ -78,6 +78,9 @@ export default function Intercompany() {
   const [draftItems, setDraftItems] = useState([{ stock_id: "", quantity: "1" }]);
   const [notes, setNotes] = useState("");
   const [confirmInvoice, setConfirmInvoice] = useState(null);
+  const [invoiceProductSearch, setInvoiceProductSearch] = useState("");
+  const [invoiceProducts, setInvoiceProducts] = useState([]);
+  const [invoiceProductsLoading, setInvoiceProductsLoading] = useState(false);
   const [invoicePdfBusy, setInvoicePdfBusy] = useState(false);
   const invoiceDocumentRef = useRef(null);
 
@@ -129,6 +132,33 @@ export default function Intercompany() {
     }).finally(() => { if (active) setProductsLoading(false); });
     return () => { active = false; };
   }, [supplierId, search]);
+
+  useEffect(() => {
+    const supplyingCompanyId = confirmInvoice?.request?.supplying_company_id;
+    if (confirmInvoice?.step !== "create" || !supplyingCompanyId) {
+      setInvoiceProducts([]);
+      setInvoiceProductsLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setInvoiceProductsLoading(true);
+    api.get("/intercompany/products", {
+      supplying_company_id: supplyingCompanyId,
+      q: invoiceProductSearch,
+      page: 1,
+      page_size: 100,
+    }).then((result) => {
+      if (active) setInvoiceProducts(result.items || []);
+    }).catch((requestError) => {
+      if (active) {
+        setInvoiceProducts([]);
+        toast.error(intercompanyError(requestError));
+      }
+    }).finally(() => {
+      if (active) setInvoiceProductsLoading(false);
+    });
+    return () => { active = false; };
+  }, [confirmInvoice?.step, confirmInvoice?.request?.supplying_company_id, invoiceProductSearch]);
 
   const updateLine = (index, key, value) => {
     setDraftItems((current) => current.map((item, itemIndex) =>
@@ -190,7 +220,13 @@ export default function Intercompany() {
     try {
       await api.post(`/intercompany/requests/${request.id}/accept`, {});
       const updated = await refreshRequest(request.id);
-      setConfirmInvoice({ request: updated, step: "create" });
+      setInvoiceProductSearch("");
+      setConfirmInvoice({
+        request: updated,
+        step: "create",
+        quantities: Object.fromEntries((updated.items || []).map((item) => [item.id, String(item.quantity)])),
+        additionalItems: [],
+      });
     } catch (requestError) {
       toast.error(intercompanyError(requestError));
     } finally {
@@ -213,11 +249,20 @@ export default function Intercompany() {
     }
   };
 
-  const createInvoice = async (request, send) => {
+  const createInvoice = async (request, send, invoiceQuantities, additionalItems = []) => {
     setBusy(request.id);
     try {
       await api.post(`/intercompany/requests/${request.id}/invoice`, {
         send_to_requesting_company: send,
+        ...(!send ? {
+          items: request.items.map((item) => ({
+            item_id: item.id,
+            quantity: Number(invoiceQuantities[item.id]),
+          })).concat(additionalItems.map((item) => ({
+            stock_id: item.stock_id,
+            quantity: Number(item.quantity),
+          }))),
+        } : {}),
       });
       toast.success(send ? "Invoice created and sent." : "Invoice created; it has not been sent.");
       const updated = await refreshRequest(request.id);
@@ -370,7 +415,15 @@ export default function Intercompany() {
                         <div className="flex flex-nowrap gap-2 whitespace-nowrap">
                           <button type="button" onClick={() => setSelectedRequest(request)} className="rounded-md border px-2.5 py-1.5 text-xs hover:bg-slate-50">Details</button>
                           {canReview && <><button type="button" disabled={busy === request.id} onClick={() => acceptRequest(request)} className="rounded-md bg-emerald-700 px-2.5 py-1.5 text-xs font-medium text-white disabled:opacity-60">Accept</button><button type="button" disabled={busy === request.id} onClick={() => rejectRequest(request)} className="rounded-md border border-rose-200 px-2.5 py-1.5 text-xs text-rose-700 disabled:opacity-60">Reject</button></>}
-                          {canCreateInvoice && <button type="button" onClick={() => setConfirmInvoice({ request, step: request.status === "INVOICE_CREATED" ? "send" : "create" })} className="rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white">{request.status === "INVOICE_CREATED" ? "Send invoice" : "Create invoice"}</button>}
+                          {canCreateInvoice && <button type="button" onClick={() => {
+                            setInvoiceProductSearch("");
+                            setConfirmInvoice({
+                              request,
+                              step: request.status === "INVOICE_CREATED" ? "send" : "create",
+                              quantities: Object.fromEntries((request.items || []).map((item) => [item.id, String(item.quantity)])),
+                              additionalItems: [],
+                            });
+                          }} className="rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white">{request.status === "INVOICE_CREATED" ? "Send invoice" : "Create invoice"}</button>}
                           {request.status === "INVOICE_SENT" && (isRequester || isSupplier) && <button type="button" disabled={busy === request.id} onClick={() => viewInvoice(request)} className="rounded-md border px-2.5 py-1.5 text-xs hover:bg-slate-50">View invoice</button>}
                         </div>
                       </td>
@@ -439,15 +492,143 @@ export default function Intercompany() {
       </div>}
 
       {confirmInvoice && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="intercompany-invoice-title">
-        <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+        <div className="w-full max-w-xl rounded-xl bg-white p-6 shadow-xl">
           <h2 id="intercompany-invoice-title" className="text-lg font-bold">{confirmInvoice.step === "create" ? "Create intercompany invoice?" : "Send intercompany invoice?"}</h2>
           <p className="mt-2 text-sm text-slate-600">{confirmInvoice.step === "create"
             ? `The invoice will use the supplier's saved price list and its customer record for your company.`
             : `The created invoice will be released to ${companyName(confirmInvoice.request.requesting_company_id)}. Once sent, the requesting company can view its details.`}</p>
+          {confirmInvoice.step === "create" && <div className="mt-4 space-y-3">
+            <p className="text-sm font-semibold text-slate-700">Invoice quantities (change them if the delivered pieces differ from the request)</p>
+            {confirmInvoice.request.items.map((item) => <label key={item.id} className="grid grid-cols-[minmax(0,1fr)_8rem] items-center gap-3 text-sm">
+              <span className="min-w-0 text-slate-700">{intercompanyProductLabel(item)} <span className="text-slate-400">(requested {item.quantity})</span></span>
+              <input
+                type="number"
+                min="0.001"
+                max="1000000"
+                step="any"
+                value={confirmInvoice.quantities[item.id] ?? ""}
+                onChange={(event) => setConfirmInvoice((current) => ({
+                  ...current,
+                  quantities: { ...current.quantities, [item.id]: event.target.value },
+                }))}
+                aria-label={`Invoice quantity for ${intercompanyProductLabel(item)}`}
+                data-testid={`intercompany-invoice-quantity-${item.id}`}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+              />
+            </label>)}
+            <div className="space-y-3 border-t border-slate-200 pt-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-slate-700">Add products from supplier stock</p>
+                <button
+                  type="button"
+                  disabled={(confirmInvoice.additionalItems || []).length + confirmInvoice.request.items.length >= 100}
+                  onClick={() => setConfirmInvoice((current) => {
+                    if (!current) return current;
+                    const additionalItems = current.additionalItems || [];
+                    return {
+                      ...current,
+                      additionalItems: [...additionalItems, {
+                      key: `new-product-${Date.now()}-${additionalItems.length}`,
+                      stock_id: "",
+                      quantity: "1",
+                      }],
+                    };
+                  })}
+                  className="rounded-lg border px-3 py-1.5 text-xs font-semibold hover:bg-slate-50 disabled:opacity-50"
+                  data-testid="intercompany-invoice-add-product"
+                >
+                  <Plus size={14} className="mr-1 inline" /> Add product
+                </button>
+              </div>
+              {(confirmInvoice.additionalItems || []).length > 0 && <>
+                <input
+                  type="search"
+                  value={invoiceProductSearch}
+                  onChange={(event) => setInvoiceProductSearch(event.target.value)}
+                  placeholder="Search supplier products"
+                  aria-label="Search supplier products to add to invoice"
+                  data-testid="intercompany-invoice-product-search"
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                />
+                {invoiceProductsLoading && <p className="text-xs text-slate-500" role="status">Loading supplier products...</p>}
+                {!invoiceProductsLoading && invoiceProducts.length === 0 && <p className="text-xs text-slate-500" role="status">No supplier products found.</p>}
+                {(confirmInvoice.additionalItems || []).map((line, index) => (
+                  <div key={line.key} className="grid grid-cols-[minmax(0,1fr)_6rem_auto] items-end gap-2">
+                    <label className="min-w-0 space-y-1 text-xs font-medium text-slate-600">
+                      Product
+                      <select
+                        value={line.stock_id}
+                        onChange={(event) => setConfirmInvoice((current) => current && ({
+                          ...current,
+                          additionalItems: current.additionalItems.map((item, itemIndex) =>
+                            itemIndex === index ? {
+                              ...item,
+                              stock_id: event.target.value,
+                              selected_product: invoiceProducts.find((product) => product.stock_id === event.target.value) || null,
+                            } : item,
+                          ),
+                        }))}
+                        data-testid={`intercompany-invoice-product-${index}`}
+                        className="w-full min-w-0 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm"
+                      >
+                        <option value="">{invoiceProductsLoading ? "Loading..." : "Select product"}</option>
+                        {invoiceProducts.filter((product) => (
+                          (Number(product.available_quantity) > 0 || product.stock_id === line.stock_id)
+                          && (product.stock_id === line.stock_id
+                            || !(confirmInvoice.additionalItems || []).some((other, otherIndex) =>
+                              otherIndex !== index && other.stock_id === product.stock_id))
+                        )).concat(line.selected_product
+                          && !invoiceProducts.some((product) => product.stock_id === line.stock_id)
+                          ? [line.selected_product]
+                          : []).map((product) => (
+                          <option key={product.stock_id} value={product.stock_id}>
+                            {intercompanyProductLabel(product)} · {Number(product.available_quantity || 0)} available
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="space-y-1 text-xs font-medium text-slate-600">
+                      Quantity
+                      <input
+                        type="number"
+                        min="0.001"
+                        max="1000000"
+                        step="any"
+                        value={line.quantity}
+                        onChange={(event) => setConfirmInvoice((current) => current && ({
+                          ...current,
+                          additionalItems: current.additionalItems.map((item, itemIndex) =>
+                            itemIndex === index ? { ...item, quantity: event.target.value } : item,
+                          ),
+                        }))}
+                        aria-label={`Additional product quantity ${index + 1}`}
+                        data-testid={`intercompany-invoice-product-quantity-${index}`}
+                        className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmInvoice((current) => current && ({
+                        ...current,
+                        additionalItems: current.additionalItems.filter((item) => item.key !== line.key),
+                      }))}
+                      className="rounded-lg px-2 py-2 text-xs text-rose-700 hover:bg-rose-50"
+                      aria-label={`Remove additional product ${index + 1}`}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </>}
+            </div>
+          </div>}
           <div className="mt-5 flex flex-wrap justify-end gap-2">
             <button type="button" onClick={() => setConfirmInvoice(null)} className="rounded-lg border px-3 py-2 text-sm">Cancel</button>
             {confirmInvoice.step === "send" && <button type="button" onClick={() => setConfirmInvoice(null)} className="rounded-lg border px-3 py-2 text-sm">Keep unsent</button>}
-            <button type="button" disabled={busy === confirmInvoice.request.id} onClick={() => createInvoice(confirmInvoice.request, confirmInvoice.step === "send")} className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-semibold text-white">
+            <button type="button" disabled={busy === confirmInvoice.request.id || (confirmInvoice.step === "create" && (
+              confirmInvoice.request.items.some((item) => !Number.isFinite(Number(confirmInvoice.quantities[item.id])) || Number(confirmInvoice.quantities[item.id]) <= 0)
+              || (confirmInvoice.additionalItems || []).some((item) => !item.stock_id || !Number.isFinite(Number(item.quantity)) || Number(item.quantity) <= 0 || Number(item.quantity) > 1_000_000)
+            ))} onClick={() => createInvoice(confirmInvoice.request, confirmInvoice.step === "send", confirmInvoice.quantities, confirmInvoice.additionalItems)} className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-semibold text-white">
               {confirmInvoice.step === "create" ? "Create invoice" : "Send invoice"}
             </button>
           </div>

@@ -244,6 +244,7 @@ def test_invoice_creation_requires_prices_before_creating_a_new_invoice(monkeypa
         "supplying_company_id": "iqfoam-whole-sallers",
         "status": "ACCEPTED",
         "items": [{
+            "id": "request-line-3",
             "stock_id": "supplier-stock-1",
             "product": "Foam",
             "dimensions": "100x200",
@@ -294,6 +295,7 @@ def test_intercompany_invoice_uses_saved_price_and_customer_zone_rules(monkeypat
         "supplying_company_id": "superiqfoam",
         "status": "ACCEPTED",
         "items": [{
+            "id": "request-line-1",
             "stock_id": "supplier-stock-1",
             "product": "Simple",
             "dimensions": "760x50",
@@ -333,7 +335,10 @@ def test_intercompany_invoice_uses_saved_price_and_customer_zone_rules(monkeypat
     try:
         result = asyncio.run(server.create_intercompany_invoice(
             "ICR-5",
-            server.IntercompanyCreateInvoiceIn(send_to_requesting_company=False),
+            server.IntercompanyCreateInvoiceIn(
+                send_to_requesting_company=False,
+                items=[server.IntercompanyInvoiceLineIn(item_id="request-line-1", quantity=5)],
+            ),
             user,
         ))
         assert result["invoice"]["id"] == "invoice-5"
@@ -341,8 +346,109 @@ def test_intercompany_invoice_uses_saved_price_and_customer_zone_rules(monkeypat
         assert created_invoices[0].made_by
         assert created_invoices[0].deduct_stock is True
         assert created_invoices[0].items[0].unit_price == 85
-        assert created_invoices[0].items[0].qty == 2
-        assert created_invoices[0].items[0].unit_price * created_invoices[0].items[0].qty == 170
+        assert created_invoices[0].items[0].qty == 5
+        assert created_invoices[0].items[0].unit_price * created_invoices[0].items[0].qty == 425
+        assert shared_db.intercompany_order_requests.documents[0]["invoice_quantities"] == {
+            "request-line-1": 5,
+        }
+    finally:
+        server.active_company_id.reset(token)
+
+
+def test_intercompany_invoice_can_add_supplier_stock_product(monkeypatch):
+    request = {
+        "id": "ICR-ADD-PRODUCT",
+        "requesting_company_id": "iqfoam-whole-sallers",
+        "supplying_company_id": "superiqfoam",
+        "status": "ACCEPTED",
+        "items": [{
+            "id": "request-line-1",
+            "stock_id": "requested-stock",
+            "product": "Simple",
+            "dimensions": "760x50",
+            "quantity": 2,
+        }],
+        "invoice_sent": False,
+    }
+    shared_db = Database(intercompany_order_requests=Collection([request]))
+    supplier_db = Database(
+        invoices=Collection(),
+        intercompany_customer_mappings=Collection(),
+        customers=Collection([{
+            "id": "customer-1",
+            "company_id": "superiqfoam",
+            "name": "IQFOAM WHOLESALERS",
+            "default_zone": 2,
+            "active": True,
+        }]),
+        stock=Collection([{
+            "id": "added-stock",
+            "company_id": "superiqfoam",
+            "product": "Simple",
+            "size": "900x50",
+            "opening": 10,
+        }]),
+        prices=Collection(),
+    )
+    shared_db.product_identifications = Collection([{
+        "company_id": "superiqfoam",
+        "stock_id": "added-stock",
+        "product_type": "Standard",
+        "description": "Additional foam product",
+        "active": True,
+    }])
+    monkeypatch.setattr(server, "base_db", shared_db)
+    monkeypatch.setattr(server, "tenant_database", lambda *_args: supplier_db)
+    monkeypatch.setattr(server, "db", supplier_db)
+    monkeypatch.setattr(
+        server, "resolve_price",
+        lambda _zone, _category, _size: asyncio.sleep(0, result={
+            "found": True, "price": 85,
+        }),
+    )
+    created_invoices = []
+
+    async def create_saved_invoice(body, user):
+        created_invoices.append(body)
+        return {"id": "invoice-added-product", "number": "INV-ADD", "total": 595}
+
+    monkeypatch.setattr(server, "create_invoice", create_saved_invoice)
+    user = {"id": "supplier-admin", "company_roles": {"superiqfoam": "admin"}}
+    token = server.active_company_id.set("superiqfoam")
+    try:
+        with pytest.raises(HTTPException) as invalid_stock:
+            asyncio.run(server.create_intercompany_invoice(
+                "ICR-ADD-PRODUCT",
+                server.IntercompanyCreateInvoiceIn(
+                    send_to_requesting_company=False,
+                    items=[
+                        server.IntercompanyInvoiceLineIn(item_id="request-line-1", quantity=5),
+                        server.IntercompanyInvoiceLineIn(stock_id="other-company-stock", quantity=2),
+                    ],
+                ),
+                user,
+            ))
+        assert invalid_stock.value.status_code == 400
+        assert "supplier stock" in invalid_stock.value.detail
+        assert created_invoices == []
+
+        asyncio.run(server.create_intercompany_invoice(
+            "ICR-ADD-PRODUCT",
+            server.IntercompanyCreateInvoiceIn(
+                send_to_requesting_company=False,
+                items=[
+                    server.IntercompanyInvoiceLineIn(item_id="request-line-1", quantity=5),
+                    server.IntercompanyInvoiceLineIn(stock_id="added-stock", quantity=2),
+                ],
+            ),
+            user,
+        ))
+        added_line = created_invoices[0].items[1]
+        assert added_line.category == "Standard"
+        assert added_line.size == "900x50"
+        assert added_line.description == "Additional foam product"
+        assert added_line.qty == 2
+        assert added_line.unit_price == 85
     finally:
         server.active_company_id.reset(token)
 

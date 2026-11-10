@@ -9389,10 +9389,22 @@ class IntercompanyCustomerMapIn(BaseModel):
     requesting_company_id: str
     customer_id: str
 
+class IntercompanyInvoiceLineIn(BaseModel):
+    item_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    stock_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    quantity: float = Field(gt=0, le=1_000_000, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def require_one_product_source(self):
+        if bool(self.item_id) == bool(self.stock_id):
+            raise ValueError("Provide either a requested item or a supplier stock item")
+        return self
+
 class IntercompanyCreateInvoiceIn(BaseModel):
     send_to_requesting_company: bool
     delivery_fee: float = Field(default=0, ge=0)
     assigned_driver_id: Optional[str] = ""
+    items: Optional[List[IntercompanyInvoiceLineIn]] = Field(default=None, min_length=1, max_length=100)
 
 def require_intercompany_company_access(user, company_id, *, administrator=False):
     if company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
@@ -9979,6 +9991,25 @@ async def create_intercompany_invoice(
         {"idempotency_key": idempotency_key}, {"_id": 0},
     )
     if not invoice:
+        requested_quantities = {item["id"]: item["quantity"] for item in request["items"]}
+        added_stock_items = []
+        if body.items is not None:
+            submitted_quantities = {}
+            for item in body.items:
+                if item.item_id:
+                    if item.item_id not in requested_quantities or item.item_id in submitted_quantities:
+                        raise HTTPException(400, "Invoice quantities must reference each requested product only once")
+                    submitted_quantities[item.item_id] = item.quantity
+                else:
+                    added_stock_items.append(item)
+            if set(submitted_quantities) != set(requested_quantities):
+                raise HTTPException(400, "Provide an invoice quantity for every requested product")
+            added_stock_ids = [item.stock_id for item in added_stock_items]
+            if len(added_stock_ids) != len(set(added_stock_ids)):
+                raise HTTPException(400, "A supplier stock product can only be added to the invoice once")
+        else:
+            submitted_quantities = requested_quantities
+
         mapping = await company_db.intercompany_customer_mappings.find_one(
             {
                 "requesting_company_id": request["requesting_company_id"],
@@ -10017,6 +10048,7 @@ async def create_intercompany_invoice(
         )
         invoice_items = []
         for item in request["items"]:
+            invoice_quantity = submitted_quantities[item["id"]]
             resolved = await resolve_price(
                 zone,
                 item.get("product_type") or item["product"],
@@ -10028,10 +10060,46 @@ async def create_intercompany_invoice(
                     f"No confirmed saved price for {item['product']} {item['dimensions']} in zone {zone}",
                 )
             invoice_items.append({
-                "qty": item["quantity"],
+                "qty": invoice_quantity,
                 "category": item.get("product_type") or item["product"],
                 "size": item["dimensions"],
                 "description": item.get("description") or item["product"],
+                "unit_price": resolved["price"],
+            })
+        for item in added_stock_items:
+            stock = await company_db.stock.find_one(
+                {
+                    "id": item.stock_id,
+                    "company_id": company_id,
+                    "archived": {"$ne": True},
+                },
+                {"_id": 0},
+            )
+            if not stock:
+                raise HTTPException(400, "An added product is no longer available in supplier stock")
+            identity = await base_db.product_identifications.find_one(
+                {
+                    "company_id": company_id,
+                    "stock_id": item.stock_id,
+                    "active": {"$ne": False},
+                },
+                {"_id": 0},
+            )
+            category = (identity or {}).get("product_type") or stock.get("product_type") or stock.get("product", "")
+            size = stock.get("size", "")
+            if not category or not size:
+                raise HTTPException(400, "An added supplier product is missing its category or dimensions")
+            resolved = await resolve_price(zone, category, size)
+            if not resolved["found"] or resolved["price"] is None:
+                raise HTTPException(
+                    409,
+                    f"No confirmed saved price for {stock.get('product', category)} {size} in zone {zone}",
+                )
+            invoice_items.append({
+                "qty": item.quantity,
+                "category": category,
+                "size": size,
+                "description": (identity or {}).get("description") or stock.get("description") or stock.get("product", ""),
                 "unit_price": resolved["price"],
             })
         if body.assigned_driver_id:
@@ -10059,6 +10127,32 @@ async def create_intercompany_invoice(
             deduct_stock=True,
         )
         invoice = await create_invoice(invoice_body, user=user)
+        now = now_iso()
+        quantity_changes = [
+            {
+                "item_id": item["id"],
+                "product": item["product"],
+                "dimensions": item["dimensions"],
+                "requested_quantity": item["quantity"],
+                "invoice_quantity": submitted_quantities[item["id"]],
+            }
+            for item in request["items"]
+            if submitted_quantities[item["id"]] != item["quantity"]
+        ]
+        if quantity_changes:
+            await base_db.intercompany_order_requests.update_one(
+                {"id": request_id, "supplying_company_id": company_id},
+                {
+                    "$set": {"invoice_quantities": submitted_quantities, "updated_at": now},
+                    "$push": {"audit": {
+                        "action": "invoice_quantities_changed",
+                        "at": now,
+                        "by": user["id"],
+                        "company_id": company_id,
+                        "changes": quantity_changes,
+                    }},
+                },
+            )
     sent_now = body.send_to_requesting_company and not request.get("invoice_sent")
     now = now_iso()
     new_status = "INVOICE_SENT" if body.send_to_requesting_company else "INVOICE_CREATED"
