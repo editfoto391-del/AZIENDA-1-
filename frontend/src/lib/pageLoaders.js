@@ -28,6 +28,7 @@ export const pageLoaders = {
   "/grv": () => import("@/pages/GRV"),
   "/daily-report": () => import("@/pages/DailyReport"),
   "/settings": () => import("@/pages/Settings"),
+  "/interface-customization": () => import("@/pages/InterfaceCustomization"),
   "/workflow-builder": () => import("@/pages/WorkflowBuilder"),
 };
 

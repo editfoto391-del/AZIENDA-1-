@@ -3,74 +3,27 @@ import { Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import {
-  LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
-  Truck, Menu, X, LogOut, Search, Bell,
-  ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart, ChevronDown, Building2, Handshake, Settings as Cog, ClipboardCheck, LockKeyhole,
-  Warehouse, FlaskConical, Boxes, Moon, Smartphone, Sun,
+  Menu, X, LogOut, Search, Bell, ChevronDown, Building2, LockKeyhole,
+  Moon, Smartphone, Sun,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
 import { preloadPage } from "@/lib/pageLoaders";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { companyBrandName, companyProfileName, dedicatedCompanyDomain } from "@/lib/company";
+import { NAV_GROUPS } from "@/lib/navigation";
 
-const NAV_GROUPS = [
-  { label: "Overview", items: [
-    { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, section: "dashboard" },
-  ] },
-  { label: "Sales", items: [
-    { to: "/customers", label: "Customers", icon: ContactRound, section: "customers" },
-    { to: "/orders", label: "Orders", icon: ShoppingBag, section: "orders" },
-    { to: "/invoices", label: "Invoice", icon: ReceiptText, section: "invoices" },
-    { to: "/client-payments", label: "Clients payment and balances", icon: HandCoins, section: "client-payments" },
-  ] },
-  { label: "Express Websites - Old Invoices and Payments", collapsible: true, items: [
-    { to: "/express-invoices", label: "Express Website Invoices", icon: ReceiptText, section: "express-invoices" },
-    { to: "/express-client-payments", label: "Express Website Payments and Balances", icon: HandCoins, section: "express-client-payments" },
-  ] },
-  { label: "Purchasing", items: [
-    { to: "/intercompany", label: "Intercompany", icon: Building2, section: "intercompany" },
-    { to: "/grv", label: "GRV", icon: ClipboardCheck, section: "grv" },
-    { to: "/suppliers", label: "Suppliers", icon: Handshake, section: "suppliers" },
-    { to: "/buyings", label: "Buyings", icon: ShoppingCart, section: "buyings" },
-  ] },
-  { label: "Operations", items: [
-    { to: "/stock", label: "Stock", icon: Package, section: "stock" },
-    { to: "/fleet", label: "Fleet", icon: CarFront, section: "fleet" },
-  ] },
-  { label: "COMPANY INVENTORY", collapsible: true, items: [
-    { to: "/company-inventory", label: "Company Inventory", icon: Boxes, section: "company-inventory" },
-  ] },
-  { label: "PRODUCTION", collapsible: true, companyIds: ["superiqfoam"], items: [
-    { to: "/production", label: "Production", icon: Factory, section: "production" },
-    { to: "/warehouses/chemical-inventory", label: "Chemicals Quantity", icon: FlaskConical, section: "chemicals-quantity", companyId: "superiqfoam" },
-    { to: "/warehouses/chemical", label: "Chemical Usage Log", icon: FlaskConical, section: "chemical-usage-log", companyId: "superiqfoam" },
-  ] },
-  { label: "WAREHOUSES", collapsible: true, companyId: "iqfoam-manufactoring", items: [
-    { to: "/warehouses/A", label: "Warehouse A", icon: Warehouse, section: "warehouse-a", warehouseId: "A" },
-    { to: "/warehouses/B", label: "Warehouse B", icon: Warehouse, section: "warehouse-b", warehouseId: "B" },
-    { to: "/warehouses/C", label: "Warehouse C", icon: Warehouse, section: "warehouse-c", warehouseId: "C" },
-    { to: "/warehouses/chemical", label: "Chemical", icon: FlaskConical, section: "warehouse-chemical" },
-    { to: "/warehouses/chemical-inventory", label: "Chemical Inventory", icon: Boxes, section: "warehouse-chemical-inventory" },
-  ] },
-  { label: "Finance & team", items: [
-    { to: "/expenses", label: "Expenses", icon: Receipt, section: "expenses" },
-    { to: "/daily-report", label: "Daily Report", icon: ChartNoAxesCombined, section: "daily-report" },
-    { to: "/attendance", label: "Attendance", icon: CalendarCheck, section: "attendance" },
-  ] },
-  { label: "Administration", items: [
-    { to: "/settings", label: "Settings", icon: Cog, section: "settings" },
-  ] },
-];
-
-function SidebarContent({ onNav, companyName, companyId, user }) {
+function SidebarContent({ onNav, companyName, companyId, user, interfaceConfig }) {
   const reduceMotion = useReducedMotion();
   const [openGroups, setOpenGroups] = useState({});
-  const navigationId = (label) => ({
-    WAREHOUSES: "warehouses-navigation",
-    PRODUCTION: "production-navigation",
-    "COMPANY INVENTORY": "company-inventory-navigation",
-  }[label] || "old-express-navigation");
+  const navigationId = (id) => ({
+    warehouses: "warehouses-navigation",
+    production: "production-navigation",
+    "company-inventory": "company-inventory-navigation",
+    express: "old-express-navigation",
+  }[id] || `${id}-navigation`);
+  const hiddenSections = new Set(interfaceConfig?.hidden_sections || []);
+  const groupOrder = interfaceConfig?.group_order || [];
   const navGroups = NAV_GROUPS.map((group) => ({
     ...group,
     items: group.items.filter((item) =>
@@ -79,8 +32,25 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
       && (!user?.is_worker || !item.warehouseId || (user.warehouse_ids || []).includes(item.warehouseId))
       && (!item.globalOwnerOnly || (user?.is_primary_owner && user?.is_owner && !user?.is_worker))
       && (!user?.is_worker || user.allowed_sections?.includes(item.section))
-    ),
-  })).filter((group) => (!group.companyId || group.companyId === companyId) && (!group.companyIds || group.companyIds.includes(companyId)) && group.items.length);
+      && (item.globalOwnerOnly || !hiddenSections.has(item.section))
+    ).map((item) => ({
+      ...item,
+      label: interfaceConfig?.section_labels?.[item.section] || item.label,
+    })).sort((left, right) => {
+      const order = interfaceConfig?.section_order?.[group.id] || [];
+      const leftIndex = order.indexOf(left.section);
+      const rightIndex = order.indexOf(right.section);
+      return (leftIndex < 0 ? Number.MAX_SAFE_INTEGER : leftIndex)
+        - (rightIndex < 0 ? Number.MAX_SAFE_INTEGER : rightIndex);
+    }),
+    label: interfaceConfig?.group_labels?.[group.id] || group.label,
+  })).filter((group) => (!group.companyId || group.companyId === companyId) && (!group.companyIds || group.companyIds.includes(companyId)) && group.items.length)
+    .sort((left, right) => {
+      const leftIndex = groupOrder.indexOf(left.id);
+      const rightIndex = groupOrder.indexOf(right.id);
+      return (leftIndex < 0 ? Number.MAX_SAFE_INTEGER : leftIndex)
+        - (rightIndex < 0 ? Number.MAX_SAFE_INTEGER : rightIndex);
+    });
   return (
     <>
       <div className="erp-sidebar-brand relative z-10 flex items-center gap-3 px-5 h-16 border-b border-white/10">
@@ -94,8 +64,8 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
       </div>
       <nav className="erp-sidebar-nav relative z-10 flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
         {navGroups.map((group) => {
-          const expanded = !!openGroups[group.label];
-          const groupNavId = navigationId(group.label);
+          const expanded = !!openGroups[group.id];
+          const groupNavId = navigationId(group.id);
           const items = group.items.map((n) => (
             user?.is_worker
               && !user.allowed_sections?.includes(n.section)
@@ -119,7 +89,7 @@ function SidebarContent({ onNav, companyName, companyId, user }) {
             {group.collapsible ? (
               <button
                 type="button"
-                onClick={() => setOpenGroups((current) => ({ ...current, [group.label]: !current[group.label] }))}
+                onClick={() => setOpenGroups((current) => ({ ...current, [group.id]: !current[group.id] }))}
                 aria-expanded={expanded}
                 aria-controls={groupNavId}
                 data-testid={`${groupNavId}-toggle`}
@@ -172,6 +142,7 @@ export default function Layout() {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [profiles, setProfiles] = useState([]);
+  const [interfaceConfig, setInterfaceConfig] = useState(null);
   const [switching, setSwitching] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
@@ -202,6 +173,26 @@ export default function Layout() {
   };
 
   useEffect(() => { api.get("/companies/profiles").then(setProfiles).catch(() => {}); }, []);
+  useEffect(() => {
+    let active = true;
+    const loadInterfaceConfig = () => {
+      api.getUncached("/interface-settings")
+        .then((config) => { if (active) setInterfaceConfig(config); })
+        .catch((error) => { if (active) toast.error(apiError(error)); });
+    };
+    const applyInterfaceConfig = (event) => {
+      if (event.detail) setInterfaceConfig(event.detail);
+      else loadInterfaceConfig();
+    };
+    loadInterfaceConfig();
+    window.addEventListener("erp:interface-settings-updated", applyInterfaceConfig);
+    window.addEventListener("focus", loadInterfaceConfig);
+    return () => {
+      active = false;
+      window.removeEventListener("erp:interface-settings-updated", applyInterfaceConfig);
+      window.removeEventListener("focus", loadInterfaceConfig);
+    };
+  }, []);
   const loadNotifications = async (uncached = false) => {
     try {
       const response = await (uncached ? api.getUncached("/notifications") : api.get("/notifications"));
@@ -272,7 +263,7 @@ export default function Layout() {
           <path d="M-24 220c73-77 132-144 197-169 39-15 76-16 116-9M-14 224c76-66 136-117 204-146 36-15 67-20 99-21M-16 211c76-56 136-99 205-123 33-12 62-17 91-18" fill="none" stroke="#c6d2c8" strokeOpacity=".24" strokeWidth="1" />
           <path d="M95 224c43-42 81-71 125-88 30-12 55-16 80-17" fill="none" stroke="#c6d2c8" strokeOpacity=".12" strokeWidth="4" />
         </svg>
-        <SidebarContent companyName={activeBrandName} companyId={user?.company_id} user={user} />
+        <SidebarContent companyName={activeBrandName} companyId={user?.company_id} user={user} interfaceConfig={interfaceConfig} />
       </aside>
 
       {/* Mobile drawer */}
@@ -284,7 +275,7 @@ export default function Layout() {
             <button className="absolute right-3 top-3 rounded-full p-2 text-slate-300 hover:bg-white/10" onClick={() => setOpen(false)} aria-label="Close navigation">
               <X size={22} />
             </button>
-            <SidebarContent onNav={() => setOpen(false)} companyName={activeBrandName} companyId={user?.company_id} user={user} />
+            <SidebarContent onNav={() => setOpen(false)} companyName={activeBrandName} companyId={user?.company_id} user={user} interfaceConfig={interfaceConfig} />
           </motion.aside>
         </motion.div>
         )}

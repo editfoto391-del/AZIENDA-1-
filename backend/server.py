@@ -10644,6 +10644,120 @@ async def recommend_driver(size: str = "small", user=Depends(get_current_user)):
     return recs
 
 # ---------------- Settings ----------------
+INTERFACE_NAV_GROUPS = {
+    "overview": ("dashboard",),
+    "sales": ("customers", "orders", "invoices", "client-payments"),
+    "express": ("express-invoices", "express-client-payments"),
+    "purchasing": ("intercompany", "grv", "suppliers", "buyings"),
+    "operations": ("stock", "fleet"),
+    "company-inventory": ("company-inventory",),
+    "production": ("production", "chemicals-quantity", "chemical-usage-log"),
+    "warehouses": ("warehouse-a", "warehouse-b", "warehouse-c", "warehouse-chemical", "warehouse-chemical-inventory"),
+    "finance-team": ("expenses", "daily-report", "attendance"),
+    "administration": ("settings",),
+}
+INTERFACE_SECTIONS = {
+    section for sections in INTERFACE_NAV_GROUPS.values() for section in sections
+}
+INTERFACE_CONFIG_KEYS = {
+    "hidden_sections", "section_labels", "group_labels", "group_order", "section_order",
+}
+
+
+def normalize_interface_config(config):
+    if not isinstance(config, dict):
+        raise HTTPException(422, "Interface settings must be an object")
+    unknown_keys = set(config) - INTERFACE_CONFIG_KEYS - {"id", "updated_at", "updated_by", "_id"}
+    if unknown_keys:
+        raise HTTPException(422, "Interface settings contain unsupported fields")
+
+    hidden_sections = config.get("hidden_sections", [])
+    if not isinstance(hidden_sections, list) or any(
+        not isinstance(section, str) or section not in INTERFACE_SECTIONS
+        for section in hidden_sections
+    ):
+        raise HTTPException(422, "Interface settings contain an unknown menu section")
+
+    def labels_for(key, allowed):
+        labels = config.get(key, {})
+        if not isinstance(labels, dict):
+            raise HTTPException(422, f"{key} must be an object")
+        if any(not isinstance(name, str) or name not in allowed for name in labels):
+            raise HTTPException(422, f"{key} contains an unknown menu item")
+        normalized = {}
+        for name, value in labels.items():
+            if not isinstance(value, str) or len(value.strip()) > 48:
+                raise HTTPException(422, f"{key} values must be text no longer than 48 characters")
+            value = value.strip()
+            if value:
+                normalized[name] = value
+        return normalized
+
+    group_order = config.get("group_order", [])
+    if not isinstance(group_order, list) or any(
+        not isinstance(group, str) or group not in INTERFACE_NAV_GROUPS
+        for group in group_order
+    ):
+        raise HTTPException(422, "Interface settings contain an unknown menu group")
+    group_order = list(dict.fromkeys(group_order))
+    group_order.extend(group for group in INTERFACE_NAV_GROUPS if group not in group_order)
+
+    supplied_section_order = config.get("section_order", {})
+    if not isinstance(supplied_section_order, dict) or any(
+        not isinstance(group, str) or group not in INTERFACE_NAV_GROUPS
+        for group in supplied_section_order
+    ):
+        raise HTTPException(422, "Section order contains an unknown menu group")
+    section_order = {}
+    for group, sections in INTERFACE_NAV_GROUPS.items():
+        custom_order = supplied_section_order.get(group, [])
+        if not isinstance(custom_order, list) or any(
+            not isinstance(section, str) or section not in sections
+            for section in custom_order
+        ):
+            raise HTTPException(422, f"Section order contains an invalid section for {group}")
+        ordered = list(dict.fromkeys(custom_order))
+        ordered.extend(section for section in sections if section not in ordered)
+        section_order[group] = ordered
+
+    return {
+        "hidden_sections": list(dict.fromkeys(hidden_sections)),
+        "section_labels": labels_for("section_labels", INTERFACE_SECTIONS),
+        "group_labels": labels_for("group_labels", INTERFACE_NAV_GROUPS),
+        "group_order": group_order,
+        "section_order": section_order,
+    }
+
+
+@api.get("/interface-settings")
+async def get_interface_settings(user=Depends(get_current_user)):
+    saved = await base_db.interface_settings.find_one({"id": "singleton"}, {"_id": 0})
+    return normalize_interface_config(saved or {})
+
+
+@api.put("/interface-settings")
+async def update_interface_settings(body: dict, user=Depends(get_current_user)):
+    require_global_owner(user)
+    config = normalize_interface_config(body)
+    before = await base_db.interface_settings.find_one({"id": "singleton"}, {"_id": 0})
+    await base_db.interface_settings.update_one(
+        {"id": "singleton"},
+        {"$set": {
+            "id": "singleton",
+            **config,
+            "updated_at": now_iso(),
+            "updated_by": user.get("email", ""),
+        }},
+        upsert=True,
+    )
+    await log_audit(
+        "interface_settings", "singleton", "updated", user,
+        before=normalize_interface_config(before or {}),
+        after=config,
+    )
+    return config
+
+
 @api.get("/settings")
 async def get_settings(user=Depends(get_current_user)):
     s = await db.settings.find_one({"id": "singleton"}, {"_id": 0})
@@ -16854,6 +16968,7 @@ async def on_startup():
         name="notification_recipient_feed",
     )
     await base_db.intercompany_order_requests.create_index("id", unique=True)
+    await base_db.interface_settings.create_index("id", unique=True)
     await base_db.intercompany_order_requests.create_index(
         [("requesting_company_id", 1), ("created_at", -1)],
         name="intercompany_requesting_feed",

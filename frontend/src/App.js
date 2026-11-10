@@ -40,6 +40,7 @@ const GRV = lazy(pageLoaders["/grv"]);
 const DailyReport = lazy(pageLoaders["/daily-report"]);
 const Settings = lazy(pageLoaders["/settings"]);
 const WorkflowBuilder = lazy(pageLoaders["/workflow-builder"]);
+const InterfaceCustomization = lazy(pageLoaders["/interface-customization"]);
 
 class AppErrorBoundary extends Component {
   state = { hasError: false };
@@ -373,6 +374,7 @@ function AppRouter() {
             <Route path="/grv" element={<GRV />} />
             <Route path="/daily-report" element={<DailyReport />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/interface-customization" element={<GlobalOwnerOnly><InterfaceCustomization /></GlobalOwnerOnly>} />
             <Route path="/workflow-builder" element={<GlobalOwnerOnly><WorkflowBuilder /></GlobalOwnerOnly>} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
