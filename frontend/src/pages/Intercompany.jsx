@@ -142,22 +142,26 @@ export default function Intercompany() {
     }
     let active = true;
     setInvoiceProductsLoading(true);
-    api.get("/intercompany/products", {
-      supplying_company_id: supplyingCompanyId,
-      q: invoiceProductSearch,
-      page: 1,
-      page_size: 100,
-    }).then((result) => {
-      if (active) setInvoiceProducts(result.items || []);
-    }).catch((requestError) => {
-      if (active) {
-        setInvoiceProducts([]);
-        toast.error(intercompanyError(requestError));
-      }
-    }).finally(() => {
-      if (active) setInvoiceProductsLoading(false);
-    });
-    return () => { active = false; };
+    const timer = window.setTimeout(() => {
+      api.get("/intercompany/catalog", {
+        q: invoiceProductSearch,
+        page: 1,
+        page_size: 100,
+      }).then((result) => {
+        if (active) setInvoiceProducts(result.items || []);
+      }).catch((requestError) => {
+        if (active) {
+          setInvoiceProducts([]);
+          toast.error(intercompanyError(requestError));
+        }
+      }).finally(() => {
+        if (active) setInvoiceProductsLoading(false);
+      });
+    }, 250);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
   }, [confirmInvoice?.step, confirmInvoice?.request?.supplying_company_id, invoiceProductSearch]);
 
   const updateLine = (index, key, value) => {
@@ -541,37 +545,41 @@ export default function Intercompany() {
                 </button>
               </div>
               {(confirmInvoice.additionalItems || []).length > 0 && <>
-                <input
-                  type="search"
-                  value={invoiceProductSearch}
-                  onChange={(event) => setInvoiceProductSearch(event.target.value)}
-                  placeholder="Search supplier products"
-                  aria-label="Search supplier products to add to invoice"
-                  data-testid="intercompany-invoice-product-search"
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                />
                 {invoiceProductsLoading && <p className="text-xs text-slate-500" role="status">Loading supplier products...</p>}
                 {!invoiceProductsLoading && invoiceProducts.length === 0 && <p className="text-xs text-slate-500" role="status">No supplier products found.</p>}
                 {(confirmInvoice.additionalItems || []).map((line, index) => (
                   <div key={line.key} className="grid grid-cols-[minmax(0,1fr)_6rem_auto] items-end gap-2">
                     <label className="min-w-0 space-y-1 text-xs font-medium text-slate-600">
                       Product
-                      <select
-                        value={line.stock_id}
-                        onChange={(event) => setConfirmInvoice((current) => current && ({
-                          ...current,
-                          additionalItems: current.additionalItems.map((item, itemIndex) =>
-                            itemIndex === index ? {
-                              ...item,
-                              stock_id: event.target.value,
-                              selected_product: invoiceProducts.find((product) => product.stock_id === event.target.value) || null,
-                            } : item,
-                          ),
-                        }))}
+                      <input
+                        type="search"
+                        value={line.search ?? (line.selected_product ? intercompanyProductLabel(line.selected_product) : "")}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setInvoiceProductSearch(value);
+                          setConfirmInvoice((current) => current && ({
+                            ...current,
+                            additionalItems: current.additionalItems.map((item, itemIndex) => {
+                              if (itemIndex !== index) return item;
+                              const selectedProduct = invoiceProducts.find((product) =>
+                                intercompanyProductLabel(product).toLowerCase() === value.trim().toLowerCase()
+                                && Number(product.available_quantity) > 0,
+                              ) || null;
+                              return {
+                                ...item,
+                                search: value,
+                                stock_id: selectedProduct?.stock_id || "",
+                                selected_product: selectedProduct,
+                              };
+                            }),
+                          }));
+                        }}
+                        list={`intercompany-invoice-product-options-${index}`}
+                        placeholder="Search product or dimensions"
                         data-testid={`intercompany-invoice-product-${index}`}
                         className="w-full min-w-0 rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm"
-                      >
-                        <option value="">{invoiceProductsLoading ? "Loading..." : "Select product"}</option>
+                      />
+                      <datalist id={`intercompany-invoice-product-options-${index}`}>
                         {invoiceProducts.filter((product) => (
                           (Number(product.available_quantity) > 0 || product.stock_id === line.stock_id)
                           && (product.stock_id === line.stock_id
@@ -581,11 +589,11 @@ export default function Intercompany() {
                           && !invoiceProducts.some((product) => product.stock_id === line.stock_id)
                           ? [line.selected_product]
                           : []).map((product) => (
-                          <option key={product.stock_id} value={product.stock_id}>
-                            {intercompanyProductLabel(product)} · {Number(product.available_quantity || 0)} available
+                          <option key={product.stock_id} value={intercompanyProductLabel(product)}>
+                            {Number(product.available_quantity || 0)} available
                           </option>
                         ))}
-                      </select>
+                      </datalist>
                     </label>
                     <label className="space-y-1 text-xs font-medium text-slate-600">
                       Quantity
