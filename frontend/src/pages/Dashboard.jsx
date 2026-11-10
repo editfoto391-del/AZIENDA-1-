@@ -232,6 +232,9 @@ export default function Dashboard() {
   const [comparisonLoading, setComparisonLoading] = useState(false);
   const [comparisonError, setComparisonError] = useState("");
   const [workers, setWorkers] = useState([]);
+  const [workerListLoading, setWorkerListLoading] = useState(false);
+  const [workerListError, setWorkerListError] = useState("");
+  const [workerListReload, setWorkerListReload] = useState(0);
   const [companies, setCompanies] = useState([]);
   const [workerCompanyId, setWorkerCompanyId] = useState(user?.company_id || dedicatedDomain?.companyId || "");
   const [workerModalOpen, setWorkerModalOpen] = useState(false);
@@ -284,12 +287,22 @@ export default function Dashboard() {
   }, [user, canManageWorkers]);
 
   useEffect(() => {
-    if (!canManageWorkers || !workerCompanyId) return;
+    if (!canManageWorkers || !workerCompanyId) {
+      setWorkers([]);
+      setWorkerListLoading(false);
+      setWorkerListError("");
+      return undefined;
+    }
+    let active = true;
     setWorkers([]);
+    setWorkerListError("");
+    setWorkerListLoading(true);
     api.get("/access/workers", { company_id: workerCompanyId })
-      .then(setWorkers)
-      .catch((error) => toast.error(apiError(error)));
-  }, [user, workerCompanyId, canManageWorkers]);
+      .then((data) => { if (active) setWorkers(data); })
+      .catch((error) => { if (active) setWorkerListError(apiError(error)); })
+      .finally(() => { if (active) setWorkerListLoading(false); });
+    return () => { active = false; };
+  }, [user, workerCompanyId, canManageWorkers, workerListReload]);
 
   useEffect(() => {
     let active = true;
@@ -629,7 +642,7 @@ export default function Dashboard() {
         <h1 className="mt-1 font-display text-4xl font-normal text-slate-900 sm:text-5xl">Business overview</h1>
         <p className="mt-1 font-display text-base italic text-slate-500">Performance, cash flow and daily operations</p>
         </div>
-        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [], is_admin: false, can_edit_invoice_prices: false, write_permissions: defaultWorkerWritePermissions(["invoices"]) }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
+        {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: workerCompanyId || user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [], is_admin: false, can_edit_invoice_prices: false, write_permissions: defaultWorkerWritePermissions(["invoices"]) }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
       <div className="dashboard-period-panel relative z-10 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/70 p-3" data-testid="dashboard-period-controls">
         <div className="flex flex-wrap gap-1.5" role="group" aria-label="Dashboard date range">
@@ -710,7 +723,12 @@ export default function Dashboard() {
         </label>
         <span className="text-xs text-slate-400">{workers.length} workers</span>
       </div>}>
-        {workers.length === 0 ? <p className="text-sm text-slate-400">No workers added for this company yet.</p> : (
+        {workerListLoading ? <p className="py-3 text-sm text-slate-500" role="status">Loading workers...</p>
+          : workerListError ? <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm text-red-700" role="alert">{workerListError}</p>
+            <button type="button" onClick={() => setWorkerListReload((value) => value + 1)} className="text-xs font-semibold text-primary" data-testid="worker-list-retry">Try again</button>
+          </div>
+          : workers.length === 0 ? <p className="text-sm text-slate-400">No workers added for this company yet.</p> : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[560px] text-sm">
               <thead><tr className="border-b border-border text-left text-xs text-slate-400">
