@@ -23,7 +23,7 @@ const STATUSES = [
 ];
 const DELETABLE_GRV_STATUSES = new Set([
   "draft", "pending_inspection", "cancelled",
-  "completed", "partially_received", "discrepancy",
+  "completed", "partially_received", "discrepancy", "reversing",
 ]);
 const STATUS_STYLE = {
   draft: "bg-slate-100 text-slate-600 border-slate-200",

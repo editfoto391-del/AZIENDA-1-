@@ -315,12 +315,15 @@ def test_grv_reversal_batches_stock_history_reads_and_retries_interrupted_revers
     asyncio.run(scenario())
 
 
-def test_permanent_grv_delete_reverses_full_stock_quantity_even_if_already_used(monkeypatch):
+@pytest.mark.parametrize("initial_status", ["completed", "reversing"])
+def test_permanent_grv_delete_reverses_full_stock_quantity_even_if_already_used(
+    monkeypatch, initial_status,
+):
     fake_db = FakeDatabase()
     fake_db.grvs.documents.append({
         "id": "grv-delete-stock",
         "grv_number": "GRV-DELETE-STOCK",
-        "status": "completed",
+        "status": initial_status,
         "received_date": "2026-10-29",
         "items": [{
             "stock_id": "stock-1",

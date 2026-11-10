@@ -5,4 +5,4 @@ export const RECEIVING_OPTIONS = [
   "SHOP2SHOP: IQFOAM N29RXH",
 ];
 
-export const PAYMENT_METHODS = ["Cash", "Capitec", "FNB", "S2S", "Card Payment"];
+export const PAYMENT_METHODS = ["Cash", "Capitec", "FNB", "Standard Bank", "S2S", "Card Payment"];
