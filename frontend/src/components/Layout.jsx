@@ -283,7 +283,7 @@ export default function Layout() {
 
       <div className="app-content flex min-h-0 min-w-0 flex-1 flex-col lg:pl-64 print:overflow-visible print:pl-0">
         {/* Topbar */}
-        <header className="mobile-topbar no-print liquid-glass-surface sticky top-0 z-20 flex h-16 shrink-0 items-center gap-2 border-b border-white/70 px-3 sm:gap-4 sm:px-6">
+        <header className="mobile-topbar no-print liquid-glass-surface sticky top-0 z-20 flex h-16 min-w-0 shrink-0 items-center gap-1 border-b border-white/70 px-3 sm:gap-4 sm:px-6">
           <motion.button whileHover={reduceMotion ? undefined : { scale: 1.04, rotate: 0.5 }} whileTap={reduceMotion ? undefined : { scale: 0.96 }} transition={{ type: "spring", stiffness: 440, damping: 24 }} className="phone-menu-button lg:hidden rounded-full p-2 text-slate-600 hover:bg-white/40" onClick={() => setOpen(true)} aria-label="Open navigation" data-testid="menu-toggle">
             <Menu size={22} />
           </motion.button>
@@ -315,7 +315,7 @@ export default function Layout() {
           </div>
           <div className="phone-header-spacer flex-1 sm:hidden" />
           {user?.can_switch_company && availableProfiles.length > 1 && (
-            <div className="relative" onMouseEnter={() => setProfileMenuOpen(true)} onMouseLeave={() => setProfileMenuOpen(false)}>
+            <div className="relative min-w-0 shrink-0" onMouseEnter={() => setProfileMenuOpen(true)} onMouseLeave={() => setProfileMenuOpen(false)}>
               <button
                 type="button"
                 onClick={() => setProfileMenuOpen((current) => !current)}
@@ -324,7 +324,7 @@ export default function Layout() {
                 aria-expanded={profileMenuOpen}
                 aria-haspopup="menu"
                 data-testid="company-profile-menu"
-                className="flex max-w-28 items-center gap-1.5 rounded-md border border-border bg-white px-2 py-2 text-left text-xs font-semibold text-slate-700 hover:border-primary/50 disabled:opacity-60 sm:max-w-56 sm:gap-2"
+                className="flex max-w-[min(7rem,25vw)] shrink-0 items-center gap-1.5 rounded-md border border-border bg-white px-2 py-2 text-left text-xs font-semibold text-slate-700 hover:border-primary/50 disabled:opacity-60 sm:max-w-56 sm:gap-2"
               >
                 <Building2 size={15} className="shrink-0 text-primary" />
                 <span className="truncate">{companyProfileName(activeProfile?.id) || "Company"}</span>
@@ -367,11 +367,11 @@ export default function Layout() {
             aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
             title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
             data-testid="theme-toggle"
-            className="rounded-full border border-border p-2 text-slate-500 hover:bg-white/40 hover:text-slate-800"
+            className="ml-auto shrink-0 rounded-full border border-border p-2 text-slate-500 hover:bg-white/40 hover:text-slate-800"
           >
             {theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}
           </button>
-          <div className="relative">
+          <div className="relative shrink-0">
             <motion.button
               type="button"
               whileHover={reduceMotion ? undefined : { scale: 1.06, y: -1 }}
@@ -390,7 +390,12 @@ export default function Layout() {
               <Bell size={20} />
               {unreadNotifications > 0 && <span className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-red-600 px-1 text-center text-[10px] font-bold leading-4 text-white" data-testid="notification-unread-count">{unreadNotifications > 9 ? "9+" : unreadNotifications}</span>}
             </motion.button>
-            {notificationsOpen && <div className="absolute right-0 top-full z-50 mt-2 w-[min(24rem,calc(100vw-1.5rem))] overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl" role="dialog" aria-label="Notifications">
+            {notificationsOpen && <div
+              className="fixed right-3 top-[calc(4rem+env(safe-area-inset-top))] z-50 flex max-h-[calc(100dvh-5rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-[min(24rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl sm:right-6 sm:top-20"
+              role="dialog"
+              aria-label="Notifications"
+              data-testid="notifications-panel"
+            >
               <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
                 <h2 className="font-bold text-slate-900">Notifications</h2>
                 <div className="flex items-center gap-3">
@@ -398,7 +403,7 @@ export default function Layout() {
                   <button type="button" onClick={() => setNotificationsOpen(false)} className="text-xs font-semibold text-slate-500 hover:text-slate-900">Close</button>
                 </div>
               </div>
-              <div className="max-h-[min(65vh,28rem)] overflow-y-auto">
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
                 {notifications.length === 0 ? <p className="px-4 py-7 text-center text-sm text-slate-500">You are all caught up.</p> : notifications.map((notification) => (
                   <div key={notification.id} className={`border-b border-slate-100 px-4 py-3 ${notification.read ? "" : "bg-blue-50/50"}`} data-testid={`notification-${notification.id}`}>
                     <button type="button" onClick={() => openNotification(notification)} className="block w-full text-left">
@@ -414,7 +419,7 @@ export default function Layout() {
               </div>
             </div>}
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-1 sm:gap-3">
             <motion.div whileHover={reduceMotion ? undefined : { scale: 1.05, y: -1 }} whileTap={reduceMotion ? undefined : { scale: 0.98 }} transition={{ type: "spring", stiffness: 500, damping: 22 }} className="h-9 w-9 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-sm">
               {(user?.name || "A")[0]}
             </motion.div>
