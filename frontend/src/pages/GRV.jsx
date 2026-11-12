@@ -58,6 +58,9 @@ const blankGRV = () => ({
 });
 const lineValue = (line) => (Number(line.accepted_quantity) || 0) * (Number(line.unit_cost) || 0);
 const stockItemLabel = (item) => [item.size, item.product].filter(Boolean).join(" ");
+const grvDeleteError = (message) => /product item delete from company inventory/i.test(message)
+  ? "The GRV could not be deleted because Company Inventory could not be updated. Please contact an administrator."
+  : message;
 
 function Metric({ label, value, icon: Icon, tone = "text-slate-800" }) {
   return (
@@ -495,7 +498,7 @@ export default function GRV() {
         toast.error(`GRV deleted, but the summary could not be refreshed: ${apiError(error)}`);
       });
     } catch (error) {
-      toast.error(apiError(error));
+      toast.error(grvDeleteError(apiError(error)));
     } finally {
       setDeleteBusy(false);
     }
@@ -515,7 +518,7 @@ export default function GRV() {
         await refreshInventoryAfterGRVChange();
       }
       if (result.failed?.length) {
-        toast.error(`${result.failed.length} GRV(s) not deleted: ${result.failed.map((item) => `${item.id}: ${item.message}`).join("; ")}`);
+        toast.error(`${result.failed.length} GRV(s) not deleted: ${result.failed.map((item) => `${item.id}: ${grvDeleteError(item.message)}`).join("; ")}`);
       }
       const query = {
         ...Object.fromEntries(Object.entries(filters).filter(([, value]) => value)),
@@ -525,7 +528,7 @@ export default function GRV() {
         toast.error(`GRVs deleted, but the summary could not be refreshed: ${apiError(error)}`);
       });
     } catch (error) {
-      toast.error(apiError(error));
+      toast.error(grvDeleteError(apiError(error)));
     } finally {
       setDeleteBusy(false);
     }
@@ -833,6 +836,9 @@ export default function GRV() {
           {scanReceivingMode && <div className="max-w-xl">
             <BarcodeScanner onScan={scanGRVProduct} disabled={saving} dedupeWindowMs={0} label="Scan product to match its stock size" />
           </div>}
+          {draft.purpose === "raw_material" && !draft.is_chemical && <datalist id="grv-raw-material-categories">
+            {["Glue", "Fabric", "Black Fabric", "Plastic Rolls"].map((category) => <option key={category} value={category} />)}
+          </datalist>}
           <div
             className="grv-horizontal-scroll min-w-0 max-w-full overflow-x-auto overscroll-x-contain touch-pan-x rounded-lg border border-border"
             role="region"
@@ -863,7 +869,7 @@ export default function GRV() {
                         <input placeholder="Name *" value={line.product} onChange={(event) => updateLine(index, "product", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-name-${index}`} />
                         {draft.is_chemical
                           ? <input placeholder="Container (Barrel...)" value={line.container_type || ""} onChange={(event) => updateLine(index, "container_type", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-container-${index}`} />
-                          : <input placeholder="Category (Glue, Tape...)" value={line.category || ""} onChange={(event) => updateLine(index, "category", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-category-${index}`} />}
+                          : <input list="grv-raw-material-categories" placeholder="Category (Glue, Fabric...)" value={line.category || ""} onChange={(event) => updateLine(index, "category", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-category-${index}`} />}
                         <input placeholder={draft.is_chemical ? "Capacity (number)" : "Size"} value={line.size} onChange={(event) => updateLine(index, "size", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-size-${index}`} />
                         <input placeholder="Unit * (kg, L, pcs)" value={line.unit || ""} onChange={(event) => updateLine(index, "unit", event.target.value)} className="rounded border border-input px-2 py-1.5" data-testid={`grv-raw-unit-${index}`} />
                       </div>

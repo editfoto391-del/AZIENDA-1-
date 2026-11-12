@@ -3,7 +3,7 @@ import { Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import {
-  Menu, X, LogOut, Search, Bell, ChevronDown, Building2, LockKeyhole,
+  Menu, X, LogOut, Bell, ChevronDown, Building2, LockKeyhole, SlidersHorizontal, PanelsTopLeft,
   Moon, Smartphone, Sun,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
@@ -51,6 +51,19 @@ function SidebarContent({ onNav, companyName, companyId, user, interfaceConfig }
       return (leftIndex < 0 ? Number.MAX_SAFE_INTEGER : leftIndex)
         - (rightIndex < 0 ? Number.MAX_SAFE_INTEGER : rightIndex);
     });
+  const customItems = (interfaceConfig?.custom_sections || [])
+    .filter((item) => !hiddenSections.has(`custom:${item.id}`))
+    .filter((item) => !user?.is_worker || user.allowed_sections?.includes(item.access_section))
+    .map((item) => ({
+      to: item.path,
+      label: item.label,
+      icon: PanelsTopLeft,
+      section: `custom:${item.id}`,
+      accessSection: item.access_section,
+    }));
+  if (customItems.length) {
+    navGroups.push({ id: "custom-sections", label: "CUSTOM SECTIONS", collapsible: true, items: customItems });
+  }
   return (
     <>
       <div className="erp-sidebar-brand relative z-10 flex items-center gap-3 px-5 h-16 border-b border-white/10">
@@ -68,14 +81,14 @@ function SidebarContent({ onNav, companyName, companyId, user, interfaceConfig }
           const groupNavId = navigationId(group.id);
           const items = group.items.map((n) => (
             user?.is_worker
-              && !user.allowed_sections?.includes(n.section)
-              ? <div key={n.to} aria-disabled="true" title="Your administrator has not granted access to this section" data-testid={`nav-locked-${n.label.toLowerCase()}`}
+              && !user.allowed_sections?.includes(n.accessSection || n.section)
+              ? <div key={n.section} aria-disabled="true" title="Your administrator has not granted access to this section" data-testid={`nav-locked-${n.label.toLowerCase()}`}
                 className="flex min-h-9 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-xs font-medium leading-tight text-emerald-50/35">
                 <n.icon size={18} />
                 <span className="flex-1">{n.label}</span>
                 <LockKeyhole size={13} />
               </div>
-              : <NavLink key={n.to} to={n.to} end={n.end} onClick={onNav} onMouseEnter={() => preloadPage(n.to)} onFocus={() => preloadPage(n.to)} onPointerDown={() => preloadPage(n.to)} data-testid={`nav-${n.label.toLowerCase()}`}
+              : <NavLink key={n.section} to={n.to} end={n.end} onClick={onNav} onMouseEnter={() => preloadPage(n.to)} onFocus={() => preloadPage(n.to)} onPointerDown={() => preloadPage(n.to)} data-testid={`nav-${n.label.toLowerCase()}`}
                 className={({ isActive }) => `relative isolate flex min-h-10 items-center gap-3 px-3 py-2 rounded-lg text-[13px] leading-tight font-medium transition-[color,background-color] duration-150 ${isActive ? "text-white" : "text-emerald-50/65 hover:bg-white/5 hover:text-white"}`}>
                 {({ isActive }) => <>
                   {isActive && <motion.span layoutId={`active-nav-${onNav ? "mobile" : "desktop"}`} className="pointer-events-none absolute inset-0 z-0 rounded-md bg-white/10 shadow-[inset_2px_0_0_hsl(72_42%_65%)]" transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 480, damping: 38, mass: 0.5 }} />}
@@ -85,7 +98,7 @@ function SidebarContent({ onNav, companyName, companyId, user, interfaceConfig }
               </NavLink>
           ));
           return (
-          <div key={group.label} className="mb-2">
+          <div key={group.id} className="mb-2">
             {group.collapsible ? (
               <button
                 type="button"
@@ -135,6 +148,7 @@ function AnimatedOutlet({ scrollContainerRef }) {
 
 export default function Layout() {
   const { user, logout, switchCompany } = useAuth();
+  const location = useLocation();
   const { theme, setTheme } = useTheme();
   const reduceMotion = useReducedMotion();
   const [open, setOpen] = useState(false);
@@ -176,12 +190,15 @@ export default function Layout() {
   useEffect(() => {
     let active = true;
     const loadInterfaceConfig = () => {
-      api.getUncached("/interface-settings")
-        .then((config) => { if (active) setInterfaceConfig(config); })
+      if (!user?.company_id) return;
+      api.getUncached(`/interface-settings?company_id=${encodeURIComponent(user.company_id)}`)
+        .then((config) => {
+          if (active) setInterfaceConfig({ ...config, company_id: user.company_id });
+        })
         .catch((error) => { if (active) toast.error(apiError(error)); });
     };
     const applyInterfaceConfig = (event) => {
-      if (event.detail) setInterfaceConfig(event.detail);
+      if (event.detail?.company_id === user?.company_id) setInterfaceConfig(event.detail);
       else loadInterfaceConfig();
     };
     loadInterfaceConfig();
@@ -192,7 +209,7 @@ export default function Layout() {
       window.removeEventListener("erp:interface-settings-updated", applyInterfaceConfig);
       window.removeEventListener("focus", loadInterfaceConfig);
     };
-  }, []);
+  }, [user?.company_id]);
   const loadNotifications = async (uncached = false) => {
     try {
       const response = await (uncached ? api.getUncached("/notifications") : api.get("/notifications"));
@@ -302,18 +319,15 @@ export default function Layout() {
             <Smartphone size={17} />
             <span>{phoneOptimized ? "Exit phone view" : "Phone view"}</span>
           </button>}
-          <div className="phone-search flex-1 max-w-md hidden sm:block">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-              <input
-                data-testid="global-search"
-                placeholder="Search invoices, customers..."
-                className="w-full rounded-lg bg-slate-100 border border-transparent pl-9 pr-3 py-2 text-sm outline-none focus:border-primary focus:bg-white"
-                onKeyDown={(e) => { if (e.key === "Enter" && e.target.value) nav(`/invoices?q=${encodeURIComponent(e.target.value)}`); }}
-              />
-            </div>
-          </div>
-          <div className="phone-header-spacer flex-1 sm:hidden" />
+          {canTogglePhoneView && location.pathname === "/" && <button
+            type="button"
+            onClick={() => nav("/interface-customization")}
+            data-testid="interface-customization-shortcut"
+            className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-primary/25 bg-white px-2 text-xs font-semibold text-primary hover:bg-primary/5 sm:px-3"
+          >
+            <SlidersHorizontal size={16} />
+            <span>Customize interface</span>
+          </button>}
           {user?.can_switch_company && availableProfiles.length > 1 && (
             <div className="relative min-w-0 shrink-0" onMouseEnter={() => setProfileMenuOpen(true)} onMouseLeave={() => setProfileMenuOpen(false)}>
               <button

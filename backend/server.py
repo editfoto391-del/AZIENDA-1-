@@ -2514,40 +2514,126 @@ async def access_users(user=Depends(get_current_user)):
         session_map.setdefault(session.get("user_id"), []).append(session)
     now = datetime.now(timezone.utc)
     result = []
+    profiles_by_id = {profile["id"]: profile for profile in COMPANY_PROFILES}
+    company_ids = set(profiles_by_id)
+    profile_account_summaries = {}
+
+    def as_utc_datetime(value):
+        if not value:
+            return None
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
     for account in users:
         account_sessions = session_map.get(account["id"], [])
         active_sessions = []
-        last_login = ""
+        last_login_at = None
+        last_access_by_company = {}
         for session in account_sessions:
-            expires = session.get("expires_at")
-            if isinstance(expires, str):
-                expires = datetime.fromisoformat(expires.replace("Z", "+00:00"))
-            if expires and expires.tzinfo is None:
-                expires = expires.replace(tzinfo=timezone.utc)
-            seen = session.get("last_seen") or session.get("created_at") or ""
-            if isinstance(seen, datetime):
-                seen_dt = seen.replace(tzinfo=timezone.utc) if seen.tzinfo is None else seen
-                seen = seen_dt.isoformat()
-            if seen and seen > last_login:
-                last_login = seen
-            if expires and expires > now and seen:
-                seen_dt = datetime.fromisoformat(seen.replace("Z", "+00:00"))
-                if seen_dt.tzinfo is None:
-                    seen_dt = seen_dt.replace(tzinfo=timezone.utc)
-                if (now - seen_dt).total_seconds() <= 300:
-                    active_sessions.append(session)
+            seen_at = as_utc_datetime(session.get("last_seen") or session.get("created_at"))
+            if seen_at and (last_login_at is None or seen_at > last_login_at):
+                last_login_at = seen_at
+            company_id = session.get("company_id")
+            if company_id in company_ids and seen_at and (
+                company_id not in last_access_by_company
+                or seen_at > last_access_by_company[company_id]
+            ):
+                last_access_by_company[company_id] = seen_at
+            expires_at = as_utc_datetime(session.get("expires_at"))
+            if expires_at and expires_at > now and seen_at and (now - seen_at).total_seconds() <= 300:
+                active_sessions.append((seen_at, session))
         memberships = account.get("company_roles") or {}
         if account.get("role") == "owner":
             memberships = {company_id: "owner" for company_id in allowed_company_ids(account)}
-        current_session = max(active_sessions, key=lambda item: item.get("last_seen", item.get("created_at", "")), default={})
+        current_session = max(active_sessions, key=lambda item: item[0], default=(None, {}))[1]
+        profile_id = account.get("profile_id")
+        profile = profiles_by_id.get(profile_id)
+        profile_aliases = {
+            profile["name"].casefold(),
+            profile["username"].casefold(),
+            profile_id.replace("-", " ").casefold(),
+        } if profile else set()
+        is_profile_login = bool(
+            profile
+            and not account.get("is_worker")
+            and (
+                account.get("profile_login") in ("admin", "user", "owner")
+                or (account.get("email") or "").casefold().endswith("@profiles.invalid")
+                or (account.get("username") or "").strip().casefold() in profile_aliases
+                or (account.get("name") or "").strip().casefold() in profile_aliases
+            )
+        )
+        last_access_by_company = {
+            company_id: seen_at.isoformat()
+            for company_id, seen_at in last_access_by_company.items()
+        }
+        if is_profile_login:
+            profile_role = memberships.get(profile_id)
+            if profile_role not in ("admin", "owner"):
+                profile_role = "owner" if account.get("profile_login") == "owner" else "admin"
+            summary = profile_account_summaries.get(profile_id)
+            if summary is None:
+                summary = {
+                    "id": f"profile-account:{profile_id}",
+                    "name": profile["name"],
+                    "username": profile["username"],
+                    "email": "",
+                    "role": "user",
+                    "is_owner": False,
+                    "is_profile_account": True,
+                    "profile_id": profile_id,
+                    "active": False,
+                    "is_worker": False,
+                    "is_primary_owner": False,
+                    "company_roles": {},
+                    "company_ids": [],
+                    "online": False,
+                    "current_company_id": "",
+                    "last_login": "",
+                    "last_access_by_company": {},
+                    "created_at": account.get("created_at", ""),
+                    "devices": [],
+                    "_latest_activity": None,
+                }
+                profile_account_summaries[profile_id] = summary
+            if summary["company_roles"].get(profile_id) != "owner":
+                summary["company_roles"][profile_id] = profile_role
+            summary["company_ids"] = list(summary["company_roles"])
+            summary["active"] = summary["active"] or account.get("active", True) is not False
+            summary["online"] = summary["online"] or bool(active_sessions)
+            for company_id, seen_at in last_access_by_company.items():
+                previous = summary["last_access_by_company"].get(company_id, "")
+                if seen_at > previous:
+                    summary["last_access_by_company"][company_id] = seen_at
+            last_login = last_login_at.isoformat() if last_login_at else ""
+            if last_login > summary["last_login"]:
+                summary["last_login"] = last_login
+            active_seen_at = max(active_sessions, key=lambda item: item[0], default=(None, {}))[0]
+            if active_seen_at and (
+                summary["_latest_activity"] is None or active_seen_at > summary["_latest_activity"]
+            ):
+                summary["_latest_activity"] = active_seen_at
+                summary["current_company_id"] = current_session.get("company_id", "")
+            summary["devices"].extend(device_map.get(account["id"], []))
+            continue
+
         result.append({"id": account["id"], "name": account.get("name", ""), "email": account.get("email", ""),
             "username": account.get("username", ""), "role": account.get("role", "user"),
             "is_owner": account.get("role") == "owner", "active": account.get("active", True),
             "is_worker": account.get("is_worker", False),
             "is_primary_owner": canonical_email(account.get("email")) == primary_owner_email,
             "company_roles": memberships, "company_ids": list(memberships), "online": bool(active_sessions),
-            "current_company_id": current_session.get("company_id", ""), "last_login": last_login,
+            "current_company_id": current_session.get("company_id", ""),
+            "last_login": last_login_at.isoformat() if last_login_at else "",
+            "last_access_by_company": last_access_by_company,
             "created_at": account.get("created_at", ""), "devices": device_map.get(account["id"], [])})
+    for summary in profile_account_summaries.values():
+        summary.pop("_latest_activity", None)
+        result.append(summary)
+    if user.get("is_primary_owner") is False:
+        for account in result:
+            for field in ("online", "current_company_id", "last_login", "last_access_by_company", "devices"):
+                account.pop(field, None)
     return result
 
 @api.post("/access/users")
@@ -5379,9 +5465,17 @@ async def get_invoices(
         {"invoice_id": {"$in": invoice_ids}}, {"_id": 0, "invoice_id": 1},
     ).to_list(len(invoice_ids)) if invoice_ids else []
     shared_invoice_ids = {link["invoice_id"] for link in shared_links}
+    payment_invoice_ids = set()
+    if include_archived and invoice_ids:
+        payment_records = await db.payments.find(
+            {"invoice_id": {"$in": invoice_ids}}, {"_id": 0, "invoice_id": 1},
+        ).to_list(None)
+        payment_invoice_ids = {payment.get("invoice_id") for payment in payment_records}
     for i in invs:
         i["status"] = derive_status(i)
         i["has_share_link"] = i["id"] in shared_invoice_ids
+        if include_archived:
+            i["has_payment_history"] = i["id"] in payment_invoice_ids
         invoice_for_user(i, user)
     if page is not None:
         page_result["items"] = invs
@@ -5674,24 +5768,58 @@ async def delete_invoice(iid: str, restore_stock: bool = False, user=Depends(get
     return {"ok": True, "archived": True, "stock_restored": restore_stock}
 
 @api.delete("/invoices/{iid}/permanent")
-async def permanently_delete_invoice(iid: str, user=Depends(get_current_user)):
+async def permanently_delete_invoice(
+    iid: str,
+    reverse_payments: bool = False,
+    user=Depends(get_current_user),
+):
     require_profile_owner(user)
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
         raise HTTPException(404, "Invoice not found")
     if not inv.get("archived"):
         raise HTTPException(409, "Archive the invoice before permanently deleting it")
-    if await db.payments.count_documents({"invoice_id": iid}):
-        raise HTTPException(409, "Invoices with payment history cannot be permanently deleted")
+    payments_reversed = await reverse_invoice_payments_for_permanent_delete(iid, user) if reverse_payments else 0
     await log_audit("invoice", iid, "permanently_deleted", user,
                     before={"number": inv.get("number"), "customer_name": inv.get("customer_name"),
-                            "total": inv.get("total"), "status": derive_status(inv)})
+                            "total": inv.get("total"), "status": derive_status(inv),
+                            "payments_reversed": payments_reversed})
     await db.invoice_share_links.delete_one({"invoice_id": iid})
     await db.invoices.delete_one({"id": iid, "archived": True})
-    return {"ok": True, "deleted": True}
+    return {"ok": True, "deleted": True, "payments_reversed": payments_reversed}
 
 class BulkPermanentDeleteIn(BaseModel):
     ids: List[str] = Field(min_length=1, max_length=100)
+    reverse_payments: bool = False
+
+
+async def reverse_invoice_payments_for_permanent_delete(iid, user):
+    payments = await db.payments.find(
+        {"invoice_id": iid, "reversed": {"$ne": True}}, {"_id": 0},
+    ).to_list(None)
+    reason = "Invoice permanently deleted; owner chose to reverse the client payment."
+    reversed_count = 0
+    for payment in payments:
+        reversed_payment = await db.payments.find_one_and_update(
+            {"id": payment["id"], "reversed": {"$ne": True}},
+            {"$set": {
+                "reversed": True,
+                "reversed_reason": reason,
+                "reversed_at": now_iso(),
+                "reversed_by": user.get("email") or user.get("id", "owner"),
+            }},
+            projection={"_id": 0},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not reversed_payment:
+            continue
+        reversed_count += 1
+        await log_audit(
+            "payment", payment["id"], "reversed", user,
+            before={"reversed": False}, after={"reversed": True}, reason=reason,
+        )
+        await emit_workflow_event("payment.reversed", reversed_payment)
+    return reversed_count
 
 @api.post("/invoices/bulk-permanent-delete")
 async def bulk_permanently_delete_invoices(body: BulkPermanentDeleteIn, user=Depends(get_current_user)):
@@ -5704,12 +5832,16 @@ async def bulk_permanently_delete_invoices(body: BulkPermanentDeleteIn, user=Dep
             raise HTTPException(404, "Invoice not found")
         if not invoice.get("archived"):
             raise HTTPException(409, "Archive every selected invoice before permanently deleting them")
-        if await db.payments.count_documents({"invoice_id": iid}):
-            raise HTTPException(409, "Invoices with payment history cannot be permanently deleted")
         invoices.append(invoice)
 
+    payments_reversed = 0
     for invoice in invoices:
         iid = invoice["id"]
+        invoice_payments_reversed = (
+            await reverse_invoice_payments_for_permanent_delete(iid, user)
+            if body.reverse_payments else 0
+        )
+        payments_reversed += invoice_payments_reversed
         await log_audit(
             "invoice", iid, "permanently_deleted", user,
             before={
@@ -5717,11 +5849,12 @@ async def bulk_permanently_delete_invoices(body: BulkPermanentDeleteIn, user=Dep
                 "customer_name": invoice.get("customer_name"),
                 "total": invoice.get("total"),
                 "status": derive_status(invoice),
+                "payments_reversed": invoice_payments_reversed,
             },
         )
         await db.invoice_share_links.delete_one({"invoice_id": iid})
         await db.invoices.delete_one({"id": iid, "archived": True})
-    return {"deleted": len(invoices)}
+    return {"deleted": len(invoices), "payments_reversed": payments_reversed}
 
 @api.post("/invoices/{iid}/restore")
 async def restore_invoice(iid: str, user=Depends(get_current_user)):
@@ -8722,25 +8855,33 @@ async def salary_cost_for_period(start_date, end_date):
     period_start = date.fromisoformat(str(start_date)[:10])
     period_end = date.fromisoformat(str(end_date)[:10])
     report = await salary_report(period_start.isoformat(), period_end.isoformat())
+    return r2(sum(
+        (
+            D(salary_amount_for_period(employee, period_start, period_end))
+            for employee in report["employees"]
+        ),
+        Decimal("0"),
+    ))
+
+
+def salary_amount_for_period(employee, period_start, period_end):
+    if employee.get("pay_frequency") != "monthly_fixed" or employee.get("monthly_salary") is None:
+        return r2(employee.get("gross_salary", 0))
     total = Decimal("0")
-    for employee in report["employees"]:
-        if employee.get("pay_frequency") != "monthly_fixed" or employee.get("monthly_salary") is None:
-            total += D(employee.get("gross_salary", 0))
-            continue
-        month_start = period_start.replace(day=1)
-        while month_start <= period_end:
-            month_end = month_start.replace(
-                day=calendar.monthrange(month_start.year, month_start.month)[1],
+    month_start = period_start.replace(day=1)
+    while month_start <= period_end:
+        month_end = month_start.replace(
+            day=calendar.monthrange(month_start.year, month_start.month)[1],
+        )
+        overlap_start = max(period_start, month_start)
+        overlap_end = min(period_end, month_end)
+        if overlap_start <= overlap_end:
+            total += (
+                D(employee["monthly_salary"])
+                * D((overlap_end - overlap_start).days + 1)
+                / D((month_end - month_start).days + 1)
             )
-            overlap_start = max(period_start, month_start)
-            overlap_end = min(period_end, month_end)
-            if overlap_start <= overlap_end:
-                total += (
-                    D(employee["monthly_salary"])
-                    * D((overlap_end - overlap_start).days + 1)
-                    / D((month_end - month_start).days + 1)
-                )
-            month_start = (month_end + timedelta(days=1)).replace(day=1)
+        month_start = (month_end + timedelta(days=1)).replace(day=1)
     return r2(total)
 
 
@@ -10783,24 +10924,52 @@ INTERFACE_NAV_GROUPS = {
 INTERFACE_SECTIONS = {
     section for sections in INTERFACE_NAV_GROUPS.values() for section in sections
 }
+INTERFACE_CUSTOM_LINKS = {
+    "/": "dashboard",
+    "/customers": "customers",
+    "/orders": "orders",
+    "/invoices": "invoices",
+    "/client-payments": "client-payments",
+    "/express-invoices": "express-invoices",
+    "/express-client-payments": "express-client-payments",
+    "/intercompany": "intercompany",
+    "/grv": "grv",
+    "/suppliers": "suppliers",
+    "/buyings": "buyings",
+    "/stock": "stock",
+    "/fleet": "fleet",
+    "/company-inventory": "company-inventory",
+    "/production": "production",
+    "/warehouses/chemical-inventory": "chemicals-quantity",
+    "/warehouses/chemical": "chemical-usage-log",
+    "/warehouses/A": "warehouse-a",
+    "/warehouses/B": "warehouse-b",
+    "/warehouses/C": "warehouse-c",
+    "/expenses": "expenses",
+    "/daily-report": "daily-report",
+    "/attendance": "attendance",
+    "/settings": "settings",
+}
+INTERFACE_CUSTOM_LINK_COMPANIES = {
+    "/production": {"superiqfoam"},
+    "/warehouses/A": {"iqfoam-manufactoring"},
+    "/warehouses/B": {"iqfoam-manufactoring"},
+    "/warehouses/C": {"iqfoam-manufactoring"},
+}
 INTERFACE_CONFIG_KEYS = {
     "hidden_sections", "section_labels", "group_labels", "group_order", "section_order",
+    "custom_sections",
 }
 
 
-def normalize_interface_config(config):
+def normalize_interface_config(config, company_id=None, allow_legacy_fields=False):
     if not isinstance(config, dict):
         raise HTTPException(422, "Interface settings must be an object")
-    unknown_keys = set(config) - INTERFACE_CONFIG_KEYS - {"id", "updated_at", "updated_by", "_id"}
-    if unknown_keys:
+    unknown_keys = set(config) - INTERFACE_CONFIG_KEYS - {
+        "id", "updated_at", "updated_by", "company_id", "_id",
+    }
+    if unknown_keys and not allow_legacy_fields:
         raise HTTPException(422, "Interface settings contain unsupported fields")
-
-    hidden_sections = config.get("hidden_sections", [])
-    if not isinstance(hidden_sections, list) or any(
-        not isinstance(section, str) or section not in INTERFACE_SECTIONS
-        for section in hidden_sections
-    ):
-        raise HTTPException(422, "Interface settings contain an unknown menu section")
 
     def labels_for(key, allowed):
         labels = config.get(key, {})
@@ -10844,30 +11013,88 @@ def normalize_interface_config(config):
         ordered.extend(section for section in sections if section not in ordered)
         section_order[group] = ordered
 
+    custom_sections = config.get("custom_sections", [])
+    if not isinstance(custom_sections, list) or len(custom_sections) > 20:
+        raise HTTPException(422, "Create no more than 20 custom menu sections")
+    normalized_custom_sections = []
+    seen_custom_ids = set()
+    for section in custom_sections:
+        if not isinstance(section, dict) or set(section) - {
+            "id", "label", "path", "access_section",
+        }:
+            raise HTTPException(422, "Custom menu section contains unsupported fields")
+        section_id = section.get("id")
+        label = section.get("label")
+        path = section.get("path")
+        if not isinstance(section_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", section_id):
+            raise HTTPException(422, "Custom menu section has an invalid ID")
+        if section_id in seen_custom_ids:
+            raise HTTPException(422, "Custom menu section IDs must be unique")
+        seen_custom_ids.add(section_id)
+        if not isinstance(label, str) or not label.strip() or len(label.strip()) > 48:
+            raise HTTPException(422, "Custom menu labels must contain 1 to 48 characters")
+        if not isinstance(path, str) or path not in INTERFACE_CUSTOM_LINKS:
+            raise HTTPException(422, "Custom menu section must link to an existing application page")
+        allowed_companies = INTERFACE_CUSTOM_LINK_COMPANIES.get(path)
+        if allowed_companies and company_id and company_id not in allowed_companies:
+            raise HTTPException(422, "Custom menu destination is not available in this company profile")
+        access_section = INTERFACE_CUSTOM_LINKS[path]
+        if section.get("access_section", access_section) != access_section:
+            raise HTTPException(422, "Custom menu section permissions do not match its destination")
+        normalized_custom_sections.append({
+            "id": section_id,
+            "label": label.strip(),
+            "path": path,
+            "access_section": access_section,
+        })
+
+    custom_section_ids = {f"custom:{section['id']}" for section in normalized_custom_sections}
+    hidden_sections = config.get("hidden_sections", [])
+    if not isinstance(hidden_sections, list) or any(
+        not isinstance(section, str)
+        or (
+            section not in INTERFACE_SECTIONS
+            and section not in custom_section_ids
+        )
+        for section in hidden_sections
+    ):
+        raise HTTPException(422, "Interface settings contain an unknown menu section")
+
     return {
         "hidden_sections": list(dict.fromkeys(hidden_sections)),
         "section_labels": labels_for("section_labels", INTERFACE_SECTIONS),
         "group_labels": labels_for("group_labels", INTERFACE_NAV_GROUPS),
         "group_order": group_order,
         "section_order": section_order,
+        "custom_sections": normalized_custom_sections,
     }
 
 
 @api.get("/interface-settings")
-async def get_interface_settings(user=Depends(get_current_user)):
-    saved = await base_db.interface_settings.find_one({"id": "singleton"}, {"_id": 0})
-    return normalize_interface_config(saved or {})
+async def get_interface_settings(
+    user=Depends(get_current_user), company_id: Optional[str] = None,
+):
+    company_id = _interface_settings_company_id(company_id, user)
+    saved = await base_db.interface_settings.find_one({"id": company_id}, {"_id": 0})
+    if not saved and company_id == DEFAULT_COMPANY_ID:
+        saved = await base_db.interface_settings.find_one({"id": "singleton"}, {"_id": 0})
+    return normalize_interface_config(saved or {}, company_id, allow_legacy_fields=True)
 
 
 @api.put("/interface-settings")
-async def update_interface_settings(body: dict, user=Depends(get_current_user)):
+async def update_interface_settings(
+    body: dict, user=Depends(get_current_user), company_id: Optional[str] = None,
+):
     require_global_owner(user)
-    config = normalize_interface_config(body)
-    before = await base_db.interface_settings.find_one({"id": "singleton"}, {"_id": 0})
+    company_id = _interface_settings_company_id(company_id, user)
+    config = normalize_interface_config(body, company_id)
+    before = await base_db.interface_settings.find_one({"id": company_id}, {"_id": 0})
+    if not before and company_id == DEFAULT_COMPANY_ID:
+        before = await base_db.interface_settings.find_one({"id": "singleton"}, {"_id": 0})
     await base_db.interface_settings.update_one(
-        {"id": "singleton"},
+        {"id": company_id},
         {"$set": {
-            "id": "singleton",
+            "id": company_id,
             **config,
             "updated_at": now_iso(),
             "updated_by": user.get("email", ""),
@@ -10875,11 +11102,21 @@ async def update_interface_settings(body: dict, user=Depends(get_current_user)):
         upsert=True,
     )
     await log_audit(
-        "interface_settings", "singleton", "updated", user,
-        before=normalize_interface_config(before or {}),
+        "interface_settings", company_id, "updated", user,
+        before=normalize_interface_config(before or {}, allow_legacy_fields=True),
         after=config,
     )
     return config
+
+
+def _interface_settings_company_id(requested_company_id, user):
+    active_id = active_company_id.get() or user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    company_id = requested_company_id or active_id
+    if company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
+        raise HTTPException(422, "Unknown company profile")
+    if company_id != active_id:
+        require_global_owner(user)
+    return company_id
 
 
 @api.get("/settings")
@@ -12463,7 +12700,7 @@ def _raw_grv_items(
             raise HTTPException(400, str(error))
         result.append({
             "stock_id": "", "product_code": "", "product": name, "size": size,
-            "category": "Chemical" if is_chemical else ((data.get("category") or "").strip() or "Other"),
+            "category": "Chemical" if is_chemical else _raw_inventory_category(data.get("category")),
             "unit": unit, "container_type": (data.get("container_type") or "").strip() or "Barrel",
             "purchase_order_item_index": None, "ordered_quantity": 0,
             "previously_received_quantity": 0, "remaining_quantity": 0,
@@ -12477,10 +12714,35 @@ def _raw_key(line):
         for k in ("product", "size", "unit", "category", "container_type")
     )
 
+
+def _raw_inventory_category(value):
+    category = (value or "").strip()
+    canonical = {
+        "glue": "Glue",
+        "fabric": "Fabric",
+        "fabbric": "Fabric",
+        "black fabric": "Black Fabric",
+        "black fabbric": "Black Fabric",
+        "plastic rolls": "Plastic Rolls",
+    }
+    return canonical.get(category.casefold(), category or "Other")
+
+
+def _raw_inventory_identity(line):
+    return (
+        (line.get("product") or line.get("name") or "").strip().casefold(),
+        _raw_inventory_category(line.get("category")).casefold(),
+        (line.get("size") or "").strip().casefold(),
+        (line.get("unit") or "").strip().casefold(),
+    )
+
+
 async def _raw_inventory_target(line, is_chemical, create=False):
-    name = re.escape(line["product"].strip())
-    unit = re.escape(line["unit"].strip())
+    product = line["product"].strip()
+    unit_value = line["unit"].strip()
     if _raw_goes_to_chemicals(is_chemical):
+        name = re.escape(product)
+        unit = re.escape(unit_value)
         container = re.escape(line.get("container_type") or "Barrel")
         query = {
             "chemical": {"$regex": f"^{name}$", "$options": "i"},
@@ -12496,20 +12758,36 @@ async def _raw_inventory_target(line, is_chemical, create=False):
             "capacity": float(line["size"]), "unit": line["unit"].strip(), "count": 0,
         })
         return "chemical_inventory", created
-    category = re.escape((line.get("category") or "Other").strip())
-    query = {
-        "name": {"$regex": f"^{name}$", "$options": "i"},
-        "category": {"$regex": f"^{category}$", "$options": "i"},
-        "size": {"$regex": f"^{re.escape((line.get('size') or '').strip())}$", "$options": "i"},
-        "unit": {"$regex": f"^{unit}$", "$options": "i"},
-    }
-    found = await db.company_inventory.find_one(query, {"_id": 0})
-    if found or not create:
+    category = _raw_inventory_category(line.get("category"))
+    size = (line.get("size") or "").strip()
+    identity = _raw_inventory_identity({
+        **line, "product": product, "category": category, "size": size, "unit": unit_value,
+    })
+    cursor = db.company_inventory.find(
+        {"name": {"$regex": f"^{re.escape(product)}$", "$options": "i"}},
+        {"_id": 0},
+    )
+    found = None
+    async for item in cursor:
+        if _raw_inventory_identity(item) == identity:
+            found = item
+            break
+    if found:
+        normalized = {
+            "name": product,
+            "category": category,
+            "size": size,
+            "unit": unit_value,
+        }
+        if any(found.get(key, "") != value for key, value in normalized.items()):
+            found = await update_doc("company_inventory", found["id"], normalized)
         return "company_inventory", found
+    if not create:
+        return "company_inventory", None
     created = await insert("company_inventory", {
-        "name": line["product"].strip(), "category": (line.get("category") or "Other").strip(),
-        "size": (line.get("size") or "").strip(), "packaging": "", "packages": 0,
-        "units_per_package": 0, "loose_units": 0, "unit": line["unit"].strip(), "notes": "Created by GRV",
+        "name": product, "category": category,
+        "size": size, "packaging": "", "packages": 0,
+        "units_per_package": 0, "loose_units": 0, "unit": unit_value, "notes": "Created by GRV",
     })
     return "company_inventory", created
 
@@ -12565,6 +12843,144 @@ async def _apply_raw_grv(grv, user, direction, *, allow_negative=False, allow_mi
         })
         posted.append({"collection": collection, "target_id": target_id, "quantity": entry["quantity"]})
     return posted
+
+
+async def rebuild_superiqfoam_company_inventory(user):
+    grvs = [grv async for grv in db.grvs.find({}, {"_id": 0})]
+    raw_grvs = [grv for grv in grvs if grv.get("purpose") == "raw_material"]
+    if any(grv.get("status") in ("confirming", "reversing") for grv in raw_grvs):
+        raise HTTPException(409, "Wait for the current raw-material GRV operation to finish, then retry")
+
+    confirmed_statuses = {"completed", "partially_received", "discrepancy"}
+    inventory_totals = {}
+    source_movements = []
+    for grv in raw_grvs:
+        if grv.get("status") not in confirmed_statuses or grv.get("is_chemical"):
+            continue
+        grv_lines = {}
+        for line in grv.get("items", []):
+            try:
+                quantity = float(line.get("accepted_quantity", 0) or 0)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise HTTPException(409, f"GRV {grv.get('grv_number', grv['id'])} has an invalid accepted quantity") from error
+            if not math.isfinite(quantity) or quantity < 0:
+                raise HTTPException(409, f"GRV {grv.get('grv_number', grv['id'])} has an invalid accepted quantity")
+            if quantity == 0:
+                continue
+            material = {
+                **line,
+                "product": (line.get("product") or "").strip(),
+                "category": _raw_inventory_category(line.get("category")),
+                "size": (line.get("size") or "").strip(),
+                "unit": (line.get("unit") or "").strip(),
+            }
+            if not material["product"]:
+                raise HTTPException(409, f"GRV {grv.get('grv_number', grv['id'])} has a raw material without a name")
+            key = _raw_key(line)
+            if key not in grv_lines:
+                grv_lines[key] = {"line": material, "quantity": quantity}
+            else:
+                grv_lines[key]["quantity"] = round(grv_lines[key]["quantity"] + quantity, 4)
+
+        for raw_key, entry in grv_lines.items():
+            identity = _raw_inventory_identity(entry["line"])
+            if identity not in inventory_totals:
+                inventory_totals[identity] = {
+                    "line": entry["line"],
+                    "quantity": 0,
+                }
+            inventory_totals[identity]["quantity"] = round(
+                inventory_totals[identity]["quantity"] + entry["quantity"], 4,
+            )
+            source_movements.append({
+                "grv": grv,
+                "raw_key": raw_key,
+                "line": entry["line"],
+                "quantity": entry["quantity"],
+                "identity": identity,
+            })
+
+    existing_items = [
+        item async for item in db.company_inventory.find({}, {"_id": 0})
+    ]
+    existing_by_identity = {}
+    for item in existing_items:
+        existing_by_identity.setdefault(_raw_inventory_identity(item), item)
+
+    user_name = user.get("name") or user.get("username") or ""
+    rebuilt_ids = set()
+    identity_to_id = {}
+    for identity, entry in inventory_totals.items():
+        existing = existing_by_identity.get(identity)
+        item_id = existing["id"] if existing else new_id()
+        identity_to_id[identity] = item_id
+        rebuilt_ids.add(item_id)
+        quantity = round(entry["quantity"], 4)
+        item_data = {
+            "name": entry["line"]["product"],
+            "category": entry["line"]["category"],
+            "size": entry["line"]["size"],
+            "packaging": "",
+            "packages": 0,
+            "units_per_package": 0,
+            "loose_units": quantity,
+            "unit": entry["line"]["unit"],
+            "notes": "Rebuilt from confirmed GRVs",
+            "stock_reference_quantity": quantity,
+            "daily_remaining_quantity": None,
+            "daily_remaining_date": None,
+            "created_by": user["id"],
+            "created_by_name": user_name,
+        }
+        if existing:
+            await update_doc("company_inventory", item_id, item_data)
+        else:
+            await insert("company_inventory", {"id": item_id, **item_data})
+
+    for movement in source_movements:
+        dedupe_key = f"grv-raw:in:{movement['grv']['id']}:{movement['raw_key']}"
+        values = {
+            "collection": "company_inventory",
+            "target_id": identity_to_id[movement["identity"]],
+            "quantity": movement["quantity"],
+            "direction": 1,
+        }
+        existing = await db.raw_material_movements.find_one(
+            {"dedupe_key": dedupe_key}, {"_id": 0},
+        )
+        if existing:
+            await db.raw_material_movements.update_one(
+                {"dedupe_key": dedupe_key}, {"$set": values},
+            )
+        else:
+            await insert("raw_material_movements", {
+                "dedupe_key": dedupe_key,
+                "grv_id": movement["grv"]["id"],
+                "grv_number": movement["grv"].get("grv_number", ""),
+                "product": movement["line"]["product"],
+                "created_by": user["email"],
+                **values,
+            })
+
+    if rebuilt_ids:
+        await db.company_inventory.delete_many({"id": {"$nin": list(rebuilt_ids)}})
+    else:
+        await db.company_inventory.delete_many({})
+    await db.company_inventory_daily_updates.delete_many({})
+
+    result = {
+        "ok": True,
+        "grvs_replayed": len({
+            movement["grv"]["id"] for movement in source_movements
+        }),
+        "inventory_items": len(rebuilt_ids),
+    }
+    await log_audit(
+        "company_inventory", "superiqfoam", "rebuilt_from_grvs",
+        user, after=result,
+    )
+    return result
+
 
 async def _grv_items_from_request(
     requested_items, purchase_order=None, *, allow_blank_new_product_size=False,
@@ -13423,6 +13839,15 @@ def require_grv_delete_owner(user):
         raise HTTPException(403, "Global owner or active company owner access required")
 
 
+@api.post("/grvs/rebuild-company-inventory")
+async def rebuild_company_inventory_from_grvs(user=Depends(get_current_user)):
+    company_id = active_company_id.get() or user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    if company_id != DEFAULT_COMPANY_ID:
+        raise HTTPException(404, "This action is available only for SUPERIQFOAM")
+    require_grv_delete_owner(user)
+    return await rebuild_superiqfoam_company_inventory(user)
+
+
 async def _delete_grv_record(grv_id, user):
     grv = await db.grvs.find_one({"id": grv_id}, {"_id": 0})
     if not grv:
@@ -13548,6 +13973,7 @@ class ExpenseIn(BaseModel):
     payment_method: Optional[str] = "Cash"
     reference: Optional[str] = ""
     vehicle_id: Optional[str] = ""
+    destination_city: Optional[str] = Field(default="", max_length=100)
     notes: Optional[str] = ""
     edit_reason: Optional[str] = ""
     supervisor_authorization: Optional[str] = None
@@ -13733,6 +14159,11 @@ def _check_expense(body, user):
         raise HTTPException(400, "Amount must be greater than 0")
     if not body.description.strip():
         raise HTTPException(400, "Description is required")
+    if (body.destination_city or "").strip():
+        if user.get("_active_company_id") != DEFAULT_COMPANY_ID:
+            raise HTTPException(400, "Diesel destination cities are only available for SUPERIQFOAM")
+        if body.category != "Diesel" or not body.vehicle_id:
+            raise HTTPException(400, "A destination city can only be recorded for diesel expenses assigned to a vehicle")
     if body.category in {"Bilal", "Yassine", "Bilal and Yassine", "Personal Car", "Home"}:
         if user.get("_active_company_id") != DEFAULT_COMPANY_ID:
             raise HTTPException(400, "Personal expense categories are only available for SUPERIQFOAM")
@@ -14044,7 +14475,8 @@ def grv_accepted_value(grv):
 
 def build_financial_report(start, end, mode, *, invoices, payments, linked_payments,
                            expenses, vehicle_records, buyings, grvs, invoice_movements,
-                           payment_invoices=None, salary_rows=()):
+                           payment_invoices=None, salary_rows=(), vehicles_by_id=None,
+                           all_outstanding_invoices=None, all_outstanding_payments=None):
     invoices = unique_financial_records(invoices)
     payments = unique_financial_records(payments)
     linked_payments = unique_financial_records(linked_payments)
@@ -14071,10 +14503,12 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
         and invoice.get("status") not in ("draft", "void")
         and invoice.get("number")
     ]
+    sales_invoices = [
+        invoice for invoice in issued_invoices if not invoice.get("opening_balance")
+    ]
     invoice_rows = []
     pending_rows = []
     revenue_values = []
-    pending_values = []
     invoices_by_id = {invoice.get("id"): invoice for invoice in issued_invoices}
     referenced_invoices_by_id = {
         invoice.get("id"): invoice
@@ -14109,14 +14543,13 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
                     max(D(invoice.get("total", 0)) - running_paid, Decimal("0"))
                 )
 
-    for invoice in issued_invoices:
+    for invoice in sales_invoices:
         amount = r2(invoice.get("total", 0))
         revenue_values.append(amount)
         paid = payments_by_invoice.get(invoice.get("id"))
         if paid is None:
             paid = D(invoice.get("amount_paid", 0))
         outstanding = max(D(amount) - paid, Decimal("0"))
-        pending_values.append(outstanding)
         status_invoice = {
             **invoice,
             "amount_paid": float(paid),
@@ -14150,13 +14583,6 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
                  for payment in payment_history
              ],
              "items": invoice.get("items") or []})
-        if outstanding > 0:
-            pending_rows.append({
-                "id": invoice.get("id"), "number": invoice.get("number"),
-                "customer_name": invoice.get("customer_name", ""),
-                "due_date": invoice.get("due_date"), "amount": r2(outstanding),
-            })
-
     payment_rows = []
     for payment in payments:
         if payment.get("reversed") or payment.get("archived"):
@@ -14217,6 +14643,31 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
         for record in vehicle_records
         if record.get("status") in VEHICLE_COST_DONE and D(record.get("amount", 0)) > 0
     )
+    diesel_by_vehicle = {}
+    for row in expense_rows:
+        source_record = row.get("source_record") or {}
+        category = str(row.get("category") or "").strip().casefold()
+        description = str(row.get("description") or "").strip().casefold()
+        if category not in {"diesel", "fuel"} and not any(
+            word in description for word in ("diesel", "fuel")
+        ):
+            continue
+        vehicle_id = source_record.get("vehicle_id")
+        vehicle_name = (
+            source_record.get("vehicle_name")
+            or (vehicles_by_id or {}).get(vehicle_id)
+            or "Unassigned vehicle"
+        )
+        current = diesel_by_vehicle.setdefault(
+            vehicle_id or vehicle_name,
+            {"vehicle_id": vehicle_id, "vehicle": vehicle_name, "amount": Decimal("0"), "records": 0},
+        )
+        current["amount"] += D(row.get("amount", 0))
+        current["records"] += 1
+    diesel_usage = [
+        {**row, "amount": r2(row["amount"])}
+        for row in sorted(diesel_by_vehicle.values(), key=lambda item: item["vehicle"].casefold())
+    ]
     buying_rows = [
         _financial_transaction(
             buying, f"Buying · {buying.get('item_type') or 'purchase'}",
@@ -14248,11 +14699,11 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
             "category": "Salary",
             "description": row.get("name") or "",
             "supplier": row.get("department") or "",
-            "amount": r2(row.get("gross_salary", 0)),
+            "amount": salary_amount_for_period(row, start, end),
             "reference": "",
             "status": "Calculated",
         }
-        for row in salary_rows if D(row.get("gross_salary", 0)) > 0
+        for row in salary_rows if salary_amount_for_period(row, start, end) > 0
     ]
 
     movements_by_invoice = {}
@@ -14262,7 +14713,7 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
     cogs_rows = []
     unavailable_rows = []
     cogs_values = []
-    for invoice in issued_invoices:
+    for invoice in sales_invoices:
         movements = movements_by_invoice.get(invoice.get("id"), [])
         if not movements:
             unavailable_rows.append({
@@ -14358,6 +14809,51 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
 
     revenue = dsum(revenue_values)
     payment_total = dsum(row["amount"] for row in payment_rows)
+    outstanding_invoices = unique_financial_records(
+        all_outstanding_invoices if all_outstanding_invoices is not None else invoices
+    )
+    outstanding_invoice_ids = {
+        invoice.get("id")
+        for invoice in outstanding_invoices
+        if invoice.get("id")
+    }
+    outstanding_payments_by_invoice = {}
+    for payment in unique_financial_records(
+        all_outstanding_payments if all_outstanding_payments is not None else linked_payments
+    ):
+        if payment.get("reversed") or payment.get("archived"):
+            continue
+        invoice_id = payment.get("invoice_id")
+        if invoice_id in outstanding_invoice_ids:
+            outstanding_payments_by_invoice[invoice_id] = (
+                D(outstanding_payments_by_invoice.get(invoice_id, 0))
+                + D(payment.get("amount", 0))
+            )
+    pending_values = []
+    for invoice in outstanding_invoices:
+        if (
+            invoice.get("archived")
+            or invoice.get("invoice_type") == "express"
+            or invoice.get("status") in ("draft", "void")
+            or not invoice.get("number")
+        ):
+            continue
+        amount = r2(invoice.get("total", 0))
+        paid = outstanding_payments_by_invoice.get(invoice.get("id"))
+        if paid is None:
+            paid = D(invoice.get("amount_paid", 0))
+        outstanding = max(D(amount) - paid, Decimal("0"))
+        if outstanding <= 0:
+            continue
+        pending_values.append(outstanding)
+        pending_rows.append({
+            "id": invoice.get("id"),
+            "date": invoice.get("date") or "",
+            "number": invoice.get("number"),
+            "customer_name": invoice.get("customer_name", ""),
+            "due_date": invoice.get("due_date"),
+            "amount": r2(outstanding),
+        })
     pending_total = dsum(pending_values)
     expense_total = dsum(row["amount"] for row in expense_rows)
     buying_total = dsum(row["amount"] for row in buying_rows)
@@ -14381,16 +14877,16 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
             "payment_count": 0, "payments_received": 0,
             "expense_count": 0, "expenses": 0, "buyings": 0, "grv": 0,
         }
-    def add_daily(rows, key, count_key=None, date_field="date"):
+    def add_daily(rows, key, count_key=None, date_field="date", amount_field="amount"):
         for row in rows:
             day = financial_record_date(row, date_field)
             if day is None or day.isoformat() not in daily:
                 continue
             bucket = daily[day.isoformat()]
-            bucket[key] = r2(D(bucket[key]) + D(row.get("amount", 0)))
+            bucket[key] = r2(D(bucket[key]) + D(row.get(amount_field, 0)))
             if count_key:
                 bucket[count_key] += 1
-    add_daily(issued_invoices, "sales_revenue", "invoice_count")
+    add_daily(sales_invoices, "sales_revenue", "invoice_count", amount_field="total")
     add_daily(payment_rows, "payments_received", "payment_count")
     add_daily(expense_rows, "expenses", "expense_count")
     add_daily(buying_rows, "buyings")
@@ -14433,6 +14929,7 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
             "expenses": expense_rows, "buyings": buying_rows, "grvs": grv_rows,
             "salaries": salary_rows,
         },
+        "diesel_usage": diesel_usage,
         "daily": list(daily.values()),
     }
 
@@ -14448,7 +14945,7 @@ async def get_financial_report(
     report_company_id = financial_report_company(user, company_id)
     company_context = active_company_id.set(report_company_id)
 
-    async def load_period(period_start, period_end):
+    async def load_period(period_start, period_end, include_company_outstanding=False):
         invoices, payments, expenses, vehicle_records, buyings, grvs, salary_data = await asyncio.gather(
             financial_period_records("invoices", period_start, period_end, conditions={"archived": {"$ne": True}}),
             financial_period_records("payments", period_start, period_end, conditions={"archived": {"$ne": True}}),
@@ -14458,6 +14955,38 @@ async def get_financial_report(
             financial_period_records("grvs", period_start, period_end, date_field="received_date"),
             salary_report(period_start.isoformat(), period_end.isoformat()),
         )
+        vehicle_ids = {
+            record.get("vehicle_id")
+            for record in [*expenses, *vehicle_records]
+            if record.get("vehicle_id")
+        }
+        vehicle_rows = await db.vehicles.find(
+            {"id": {"$in": list(vehicle_ids)}},
+            {"_id": 0, "id": 1, "name": 1},
+        ).to_list(len(vehicle_ids)) if vehicle_ids else []
+        vehicles_by_id = {vehicle["id"]: vehicle.get("name") or "Unassigned vehicle" for vehicle in vehicle_rows}
+        all_outstanding_invoices = None
+        all_outstanding_payments = None
+        if include_company_outstanding:
+            all_outstanding_invoices = await db.invoices.find(
+                {
+                    "archived": {"$ne": True},
+                    "invoice_type": {"$ne": "express"},
+                    "status": {"$nin": ["draft", "void"]},
+                    "number": {"$exists": True, "$nin": [None, ""]},
+                },
+                {"_id": 0},
+            ).to_list(None)
+            all_invoice_ids = [
+                invoice["id"] for invoice in all_outstanding_invoices if invoice.get("id")
+            ]
+            all_outstanding_payments = await db.payments.find(
+                {
+                    "invoice_id": {"$in": all_invoice_ids},
+                    "archived": {"$ne": True},
+                },
+                {"_id": 0},
+            ).to_list(None) if all_invoice_ids else []
         invoice_ids = [invoice["id"] for invoice in invoices if invoice.get("id")]
         payment_invoice_ids = list({
             payment["invoice_id"]
@@ -14484,10 +15013,13 @@ async def get_financial_report(
             grvs=grvs, invoice_movements=invoice_movements,
             payment_invoices=payment_invoices,
             salary_rows=salary_data["employees"],
+            vehicles_by_id=vehicles_by_id,
+            all_outstanding_invoices=all_outstanding_invoices,
+            all_outstanding_payments=all_outstanding_payments,
         )
 
     try:
-        report = await load_period(start, end)
+        report = await load_period(start, end, include_company_outstanding=True)
         previous_start, previous_end = financial_previous_period_range(period, start, end)
         previous = await load_period(previous_start, previous_end)
     finally:
@@ -14515,6 +15047,9 @@ async def add_expense(body: ExpenseIn, user=Depends(get_current_user)):
     d = body.model_dump()
     d.pop("edit_reason", None)
     d.pop("supervisor_authorization", None)
+    destination_city = (d.pop("destination_city", "") or "").strip()
+    if destination_city:
+        d["destination_city"] = destination_city
     d["amount"] = r2(d["amount"])
     d["supervisor_approved_by"] = authorization["supervisor_id"]
     rec = await insert("expenses", d)
@@ -14542,6 +15077,9 @@ async def edit_expense(eid: str, body: ExpenseIn, user=Depends(get_current_user)
     d = body.model_dump()
     d.pop("edit_reason", None)
     d.pop("supervisor_authorization", None)
+    destination_city = (d.pop("destination_city", "") or "").strip()
+    if destination_city:
+        d["destination_city"] = destination_city
     d["amount"] = r2(d["amount"])
     d["supervisor_approved_by"] = authorization["supervisor_id"]
     rec = await update_doc("expenses", eid, d)
@@ -15804,6 +16342,15 @@ def delivery_invoice_snapshot(invoice):
         ],
     }
 
+def delivery_invoice_matches_order(invoice, order):
+    invoice_customer_id = invoice.get("customer_id")
+    order_customer_id = order.get("customer_id")
+    if invoice_customer_id and order_customer_id:
+        return invoice_customer_id == order_customer_id
+    invoice_customer_name = " ".join(str(invoice.get("customer_name") or "").split()).casefold()
+    order_customer_name = " ".join(str(order.get("customer_name") or "").split()).casefold()
+    return bool(invoice_customer_name and invoice_customer_name == order_customer_name)
+
 @api.get("/orders")
 async def get_orders(
     include_archived: bool = False,
@@ -16178,9 +16725,10 @@ async def get_order_driver_confirmation(oid: str, user=Depends(get_current_user)
     elif order.get("invoice_id"):
         invoice = await db.invoices.find_one(
             {"id": order["invoice_id"]},
-            {"_id": 0, "number": 1, "reference": 1, "customer_id": 1, "items": 1},
+            {"_id": 0, "number": 1, "reference": 1, "customer_id": 1,
+             "customer_name": 1, "items": 1},
         )
-        if invoice and invoice.get("customer_id") == order.get("customer_id"):
+        if invoice and delivery_invoice_matches_order(invoice, order):
             invoice_snapshot = delivery_invoice_snapshot(invoice)
     return {
         "signature_data": order.get("driver_signature_data", ""),
@@ -16206,9 +16754,10 @@ async def save_order_driver_confirmation(oid: str, body: DriverDeliveryConfirmat
     if existing.get("invoice_id"):
         invoice = await db.invoices.find_one(
             {"id": existing["invoice_id"]},
-            {"_id": 0, "number": 1, "reference": 1, "customer_id": 1, "items": 1},
+            {"_id": 0, "number": 1, "reference": 1, "customer_id": 1,
+             "customer_name": 1, "items": 1},
         )
-        if not invoice or invoice.get("customer_id") != existing.get("customer_id"):
+        if not invoice or not delivery_invoice_matches_order(invoice, existing):
             raise HTTPException(409, "The linked invoice could not be verified for this order")
         invoice_snapshot = delivery_invoice_snapshot(invoice)
     confirmation_time = now_iso()

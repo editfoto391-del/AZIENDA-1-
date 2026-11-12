@@ -2,7 +2,8 @@ export const RECEIVING_OPTIONS = [
   "FNB: 711 SECURITY 63189328412",
   "STANDARD BANK: IQ FOAM 301654387",
   "CAPITEC BUSINESS: SUPERIQFOAM 1051246610",
+  "Red chili Absa bank: 4125668765",
   "SHOP2SHOP: IQFOAM N29RXH",
 ];
 
-export const PAYMENT_METHODS = ["Cash", "Capitec", "FNB", "Standard Bank", "S2S", "Card Payment"];
+export const PAYMENT_METHODS = ["Cash", "Capitec", "FNB", "Standard Bank", "Absa Bank", "S2S", "Card Payment"];

@@ -312,7 +312,19 @@ export default function Orders() {
   const [smartArrangement, setSmartArrangement] = useState(null);
   const [smartArrangementLoading, setSmartArrangementLoading] = useState(false);
   const detailRequest = useRef(0);
-  const products = [...new Set(stock.map((s) => s.product))];
+  const products = useMemo(() => {
+    const byName = new Map();
+    stock.forEach(({ product }) => {
+      const name = String(product || "").trim();
+      if (!name) return;
+      const key = name.toLocaleLowerCase();
+      const current = byName.get(key);
+      const isUppercase = name !== name.toLocaleLowerCase() && name === name.toLocaleUpperCase();
+      const currentIsUppercase = current && current !== current.toLocaleLowerCase() && current === current.toLocaleUpperCase();
+      if (!current || (currentIsUppercase && !isUppercase)) byName.set(key, name);
+    });
+    return [...byName.values()];
+  }, [stock]);
   const sizesForProduct = (product) => {
     const normalized = String(product || "").trim().toLowerCase();
     const matchingPriceCategories = priceCategoriesForProduct(product).map((category) => String(category || "").toLowerCase());
@@ -814,8 +826,8 @@ export default function Orders() {
               return (
                 <div key={i} className="flex gap-2" data-testid={`order-item-${i}`}>
                   <input type="number" min="0" placeholder="Qty" value={it.qty} onChange={(e) => set({ qty: e.target.value })} className="w-20 rounded border border-input px-2 py-1.5 text-sm" data-testid={`order-item-qty-${i}`} />
-                  <select value={it.category} onChange={(e) => set({ category: e.target.value, size: "" })} className="flex-1 rounded border border-input px-2 py-1.5 text-sm" data-testid={`order-item-cat-${i}`}>
-                    <option value="">Product...</option>{it.category && !products.includes(it.category) && <option>{it.category}</option>}{products.map((p) => <option key={p}>{p}</option>)}</select>
+                  <select value={products.find((product) => product.toLocaleLowerCase() === String(it.category || "").trim().toLocaleLowerCase()) || it.category} onChange={(e) => set({ category: e.target.value, size: "" })} className="flex-1 rounded border border-input px-2 py-1.5 text-sm" data-testid={`order-item-cat-${i}`}>
+                    <option value="">Product...</option>{it.category && !products.some((product) => product.toLocaleLowerCase() === String(it.category).trim().toLocaleLowerCase()) && <option>{it.category}</option>}{products.map((p) => <option key={p}>{p}</option>)}</select>
                   <select value={it.size} onChange={(e) => set({ size: e.target.value })} className="w-32 rounded border border-input px-2 py-1.5 text-sm" data-testid={`order-item-size-${i}`}>
                     <option value="">Size...</option>{it.size && !sizesForProduct(it.category).includes(it.size) && <option>{it.size}</option>}{sizesForProduct(it.category).map((size) => <option key={size}>{size}</option>)}</select>
                   <button onClick={() => setModal({ ...modal, items: modal.items.filter((_, k) => k !== i) })} className="text-slate-300 hover:text-red-600"><Trash2 size={15} /></button>

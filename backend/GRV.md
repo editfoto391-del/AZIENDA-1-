@@ -21,3 +21,5 @@ On confirmation raw-material quantities are added, idempotently via `raw_materia
 - `chemical_inventory` (Chemicals Quantity) when `is_chemical` is set and the company is SUPERIQFOAM or IQFOAM MANUFACTORING (Size must be a numeric capacity);
 - `company_inventory` otherwise (including chemicals for IQFOAM WHOLESALERS).
 Reversing the GRV subtracts the same quantities and fails if not enough remain.
+
+On SUPERIQFOAM, a company owner can rebuild Company Inventory from confirmed non-chemical raw-material GRVs. This replaces all current Company Inventory records and daily quantity history in that company profile, including manual entries, with summed accepted quantities from confirmed GRVs. Draft, cancelled, and reversed GRVs are excluded. Existing GRV movement records are relinked so later reversals continue to work. Category matching is case-insensitive; Glue, Fabric (including the legacy spelling `Fabbric`), Black Fabric, and Plastic Rolls use consistent category names. Different sizes remain separate inventory items, and custom categories are allowed.

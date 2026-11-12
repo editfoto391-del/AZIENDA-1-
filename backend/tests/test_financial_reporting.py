@@ -248,6 +248,157 @@ def test_company_profit_uses_received_payments_and_deducts_all_expense_groups():
     assert period_payment["balance_remaining"] == 150
 
 
+def test_financial_report_outstanding_balances_include_invoices_from_every_period():
+    report = server.build_financial_report(
+        date(2026, 11, 1),
+        date(2026, 11, 30),
+        "expenses_only",
+        invoices=[{
+            "id": "current-invoice", "number": "NOV-1", "date": "2026-11-05",
+            "status": "issued", "total": 200, "amount_paid": 0,
+            "customer_name": "Current customer",
+        }],
+        payments=[],
+        linked_payments=[{
+            "id": "current-payment", "invoice_id": "current-invoice",
+            "date": "2026-11-10", "amount": 50,
+        }],
+        expenses=[],
+        vehicle_records=[],
+        buyings=[],
+        grvs=[],
+        invoice_movements=[],
+        all_outstanding_invoices=[
+            {
+                "id": "old-invoice", "number": "OCT-1", "date": "2026-10-10",
+                "status": "issued", "total": 100, "customer_name": "Old customer",
+            },
+            {
+                "id": "current-invoice", "number": "NOV-1", "date": "2026-11-05",
+                "status": "issued", "total": 200, "customer_name": "Current customer",
+            },
+        ],
+        all_outstanding_payments=[
+            {"id": "old-payment", "invoice_id": "old-invoice", "amount": 25},
+            {"id": "current-payment", "invoice_id": "current-invoice", "amount": 50},
+        ],
+    )
+
+    assert report["summary"]["pending_payments"] == 225
+    assert {
+        row["number"]: row["amount"]
+        for row in report["transactions"]["pending_payments"]
+    } == {"OCT-1": 75, "NOV-1": 150}
+
+
+def test_financial_report_excludes_opening_balances_from_sales_but_keeps_them_outstanding():
+    report = server.build_financial_report(
+        date(2026, 11, 1),
+        date(2026, 11, 30),
+        "expenses_only",
+        invoices=[
+            {
+                "id": "opening", "number": "OB-1", "date": "2026-11-05",
+                "status": "issued", "total": 250, "opening_balance": True,
+            },
+            {
+                "id": "sale", "number": "INV-1", "date": "2026-11-06",
+                "status": "issued", "total": 100,
+            },
+        ],
+        payments=[],
+        linked_payments=[],
+        expenses=[],
+        vehicle_records=[],
+        buyings=[],
+        grvs=[],
+        invoice_movements=[],
+        all_outstanding_invoices=[
+            {
+                "id": "opening", "number": "OB-1", "date": "2026-11-05",
+                "status": "issued", "total": 250, "opening_balance": True,
+            },
+            {
+                "id": "sale", "number": "INV-1", "date": "2026-11-06",
+                "status": "issued", "total": 100,
+            },
+        ],
+        all_outstanding_payments=[],
+    )
+
+    assert report["summary"]["total_invoices"] == 100
+    assert report["summary"]["pending_payments"] == 350
+    assert [row["id"] for row in report["transactions"]["invoices"]] == ["sale"]
+    assert [row["id"] for row in report["transactions"]["historical_cost_unavailable"]] == ["sale"]
+    assert sum(day["sales_revenue"] for day in report["daily"]) == 100
+    assert sum(day["invoice_count"] for day in report["daily"]) == 1
+
+
+def test_financial_report_prorates_monthly_fixed_salary_for_weekly_periods():
+    report = server.build_financial_report(
+        date(2026, 10, 26),
+        date(2026, 11, 1),
+        "expenses_only",
+        invoices=[],
+        payments=[],
+        linked_payments=[],
+        expenses=[],
+        vehicle_records=[],
+        buyings=[],
+        grvs=[],
+        invoice_movements=[],
+        salary_rows=[
+            {
+                "employee_id": "employee-1", "name": "Monthly worker",
+                "pay_frequency": "monthly_fixed", "monthly_salary": 3100,
+                "gross_salary": 0,
+            },
+            {
+                "employee_id": "employee-2", "name": "Next month worker",
+                "pay_frequency": "monthly_fixed", "monthly_salary": 3000,
+                "gross_salary": 0,
+            },
+        ],
+    )
+
+    assert report["summary"]["salaries"] == 1383.98
+    assert sum(row["amount"] for row in report["transactions"]["salaries"]) == 1383.98
+
+
+def test_financial_report_diesel_costs_follow_period_expenses_and_vehicle():
+    report = server.build_financial_report(
+        date(2026, 11, 1),
+        date(2026, 11, 30),
+        "expenses_only",
+        invoices=[],
+        payments=[],
+        linked_payments=[],
+        expenses=[
+            {
+                "id": "diesel-1", "date": "2026-11-03", "category": "Diesel",
+                "amount": 125, "vehicle_id": "truck-1",
+            },
+            {
+                "id": "diesel-2", "date": "2026-11-04", "category": "Fuel",
+                "amount": 50, "vehicle_id": "truck-1",
+            },
+            {
+                "id": "diesel-3", "date": "2026-11-05", "category": "Diesel",
+                "amount": 25, "voided": True,
+            },
+        ],
+        vehicle_records=[],
+        buyings=[],
+        grvs=[],
+        invoice_movements=[],
+        vehicles_by_id={"truck-1": "Hino 500"},
+    )
+
+    assert report["diesel_usage"] == [{
+        "vehicle_id": "truck-1", "vehicle": "Hino 500", "amount": 175, "records": 2,
+    }]
+
+
 def test_payment_report_links_payment_to_invoice_outside_period_and_shows_remaining_balance():
     report = server.build_financial_report(
         date(2026, 10, 26),

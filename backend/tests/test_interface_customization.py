@@ -10,18 +10,18 @@ import server
 
 class MemoryCollection:
     def __init__(self):
-        self.document = None
+        self.documents = {}
 
     async def find_one(self, query, projection=None):
-        if self.document and self.document.get("id") == query.get("id"):
-            return deepcopy(self.document)
-        return None
+        return deepcopy(self.documents.get(query.get("id")))
 
     async def update_one(self, query, update, upsert=False):
-        if self.document is None and not upsert:
+        record_id = query.get("id")
+        if record_id not in self.documents and not upsert:
             return
-        self.document = deepcopy(self.document or {})
-        self.document.update(deepcopy(update.get("$set", {})))
+        document = deepcopy(self.documents.get(record_id) or {})
+        document.update(deepcopy(update.get("$set", {})))
+        self.documents[record_id] = document
 
 
 def _install_interface_settings(monkeypatch):
@@ -91,11 +91,131 @@ def test_global_owner_can_persist_menu_labels_visibility_and_order(monkeypatch):
     ]
 
 
+def test_interface_settings_reads_ignore_legacy_document_fields(monkeypatch):
+    collection = _install_interface_settings(monkeypatch)
+    collection.documents["superiqfoam"] = {
+        "id": "superiqfoam",
+        "section_labels": {"customers": "Clients"},
+        "legacy_customization": {"old_field": True},
+    }
+
+    config = asyncio.run(server.get_interface_settings({
+        "_active_company_id": "superiqfoam",
+    }))
+
+    assert config["section_labels"] == {"customers": "Clients"}
+    assert "legacy_customization" not in config
+
+
+def test_interface_settings_writes_still_reject_unsupported_fields(monkeypatch):
+    _install_interface_settings(monkeypatch)
+    monkeypatch.setenv("ADMIN_EMAIL", "global-owner@example.test")
+    owner = {
+        "role": "owner",
+        "email": "global-owner@example.test",
+        "is_worker": False,
+    }
+
+    with pytest.raises(HTTPException) as invalid:
+        asyncio.run(server.update_interface_settings(
+            {"legacy_customization": {"old_field": True}},
+            owner,
+        ))
+
+    assert invalid.value.status_code == 422
+
+
+def test_global_owner_saves_independent_interface_settings_per_company(monkeypatch):
+    collection = _install_interface_settings(monkeypatch)
+    monkeypatch.setenv("ADMIN_EMAIL", "global-owner@example.test")
+    owner = {
+        "role": "owner",
+        "email": "global-owner@example.test",
+        "_active_company_id": "superiqfoam",
+        "is_worker": False,
+    }
+
+    asyncio.run(server.update_interface_settings(
+        {"group_labels": {"sales": "Sales at SuperIQ"}}, owner,
+    ))
+    asyncio.run(server.update_interface_settings(
+        {"group_labels": {"sales": "Sales at Manufacturing"}},
+        owner,
+        company_id="iqfoam-manufactoring",
+    ))
+
+    superiq = asyncio.run(server.get_interface_settings(owner, company_id="superiqfoam"))
+    manufacturing = asyncio.run(server.get_interface_settings(
+        owner, company_id="iqfoam-manufactoring",
+    ))
+
+    assert superiq["group_labels"]["sales"] == "Sales at SuperIQ"
+    assert manufacturing["group_labels"]["sales"] == "Sales at Manufacturing"
+    assert set(collection.documents) == {"superiqfoam", "iqfoam-manufactoring"}
+
+
+def test_company_user_cannot_read_another_profiles_interface_settings(monkeypatch):
+    _install_interface_settings(monkeypatch)
+    user = {
+        "role": "user",
+        "_active_role": "user",
+        "_active_company_id": "iqfoam-manufactoring",
+        "email": "company-user@example.test",
+    }
+
+    with pytest.raises(HTTPException) as denied:
+        asyncio.run(server.get_interface_settings(
+            user, company_id="superiqfoam",
+        ))
+
+    assert denied.value.status_code == 403
+
+
+def test_custom_menu_sections_link_only_to_existing_pages():
+    config = server.normalize_interface_config({
+        "custom_sections": [{
+            "id": "finance-shortcut",
+            "label": "Fast expenses",
+            "path": "/expenses",
+        }],
+    })
+
+    assert config["custom_sections"] == [{
+        "id": "finance-shortcut",
+        "label": "Fast expenses",
+        "path": "/expenses",
+        "access_section": "expenses",
+    }]
+
+
+def test_custom_menu_destinations_are_limited_to_the_selected_company_profile():
+    section = {
+        "id": "production-shortcut",
+        "label": "Production",
+        "path": "/production",
+    }
+
+    with pytest.raises(HTTPException) as invalid:
+        server.normalize_interface_config(
+            {"custom_sections": [section]},
+            company_id=server.WHOLESALERS_COMPANY_ID,
+        )
+
+    assert invalid.value.status_code == 422
+    config = server.normalize_interface_config(
+        {"custom_sections": [section]},
+        company_id=server.DEFAULT_COMPANY_ID,
+    )
+    assert config["custom_sections"][0]["path"] == "/production"
+
+
 @pytest.mark.parametrize("body", [
     {"hidden_sections": ["not-a-real-section"]},
     {"group_order": ["not-a-real-group"]},
     {"section_order": {"sales": ["grv"]}},
     {"section_labels": {"grv": "x" * 49}},
+    {"custom_sections": [{"id": "bad-link", "label": "Bad", "path": "https://example.com"}]},
+    {"custom_sections": [{"id": "bad-access", "label": "Bad", "path": "/expenses", "access_section": "settings"}]},
 ])
 def test_interface_settings_reject_unknown_or_invalid_menu_changes(body):
     with pytest.raises(HTTPException) as invalid:

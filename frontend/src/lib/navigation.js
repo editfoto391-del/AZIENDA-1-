@@ -1,7 +1,7 @@
 import {
   LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
   ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart,
-  Building2, Handshake, Settings as Cog, ClipboardCheck, SlidersHorizontal,
+  Building2, Handshake, Settings as Cog, ClipboardCheck,
   Warehouse, FlaskConical, Boxes,
 } from "lucide-react";
 
@@ -51,6 +51,17 @@ export const NAV_GROUPS = [
   ] },
   { id: "administration", label: "Administration", items: [
     { to: "/settings", label: "Settings", icon: Cog, section: "settings" },
-    { to: "/interface-customization", label: "Interface customization", icon: SlidersHorizontal, section: "interface-customization", globalOwnerOnly: true },
   ] },
 ];
+
+export function navigationLinksForCompany(companyId) {
+  const links = NAV_GROUPS.flatMap((group) => {
+    if ((group.companyId && group.companyId !== companyId)
+      || (group.companyIds && !group.companyIds.includes(companyId))) return [];
+    return group.items
+      .filter((item) => !item.globalOwnerOnly)
+      .filter((item) => !item.companyId || item.companyId === companyId)
+      .map((item) => ({ path: item.to, label: item.label, section: item.section }));
+  });
+  return [...new Map(links.map((link) => [link.path, link])).values()];
+}

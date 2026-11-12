@@ -8,7 +8,7 @@ import { Banknote, Eye, Plus, TrendingUp, TrendingDown, Wallet, Trash2, Pencil }
 
 const CATS = ["Factory Expenses", "General", "Materials", "Diesel", "Salaries", "Rent", "Vehicle", "Maintenance", "Other"];
 const SUPERIQFOAM_CATS = ["Bilal", "Yassine", "Bilal and Yassine", "Personal Car", "Home"];
-const blank = () => ({ description: "", amount: "", date: today(), category: "General", payment_method: "Cash", reference: "", vehicle_id: "", notes: "" });
+const blank = () => ({ description: "", amount: "", date: today(), category: "General", payment_method: "Cash", reference: "", vehicle_id: "", destination_city: "", notes: "" });
 
 function Stat({ label, value, icon: Icon, tone, testid }) {
   return (
@@ -46,12 +46,14 @@ export default function Expenses() {
   const isSuperIqFoam = user?.company_id === "superiqfoam";
   const categories = isSuperIqFoam ? [...CATS, ...SUPERIQFOAM_CATS] : CATS;
   const [list, setList] = useState(null);
+  const [registeredCities, setRegisteredCities] = useState([]);
   const [report, setReport] = useState(null);
   const [costs, setCosts] = useState(null);
   const [vehicles, setVehicles] = useState([]);
   const [modal, setModal] = useState(null);
   const [viewExpense, setViewExpense] = useState(null);
   const [cat, setCat] = useState("");
+  const [destinationCity, setDestinationCity] = useState("");
   const [month, setMonth] = useState("");
   const [dateFilter, setDateFilter] = useState("");
   const [q, setQ] = useState("");
@@ -61,16 +63,40 @@ export default function Expenses() {
 
   const load = () => {
     api.get("/expenses").then(setList).catch((e) => { toast.error(apiError(e)); setList([]); });
+    if (isSuperIqFoam) {
+      api.get("/expenses", { include_voided: true }).then((expenses) => {
+        const cities = new Map();
+        expenses.forEach((expense) => {
+          const city = expense.destination_city?.trim();
+          if (city && !cities.has(city.toLocaleLowerCase())) cities.set(city.toLocaleLowerCase(), city);
+        });
+        setRegisteredCities([...cities.values()].sort((a, b) => a.localeCompare(b)));
+      }).catch((e) => toast.error(apiError(e)));
+    }
     api.get("/reports/profit").then(setReport); api.get("/reports/costs").then(setCosts);
   };
   useEffect(() => { load(); api.get("/vehicles").then(setVehicles); }, []);
 
   const filtered = useMemo(() => (list || []).filter((e) => (
     (!cat || e.category === cat)
+    && (!destinationCity || e.destination_city?.trim().toLocaleLowerCase() === destinationCity.toLocaleLowerCase())
     && (!month || (e.date || "").startsWith(month))
     && (!dateFilter || (e.date || "").startsWith(dateFilter))
-    && (!q || `${e.description} ${e.reference || ""}`.toLowerCase().includes(q.toLowerCase()))
-  )), [list, cat, month, dateFilter, q]);
+    && (!q || `${e.description} ${e.reference || ""} ${e.destination_city || ""}`.toLowerCase().includes(q.toLowerCase()))
+  )), [list, cat, destinationCity, month, dateFilter, q]);
+  const dieselExpensesByCity = useMemo(() => {
+    const groups = new Map();
+    (list || []).forEach((expense) => {
+      const city = expense.destination_city?.trim();
+      if (expense.category !== "Diesel" || !expense.vehicle_id || !city) return;
+      const key = city.toLocaleLowerCase();
+      const group = groups.get(key) || { city, total: 0, expenses: [] };
+      group.total += Number(expense.amount) || 0;
+      group.expenses.push(expense);
+      groups.set(key, group);
+    });
+    return [...groups.values()].sort((a, b) => a.city.localeCompare(b.city));
+  }, [list]);
   const filteredTotal = filtered.reduce((s, e) => s + (e.amount || 0), 0);
 
   const save = async () => {
@@ -185,6 +211,7 @@ export default function Expenses() {
       <Card className="overflow-hidden">
         <div className="flex flex-wrap items-end gap-3 p-4 border-b border-border">
           <div className="w-44"><Select label="Category" value={cat} onChange={(e) => setCat(e.target.value)} data-testid="expense-filter-category"><option value="">All</option>{categories.map((c) => <option key={c}>{c}</option>)}</Select></div>
+          {isSuperIqFoam && <div className="w-44"><Select label="Destination city" value={destinationCity} onChange={(e) => setDestinationCity(e.target.value)} data-testid="expense-filter-city"><option value="">All cities</option>{registeredCities.map((city) => <option key={city.toLocaleLowerCase()} value={city}>{city}</option>)}</Select></div>}
           <div className="w-44"><Input label="Date" type="date" value={dateFilter} onChange={(e) => { setDateFilter(e.target.value); if (e.target.value) setMonth(""); }} data-testid="expense-filter-date" /></div>
           <div className="w-44"><Input label="Month" type="month" value={month} onChange={(e) => { setMonth(e.target.value); if (e.target.value) setDateFilter(""); }} data-testid="expense-filter-month" /></div>
           <div className="w-56"><Input label="Search" placeholder="Description or reference" value={q} onChange={(e) => setQ(e.target.value)} data-testid="expense-search-input" /></div>
@@ -194,13 +221,14 @@ export default function Expenses() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm min-w-[640px]">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                <th className="px-4 py-3 font-semibold">Date</th><th className="px-4 font-semibold">Description</th><th className="px-4 font-semibold">Category</th><th className="px-4 font-semibold text-right">Amount</th><th className="px-4 font-semibold text-right">Actions</th>
+                <th className="px-4 py-3 font-semibold">Date</th><th className="px-4 font-semibold">Description</th><th className="px-4 font-semibold">Category</th>{isSuperIqFoam && <th className="px-4 font-semibold">Destination city</th>}<th className="px-4 font-semibold text-right">Amount</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{filtered.map((e) => (
                 <tr key={e.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`expense-row-${e.id}`}>
                   <td className="px-4 py-3 text-slate-500">{fmtDate(e.date)}</td>
                   <td className="px-4 font-semibold text-slate-800">{e.description}{e.source_key && <span className="ml-2 text-[10px] text-blue-600 font-semibold">{e.source_key.startsWith("monthly_business_purchase:") ? "MONTHLY PURCHASE" : "FLEET PART"}</span>}</td>
                   <td className="px-4"><Badge>{e.category}</Badge></td>
+                  {isSuperIqFoam && <td className="px-4 text-slate-600">{e.destination_city || "—"}</td>}
                   <td className="px-4 text-right font-mono text-slate-800">{fmtMoney(e.amount)}</td>
                   <td className="px-4 text-right whitespace-nowrap">
                     <button onClick={() => setViewExpense(e)} className="text-slate-400 hover:text-primary mr-3" title="View expense" aria-label={`View ${e.description}`} data-testid={`view-expense-${e.id}`}><Eye size={15} /></button>
@@ -228,6 +256,7 @@ export default function Expenses() {
             ["Payment Method", viewExpense.payment_method],
             ["Reference", viewExpense.reference],
             ["Vehicle", vehicles.find((vehicle) => vehicle.id === viewExpense.vehicle_id)?.name],
+            ["Destination city", viewExpense.destination_city],
             ["Notes", viewExpense.notes],
             ["Source", viewExpense.source_key?.startsWith("monthly_business_purchase:") ? "Automatic monthly purchase" : viewExpense.source_key ? "Fleet part purchase" : ""],
             ["Source Reference", viewExpense.source_key],
@@ -248,7 +277,7 @@ export default function Expenses() {
             <Input label="Amount (R) *" type="number" step="0.01" value={modal.amount} onChange={(e) => setModal({ ...modal, amount: e.target.value })} data-testid="expense-amount-input" />
             <Input label="Date" type="date" value={modal.date} onChange={(e) => setModal({ ...modal, date: e.target.value })} data-testid="expense-date-input" />
           </div>
-          <Select label="Category" value={modal.category} onChange={(e) => setModal({ ...modal, category: e.target.value })} data-testid="expense-category-select">
+          <Select label="Category" value={modal.category} onChange={(e) => setModal({ ...modal, category: e.target.value, ...(e.target.value !== "Diesel" ? { destination_city: "" } : {}) })} data-testid="expense-category-select">
             {categories.map((c) => <option key={c}>{c}</option>)}
           </Select>
           <div className="grid grid-cols-2 gap-3">
@@ -257,9 +286,25 @@ export default function Expenses() {
             </Select>
             <Input label="Reference" value={modal.reference || ""} onChange={(e) => setModal({ ...modal, reference: e.target.value })} data-testid="expense-reference-input" />
           </div>
-          <Select label="Related Vehicle (optional)" value={modal.vehicle_id || ""} onChange={(e) => setModal({ ...modal, vehicle_id: e.target.value })} data-testid="expense-vehicle-select">
+          <Select label="Related Vehicle (optional)" value={modal.vehicle_id || ""} onChange={(e) => setModal({ ...modal, vehicle_id: e.target.value, ...(!e.target.value ? { destination_city: "" } : {}) })} data-testid="expense-vehicle-select">
             <option value="">None</option>{vehicles.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
           </Select>
+          {isSuperIqFoam && modal.category === "Diesel" && modal.vehicle_id && (
+            <div>
+              <Input
+                label="Destination city (optional)"
+                value={modal.destination_city || ""}
+                onChange={(e) => setModal({ ...modal, destination_city: e.target.value })}
+                list="expense-destination-cities"
+                maxLength={100}
+                placeholder="Select or enter a city"
+                data-testid="expense-destination-city"
+              />
+              <datalist id="expense-destination-cities">
+                {dieselExpensesByCity.map((group) => <option key={group.city.toLocaleLowerCase()} value={group.city} />)}
+              </datalist>
+            </div>
+          )}
           <p className="text-[11px] text-slate-400">Repairs & maintenance for a vehicle are recorded in Fleet — don't enter them here too.</p>
           <Input label="Notes" value={modal.notes || ""} onChange={(e) => setModal({ ...modal, notes: e.target.value })} data-testid="expense-notes-input" />
           <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setModal(null)}>Cancel</Btn><Btn disabled={busy} onClick={save} data-testid="save-expense-btn">Save Expense</Btn></div>

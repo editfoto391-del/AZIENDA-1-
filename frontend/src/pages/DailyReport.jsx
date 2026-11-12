@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { today, TZ } from "@/lib/format";
 import { downloadDailyReportPdf } from "@/lib/dailyReportPdf";
+import { downloadFinancialReportPdf } from "@/lib/financialReportPdf";
 import { companyDailyReportName, companyProfileName } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Btn } from "@/components/common";
@@ -187,7 +188,7 @@ function ReportTables({ report }) {
 const FINANCIAL_SECTIONS = [
   ["invoices", "Invoices", "Invoices by issue date"],
   ["payments", "Payments received", "Collections by payment date"],
-  ["pending_payments", "Pending payments", "Outstanding balances on invoices in this period"],
+  ["pending_payments", "Outstanding balances", "Total outstanding balance across all issued invoices"],
   ["cogs", "Cost of goods sold", "Verified historical batch cost"],
   ["historical_cost_unavailable", "Historical cost unavailable", "Sales not linked to verified batch costs"],
   ["expenses", "Expenses", "Recorded expenses and completed fleet costs"],
@@ -199,7 +200,7 @@ const FINANCIAL_SECTIONS = [
 const MONEY_LABELS = [
   ["total_invoices", "Total Invoiced · invoices issued", "invoice_count", "invoices"],
   ["payments_received", "Payments Received · revenue", "payment_count", "payments"],
-  ["pending_payments", "Pending payments", null, "pending_payments"],
+  ["pending_payments", "Outstanding balances", null, "pending_payments"],
   ["sales_revenue", "Invoiced sales", null, "invoices"],
   ["cogs", "COGS", null, "cogs"],
   ["gross_profit", "Gross profit", null, "profit_reconciliation"],
@@ -243,6 +244,7 @@ function InvoicePaymentsDetails({ invoice }) {
 function FinancialReport({ report, mode, onModeChange, category, onCategoryChange, companies, selectedCompany, onCompanyChange, loading }) {
   const [openedSection, setOpenedSection] = useState("");
   const [printing, setPrinting] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const summary = report?.summary || {};
   const transactions = report?.transactions || {};
   const sectionFilter = category.startsWith("section:") ? category.slice("section:".length) : "";
@@ -270,6 +272,17 @@ function FinancialReport({ report, mode, onModeChange, category, onCategoryChang
   const printReport = () => {
     setPrinting(true);
     window.setTimeout(() => window.print(), 100);
+  };
+  const downloadReport = async () => {
+    if (!report || downloadingPdf) return;
+    setDownloadingPdf(true);
+    try {
+      await downloadFinancialReportPdf(report);
+    } catch (pdfError) {
+      toast.error(apiError(pdfError));
+    } finally {
+      setDownloadingPdf(false);
+    }
   };
   useEffect(() => {
     const finishPrinting = () => setPrinting(false);
@@ -305,12 +318,12 @@ function FinancialReport({ report, mode, onModeChange, category, onCategoryChang
           <button type="button" onClick={printReport} className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50" data-testid="financial-report-print">
             <Printer size={16} /> Print
           </button>
-          <button type="button" onClick={printReport} className="inline-flex items-center gap-2 rounded-md bg-slate-800 px-3 py-2.5 text-sm font-semibold text-white hover:bg-slate-700" data-testid="financial-report-pdf">
-            <Download size={16} /> Export PDF
+          <button type="button" onClick={downloadReport} disabled={!report || loading || downloadingPdf} className="inline-flex items-center gap-2 rounded-md bg-slate-800 px-3 py-2.5 text-sm font-semibold text-white hover:bg-slate-700 disabled:cursor-wait disabled:opacity-60" data-testid="financial-report-pdf">
+            <Download size={16} /> {downloadingPdf ? "Preparing PDF..." : "Download PDF"}
           </button>
         </div>
       </div>
-      <p className="text-xs text-slate-500">Export PDF opens the print dialog; choose “Save as PDF”. The selected company is isolated automatically.</p>
+      <p className="text-xs text-slate-500">Downloads a formatted financial summary for the selected company and period. Use Print to open the print dialog.</p>
 
       {report && (
         <div className="financial-report-paper space-y-5">
@@ -380,12 +393,18 @@ function FinancialReport({ report, mode, onModeChange, category, onCategoryChang
                           <th className="px-3 py-2 text-right">Paid</th><th className="px-3 py-2 text-right">BLN (Balance Remaining)</th>
                           <th className="px-3 py-2">Invoice preview</th>
                         </tr>
+                      ) : key === "pending_payments" ? (
+                        <tr>
+                          <th className="px-3 py-2">Invoice date</th><th className="px-3 py-2">Client</th>
+                          <th className="px-3 py-2">Invoice no.</th><th className="px-3 py-2">Due date</th>
+                          <th className="px-3 py-2 text-right">Outstanding balance</th><th className="px-3 py-2">Invoice</th>
+                        </tr>
                       ) : (
                         <tr><th className="px-3 py-2">Date</th><th className="px-3 py-2">Description / party</th><th className="px-3 py-2">Category / status</th><th className="px-3 py-2">Reference</th><th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2">Record</th></tr>
                       )}
                     </thead>
                     <tbody>
-                      {visibleRows.length === 0 ? <tr><td colSpan="7" className="px-3 py-5 text-center text-slate-400">No records in this period.</td></tr> : visibleRows.map((row, index) => {
+                      {visibleRows.length === 0 ? <tr><td colSpan={key === "pending_payments" ? 6 : 7} className="px-3 py-5 text-center text-slate-400">{key === "pending_payments" ? "No outstanding balances." : "No records in this period."}</td></tr> : visibleRows.map((row, index) => {
                         if (key === "invoices") {
                           return (
                             <tr className="border-b border-slate-100 align-top" key={row.id || `${key}-${index}`}>
@@ -414,6 +433,22 @@ function FinancialReport({ report, mode, onModeChange, category, onCategoryChang
                               <td className="px-3 py-2">
                                 {row.invoice_id
                                   ? <Link className="text-xs font-semibold text-sky-700 hover:underline" to={`/invoices/${row.invoice_id}`}>Preview invoice</Link>
+                                  : <span className="text-xs text-slate-500">Invoice link unavailable</span>}
+                              </td>
+                            </tr>
+                          );
+                        }
+                        if (key === "pending_payments") {
+                          return (
+                            <tr className="border-b border-slate-100 align-top" key={row.id || `${key}-${index}`}>
+                              <td className="whitespace-nowrap px-3 py-2">{String(row.date || "").slice(0, 10) || "—"}</td>
+                              <td className="px-3 py-2">{row.customer_name || "—"}</td>
+                              <td className="px-3 py-2 font-semibold">{row.number || "—"}</td>
+                              <td className="whitespace-nowrap px-3 py-2">{String(row.due_date || "").slice(0, 10) || "—"}</td>
+                              <td className="whitespace-nowrap px-3 py-2 text-right font-mono font-semibold">{formatMoney(row.amount)}</td>
+                              <td className="px-3 py-2">
+                                {row.id
+                                  ? <Link className="text-xs font-semibold text-sky-700 hover:underline" to={`/invoices/${row.id}`}>Preview invoice</Link>
                                   : <span className="text-xs text-slate-500">Invoice link unavailable</span>}
                               </td>
                             </tr>

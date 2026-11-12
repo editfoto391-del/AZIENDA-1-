@@ -22,11 +22,14 @@ const TABS = [
 function AccessTab({ users, companies, loading, currentUserId, isPrimaryOwner, onRoleChange, onStatusChange, onRemove, onCreate, onMakeOwner }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [showWorkers, setShowWorkers] = useState(false);
   const [draft, setDraft] = useState({ username: "", name: "", email: "", password: "", company_ids: [] });
   const [ownerTarget, setOwnerTarget] = useState(null);
   const [ownerPassword, setOwnerPassword] = useState("");
   const [ownerCompanyId, setOwnerCompanyId] = useState("");
   const [assigningOwner, setAssigningOwner] = useState(false);
+  const workerCount = users.filter((account) => account.is_worker).length;
+  const visibleUsers = users.filter((account) => showWorkers || !account.is_worker);
   const adminCounts = Object.fromEntries(companies.map((company) => [company.id,
     users.filter((account) => !account.is_owner && account.active !== false && account.company_roles?.[company.id] === "admin").length]));
   const companyName = (id) => companies.find((company) => company.id === id)?.name || id;
@@ -62,27 +65,40 @@ function AccessTab({ users, companies, loading, currentUserId, isPrimaryOwner, o
       <div className="flex items-start justify-between gap-4">
         <div>
           <h3 className="font-bold text-slate-800 font-display">Users and company access</h3>
-          <p className="text-sm text-slate-500 mt-1">Assign each account to companies and manage its role independently in each one.</p>
+          <p className="text-sm text-slate-500 mt-1">
+            {companies.length} company profiles. {isPrimaryOwner
+              ? "Assign accounts and review their last online status in each profile."
+              : "Assign accounts and manage their company access."}
+          </p>
         </div>
-        <Btn onClick={() => setCreateOpen(true)} data-testid="create-company-user"><UserPlus size={16} /> Add user</Btn>
+        <div className="flex items-center gap-3">
+          {workerCount > 0 && <label className="flex items-center gap-2 text-sm text-slate-600">
+            <input type="checkbox" checked={showWorkers} onChange={(event) => setShowWorkers(event.target.checked)} data-testid="show-all-workers" />
+            Show all workers ({workerCount})
+          </label>}
+          <Btn onClick={() => setCreateOpen(true)} data-testid="create-company-user"><UserPlus size={16} /> Add user</Btn>
+        </div>
       </div>
-      {loading ? <p className="text-sm text-slate-400 py-4">Loading accounts...</p> : users.length === 0 ? <p className="text-sm text-slate-400 py-4">No accounts found.</p> : (
+      {loading ? <p className="text-sm text-slate-400 py-4">Loading accounts...</p> : users.length === 0 ? <p className="text-sm text-slate-400 py-4">No accounts found.</p> : visibleUsers.length === 0 ? <p className="text-sm text-slate-400 py-4">No non-worker accounts to display. Enable “Show all workers” to view workers.</p> : (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[980px] text-sm">
             <thead><tr className="border-b border-border text-left text-xs text-slate-400">
               <th className="py-2 font-semibold">Account</th>{companies.map((company) => <th key={company.id} className="min-w-44 font-semibold">{company.name}</th>)}
-              <th className="font-semibold">Presence</th><th className="font-semibold">Current company · Last login</th><th />
+              {isPrimaryOwner && <><th className="font-semibold">Presence</th><th className="font-semibold">Current company · Last online</th></>}<th />
             </tr></thead>
-            <tbody>{users.map((account) => (
+            <tbody>{visibleUsers.map((account) => (
               <tr key={account.id} className="border-b border-border/60 align-top" data-testid={`access-user-${account.id}`}>
                 <td className="py-3 pr-3"><p className="font-semibold text-slate-700">{account.name || account.username || "-"}</p><p className="text-xs text-slate-500">{account.username || account.email}</p>{account.is_owner && <Badge cls="mt-1 bg-amber-50 text-amber-800 border-amber-200">Global owner</Badge>}</td>
                 {companies.map((company) => {
                   const role = account.is_owner ? "owner" : account.company_roles?.[company.id] || "none";
                   const count = adminCounts[company.id] || 0;
+                  const lastAccess = account.last_access_by_company?.[company.id];
                   return <td key={company.id} className="py-3 pr-3">
                     {role === "owner" ? <Badge cls="bg-amber-50 text-amber-800 border-amber-200">Owner</Badge> :
                       account.is_worker ? <Badge cls="bg-slate-100 text-slate-600 border-slate-200">{role === "none" ? "No access" : "Worker"}</Badge> :
-                      <>
+                    account.is_profile_account && role === "admin" ? <Badge cls="bg-blue-50 text-blue-800 border-blue-200">Profile admin</Badge> :
+                    account.is_profile_account ? <Badge cls="bg-slate-100 text-slate-600 border-slate-200">No access</Badge> :
+                    <>
                         <select aria-label={`${company.name} role for ${account.username}`} value={role}
                           onChange={(event) => onRoleChange(account, company.id, event.target.value)}
                           data-testid={`access-role-${account.id}-${company.id}`}
@@ -92,21 +108,24 @@ function AccessTab({ users, companies, loading, currentUserId, isPrimaryOwner, o
                         </select>
                         {count >= 3 && role !== "admin" && <p className="mt-1 text-[10px] text-amber-800">Maximum 3 admins</p>}
                       </>}
+                    {isPrimaryOwner && <p className="mt-1 text-[10px] text-slate-500" data-testid={`access-last-seen-${account.id}-${company.id}`}>
+                      Last online: {lastAccess ? fmtDateTime(lastAccess) : "No login"}
+                    </p>}
                   </td>;
                 })}
-                <td className="py-3 pr-3">
+                {isPrimaryOwner && <><td className="py-3 pr-3">
                   <Badge cls={account.active === false ? "bg-slate-100 text-slate-600 border-slate-200" : account.online ? "bg-emerald-50 text-emerald-800 border-emerald-200" : "bg-slate-100 text-slate-600 border-slate-200"}>
                     {account.active === false ? "Disabled" : account.online ? "Online" : "Offline"}
                   </Badge>
-                  {!account.is_owner && <button type="button" onClick={() => onStatusChange(account, account.active === false)} aria-label={account.active === false ? `Enable ${account.username}` : `Disable ${account.username}`}
+                  {!account.is_owner && !account.is_profile_account && <button type="button" onClick={() => onStatusChange(account, account.active === false)} aria-label={account.active === false ? `Enable ${account.username}` : `Disable ${account.username}`}
                     className="ml-2 inline-flex align-middle text-slate-500 hover:text-primary" data-testid={`toggle-user-${account.id}`}>
                     {account.active === false ? <CirclePlay size={17} /> : <CirclePause size={17} />}
                   </button>}
                 </td>
-                <td className="py-3 text-xs text-slate-600">{account.current_company_id ? companyName(account.current_company_id) : "-"}<p className="mt-1 text-slate-400">{account.last_login ? fmtDateTime(account.last_login) : "No login yet"}</p></td>
+                <td className="py-3 text-xs text-slate-600">{account.current_company_id ? companyName(account.current_company_id) : "-"}<p className="mt-1 text-slate-400">{account.last_login ? fmtDateTime(account.last_login) : "No login yet"}</p></td></>}
                 <td className="py-3 text-right whitespace-nowrap">
-                  {isPrimaryOwner && !account.is_owner && !account.is_worker && account.active !== false && <button type="button" onClick={() => { setOwnerTarget(account); setOwnerPassword(""); setOwnerCompanyId(account.company_ids?.[0] || companies[0]?.id || ""); }} title={`Make ${account.username} a company owner`} aria-label={`Make ${account.username} a company owner`} className="rounded p-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-50" data-testid={`make-owner-${account.id}`}>Make company owner</button>}
-                  {!account.is_owner && account.id !== currentUserId && <button type="button" onClick={() => onRemove(account)} title={`Remove ${account.username}`} aria-label={`Remove ${account.username}`} className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" data-testid={`remove-user-${account.id}`}><Trash2 size={16} /></button>}
+                  {isPrimaryOwner && !account.is_owner && !account.is_worker && !account.is_profile_account && account.active !== false && <button type="button" onClick={() => { setOwnerTarget(account); setOwnerPassword(""); setOwnerCompanyId(account.company_ids?.[0] || companies[0]?.id || ""); }} title={`Make ${account.username} a company owner`} aria-label={`Make ${account.username} a company owner`} className="rounded p-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-50" data-testid={`make-owner-${account.id}`}>Make company owner</button>}
+                  {!account.is_owner && !account.is_profile_account && account.id !== currentUserId && <button type="button" onClick={() => onRemove(account)} title={`Remove ${account.username}`} aria-label={`Remove ${account.username}`} className="rounded p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" data-testid={`remove-user-${account.id}`}><Trash2 size={16} /></button>}
                 </td>
               </tr>))}</tbody>
           </table>
@@ -231,7 +250,10 @@ export default function Settings() {
     if (tab !== "access" || !user?.is_owner) return;
     setAccessLoading(true);
     Promise.all([api.get("/access/users"), api.get("/companies/profiles")])
-      .then(([accounts, profiles]) => { setAccessUsers(accounts); setCompanies(profiles); })
+      .then(([accounts, profiles]) => {
+        setAccessUsers([...new Map(accounts.map((account) => [account.id, account])).values()]);
+        setCompanies([...new Map(profiles.map((profile) => [profile.id, profile])).values()]);
+      })
       .catch((e) => toast.error(apiError(e))).finally(() => setAccessLoading(false));
   }, [tab, user?.is_owner]);
   useEffect(() => {

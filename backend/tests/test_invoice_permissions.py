@@ -99,6 +99,46 @@ def test_archived_invoice_list_is_owner_only():
     assert error.value.status_code == 403
 
 
+def test_admin_can_delete_invoice_by_archiving_it(monkeypatch):
+    class Invoices:
+        async def find_one(self, *_args, **_kwargs):
+            return {"id": "invoice-1", "archived": False}
+
+    updates = []
+
+    async def update_doc(collection, invoice_id, fields):
+        updates.append((collection, invoice_id, fields))
+
+    async def log_audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(server, "db", SimpleNamespace(invoices=Invoices()))
+    monkeypatch.setattr(server, "update_doc", update_doc)
+    monkeypatch.setattr(server, "log_audit", log_audit)
+
+    result = asyncio.run(server.delete_invoice(
+        "invoice-1",
+        user={"_active_role": "admin", "id": "admin-1"},
+    ))
+
+    assert result == {"ok": True, "archived": True, "stock_restored": False}
+    assert len(updates) == 1
+    collection, invoice_id, fields = updates[0]
+    assert (collection, invoice_id) == ("invoices", "invoice-1")
+    assert fields["archived"] is True
+    assert fields["archived_at"]
+    assert fields["archived_by"] == "admin-1"
+
+
+def test_admin_cannot_permanently_delete_archived_invoice():
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(server.permanently_delete_invoice(
+            "invoice-1",
+            user={"_active_role": "admin"},
+        ))
+    assert error.value.status_code == 403
+
+
 @pytest.mark.parametrize("user", [
     {"_active_role": "admin"},
     {"_active_role": "owner", "is_worker": True},
@@ -124,7 +164,7 @@ def test_non_owner_cannot_open_an_archived_invoice(monkeypatch):
     assert error.value.status_code == 404
 
 
-def test_bulk_permanent_invoice_delete_preserves_payments(monkeypatch):
+def test_bulk_permanent_invoice_delete_can_preserve_payment_history(monkeypatch):
     class Collection:
         def __init__(self, documents=()):
             self.documents = list(documents)
@@ -168,17 +208,88 @@ def test_bulk_permanent_invoice_delete_preserves_payments(monkeypatch):
         audits.append((args, kwargs))
 
     monkeypatch.setattr(server, "log_audit", log_audit)
-    with pytest.raises(HTTPException) as error:
-        asyncio.run(server.bulk_permanently_delete_invoices(
-            server.BulkPermanentDeleteIn(ids=["archived-1", "archived-2", "archived-1"]),
-            {"_active_role": "owner"},
-        ))
+    result = asyncio.run(server.bulk_permanently_delete_invoices(
+        server.BulkPermanentDeleteIn(ids=["archived-1", "archived-2", "archived-1"]),
+        {"_active_role": "owner"},
+    ))
 
-    assert error.value.status_code == 409
-    assert len(invoices.documents) == 2
+    assert result == {"deleted": 2, "payments_reversed": 0}
+    assert invoices.documents == []
     assert len(payments.documents) == 2
-    assert len(share_links.documents) == 2
-    assert audits == []
+    assert share_links.documents == []
+    assert [entry[0][2] for entry in audits] == ["permanently_deleted", "permanently_deleted"]
+
+
+def test_bulk_permanent_invoice_delete_can_reverse_payment_history(monkeypatch):
+    class Cursor:
+        def __init__(self, documents):
+            self.documents = documents
+
+        async def to_list(self, _length):
+            return self.documents
+
+    class Collection:
+        def __init__(self, documents=()):
+            self.documents = list(documents)
+
+        async def find_one(self, query, _projection=None):
+            return next((item.copy() for item in self.documents if item["id"] == query["id"]), None)
+
+        def find(self, query, _projection=None):
+            invoice_filter = query["invoice_id"]
+            invoice_ids = invoice_filter["$in"] if isinstance(invoice_filter, dict) else [invoice_filter]
+            return Cursor([
+                item.copy() for item in self.documents
+                if item.get("invoice_id") in invoice_ids
+                and item.get("reversed") is not True
+            ])
+
+        async def find_one_and_update(self, query, update, **_kwargs):
+            payment = next((item for item in self.documents if item["id"] == query["id"]), None)
+            if not payment or payment.get("reversed") is True:
+                return None
+            payment.update(update["$set"])
+            return payment.copy()
+
+        async def delete_one(self, query):
+            self.documents = [
+                item for item in self.documents
+                if not all(item.get(key) == value for key, value in query.items())
+            ]
+
+    invoices = Collection([{"id": "archived-1", "archived": True, "number": "1"}])
+    payments = Collection([
+        {"id": "payment-active", "invoice_id": "archived-1", "reversed": False},
+        {"id": "payment-reversed", "invoice_id": "archived-1", "reversed": True},
+    ])
+    share_links = Collection()
+    monkeypatch.setattr(server, "db", SimpleNamespace(
+        invoices=invoices, payments=payments, invoice_share_links=share_links,
+    ))
+    audits = []
+    events = []
+
+    async def log_audit(*args, **kwargs):
+        audits.append((args, kwargs))
+
+    async def emit_workflow_event(*args):
+        events.append(args)
+
+    monkeypatch.setattr(server, "log_audit", log_audit)
+    monkeypatch.setattr(server, "emit_workflow_event", emit_workflow_event)
+    result = asyncio.run(server.bulk_permanently_delete_invoices(
+        server.BulkPermanentDeleteIn(ids=["archived-1"], reverse_payments=True),
+        {"_active_role": "owner", "email": "owner@example.test"},
+    ))
+
+    assert result == {"deleted": 1, "payments_reversed": 1}
+    assert invoices.documents == []
+    assert payments.documents[0]["reversed"] is True
+    assert payments.documents[0]["reversed_reason"]
+    assert payments.documents[0]["reversed_by"] == "owner@example.test"
+    assert payments.documents[1]["reversed"] is True
+    assert events == [("payment.reversed", payments.documents[0])]
+    assert [entry[0][2] for entry in audits] == ["reversed", "permanently_deleted"]
 
 
 def test_bulk_permanent_invoice_delete_validates_all_records_before_deleting(monkeypatch):

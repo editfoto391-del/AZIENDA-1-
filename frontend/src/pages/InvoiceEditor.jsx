@@ -6,7 +6,11 @@ import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, fmtDateTime, today, newKey, STATUS_META, documentFilename } from "@/lib/format";
-import { invoiceCustomerBalanceLabels, usesUnifiedPriceList } from "@/lib/company";
+import {
+  includePreviousInvoiceBalanceByDefault,
+  invoiceCustomerBalanceLabels,
+  usesUnifiedPriceList,
+} from "@/lib/company";
 import { PAYMENT_METHODS } from "@/lib/paymentMethods";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal } from "@/components/common";
@@ -106,7 +110,7 @@ export default function InvoiceEditor({ express = false }) {
     discount: 0, extra_charges: 0, delivery_fee: 0, made_by: "",
     client_number: "", assigned_driver_id: "", assigned_driver_name: "",
     idempotency_key: newKey(), tax_enabled: false, tax_rate: 15, status: "draft",
-    amount_paid: 0, number: null, include_previous_balance: true,
+    amount_paid: 0, number: null, include_previous_balance: includePreviousInvoiceBalanceByDefault(user?.company_id),
   });
   const [payRecords, setPayRecords] = useState([]);
   const [invoiceAudit, setInvoiceAudit] = useState([]);
@@ -609,7 +613,7 @@ export default function InvoiceEditor({ express = false }) {
     order_ids: selectedDeliveryNote ? [selectedDeliveryNote] : [],
     cod_amount_due: isCod && inv.cod_amount_due !== "" && inv.cod_amount_due != null ? Number(inv.cod_amount_due) : null,
     cod_amount_collected: isCod && inv.cod_amount_collected !== "" && inv.cod_amount_collected != null ? Number(inv.cod_amount_collected) : null,
-    items: inv.items.filter((it) => it.size || it.description).map((it) => {
+    items: inv.items.filter((it) => (it.category && it.size) || it.description).map((it) => {
       const { unitPrice } = resolveInvoiceLineForIssue(it, inv.zone, unifiedPriceList, prices);
       return {
         qty: Number(it.qty) || 0, category: it.category, size: it.size, description: it.description,
@@ -630,8 +634,13 @@ export default function InvoiceEditor({ express = false }) {
     if (!id && !inv.made_by.trim()) { toast.error("Made By is required"); return false; }
     if (Number(inv.delivery_fee || 0) < 0 || !Number.isFinite(Number(inv.delivery_fee || 0))) { toast.error("Delivery Fee must be a valid non-negative amount"); return false; }
     if (inv.assigned_driver_id && !drivers.some((driver) => driver.id === inv.assigned_driver_id)) { toast.error("Select an eligible driver"); return false; }
-    if (!inv.items.some((it) => it.size || it.description)) { toast.error("Add at least one item"); return false; }
-    if (inv.items.some((it) => (Number(it.qty) || 0) <= 0 && (it.size || it.description))) { toast.error("Quantity must be positive"); return false; }
+    const enteredItems = inv.items.filter((item) => item.category?.trim() || item.size?.trim() || item.description?.trim());
+    if (!enteredItems.length) { toast.error("Add at least one item"); return false; }
+    if (enteredItems.some((item) => (Number(item.qty) || 0) <= 0)) { toast.error("Quantity must be positive"); return false; }
+    if (enteredItems.some((item) => (!!item.category?.trim() !== !!item.size?.trim()))) {
+      toast.error("Complete both the product category and size for every invoice line");
+      return false;
+    }
     if (status !== "draft" && hasConfigIssue) { toast.error("Some items require administrator confirmation. Enter a manual price before issuing."); return false; }
     return true;
   };
@@ -968,7 +977,7 @@ export default function InvoiceEditor({ express = false }) {
   );
   const showCustomerBalance = inv.include_previous_balance !== false
     && ((!id && !!inv.customer_id) || (id && inv.customer_balance_before_invoice != null));
-  const totalCustomerBalance = customerBalanceBeforeInvoice + (Number(totals.outstanding) || 0);
+  const totalCustomerBalance = customerBalanceBeforeInvoice;
   const customerBalanceLabels = invoiceCustomerBalanceLabels(settings.company_name);
   const invoiceDeliveryNote = {
     reference: inv.number || "DRAFT",
@@ -1138,45 +1147,46 @@ export default function InvoiceEditor({ express = false }) {
                 <BarcodeScanner onScan={scanInvoiceProduct} disabled={busy} dedupeWindowMs={0} label="Scan product to add it at the current price" />
               </div>}
               <div className="overflow-x-auto -mx-5 px-5">
-                <table className="w-full text-sm min-w-[720px]">
-                  <thead><tr className="text-left text-xs text-slate-400 border-b border-border">
-                    <th className="pb-2 font-semibold w-16">Qty</th><th className="pb-2 font-semibold">Product / Category</th><th className="pb-2 font-semibold">Size / Unit</th><th className="pb-2 font-semibold w-32">Unit Price (R)</th><th className="pb-2 font-semibold text-right w-28">Line Total</th><th className="w-10"></th>
+                <table className="w-full text-sm min-w-[780px]">
+                  <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-border bg-slate-50">
+                    <th className="px-2 pb-2 pt-2 font-semibold w-10">#</th><th className="px-2 pb-2 pt-2 font-semibold w-20">Qty</th><th className="px-2 pb-2 pt-2 font-semibold">Product / Category</th><th className="px-2 pb-2 pt-2 font-semibold">Size / Unit</th><th className="px-2 pb-2 pt-2 font-semibold w-32">Unit Price (R)</th><th className="px-2 pb-2 pt-2 font-semibold text-right w-28">Line Total</th><th className="w-10"></th>
                   </tr></thead>
                   <tbody>{invoiceItems.map((it, idx) => (
-                    <tr key={idx} className="border-b border-border/50" data-testid={`item-row-${idx}`}>
-                      <td className="py-2 pr-2">
-                        <input type="number" min="0" value={it.qty} onChange={(e) => updateItem(idx, { qty: e.target.value })} data-testid={`item-qty-${idx}`}
-                          className="w-16 rounded border border-input px-2 py-1.5 text-sm" />
+                    <tr key={idx} className={`border-b border-border/50 align-middle ${idx % 2 ? "bg-slate-50/70" : "bg-white"}`} data-testid={`item-row-${idx}`}>
+                      <td className="px-2 py-2 text-center text-xs font-semibold text-slate-400">{idx + 1}</td>
+                      <td className="px-2 py-2">
+                        <input type="number" min="1" value={it.qty} onChange={(e) => updateItem(idx, { qty: e.target.value })} data-testid={`item-qty-${idx}`}
+                          className="w-16 rounded-md border border-input bg-white px-2 py-2 text-center text-sm font-medium focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
                       </td>
-                      <td className="pr-2" colSpan={!it.category && it.description ? 2 : 1}>
+                      <td className="px-2 py-2" colSpan={!it.category && it.description ? 2 : 1}>
                         {!it.category && it.description ? (
                           <input value={it.description} onChange={(e) => updateItem(idx, { description: e.target.value })} data-testid={`item-desc-${idx}`}
-                            className="w-full rounded border border-input px-2 py-1.5 text-sm" />
+                            className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
                         ) : (
                         <>
-                        <input list={`invoice-category-options-${idx}`} value={it.category} onChange={(e) => onCatSize(idx, { category: e.target.value, size: "" })} data-testid={`item-cat-${idx}`}
-                          className="w-full rounded border border-input px-2 py-1.5 text-sm min-w-[130px]" />
+                        <input list={`invoice-category-options-${idx}`} value={it.category} placeholder="Select product" onChange={(e) => onCatSize(idx, { category: e.target.value, size: "" })} data-testid={`item-cat-${idx}`}
+                          className="w-full min-w-[130px] rounded-md border border-input bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
                         <datalist id={`invoice-category-options-${idx}`}>{categoriesFor(inv.zone).map((category) => <option key={category} value={category} />)}</datalist>
                         </>)}
                       </td>
-                      {!(!it.category && it.description) && <td className="pr-2">
-                        <input list={`invoice-size-options-${idx}`} value={it.size} onChange={(e) => onCatSize(idx, { size: e.target.value })} data-testid={`item-size-${idx}`}
-                          className="w-full rounded border border-input px-2 py-1.5 text-sm min-w-[110px]" />
+                      {!(!it.category && it.description) && <td className="px-2 py-2">
+                        <input list={`invoice-size-options-${idx}`} value={it.size} placeholder="Select size" onChange={(e) => onCatSize(idx, { size: e.target.value })} data-testid={`item-size-${idx}`}
+                          className="w-full min-w-[110px] rounded-md border border-input bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
                         <datalist id={`invoice-size-options-${idx}`}>{sizesFor(inv.zone, it.category).map((size) => <option key={size} value={size} />)}</datalist>
                       </td>}
-                      <td className="pr-2">
+                      <td className="px-2 py-2">
                         <div className="flex items-center gap-1">
-                          <input type="number" step="0.01" value={it.unit_price}
+                          <input type="number" step="0.01" value={it.unit_price} placeholder="0.00"
                             readOnly={invoiceItemPriceLocked}
                             onChange={(e) => updateItem(idx, { unit_price: e.target.value, price_override: true })} data-testid={`item-price-${idx}`}
-                            className={`w-24 rounded border px-2 py-1.5 text-sm font-mono ${it._needsConfig && it.size && !(it.price_override && Number(it.unit_price) > 0) ? "border-red-400 bg-red-50" : it.price_override ? "border-amber-400 bg-amber-50" : "border-input"}`} />
+                            className={`w-24 rounded-md border px-2 py-2 text-right text-sm font-mono ${it._needsConfig && it.size && !(it.price_override && Number(it.unit_price) > 0) ? "border-red-400 bg-red-50" : it.price_override ? "border-amber-400 bg-amber-50" : "border-input bg-white"}`} />
                           {it.price_override && <span title="Manual override" className="text-[10px] font-bold text-amber-600">M</span>}
                         </div>
                         {it._needsConfig && it.size && <span className="text-[10px] text-red-600 flex items-center gap-0.5 mt-0.5" data-testid={`item-needs-config-${idx}`}><AlertTriangle size={10} /> {isManualInvoicePrice(it.category, it.size, unifiedPriceList) ? "Manual price required" : "Requires administrator confirmation"}</span>}
                       </td>
-                      <td className="text-right font-mono text-slate-700">{fmtMoney((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
-                      <td className="text-right">
-                        <button onClick={() => setInv({ ...inv, items: inv.items.filter((_, i) => i !== idx) })} className="text-slate-300 hover:text-red-600 p-1" data-testid={`item-delete-${idx}`}><Trash2 size={16} /></button>
+                      <td className="px-2 py-2 text-right font-mono font-semibold text-slate-800">{fmtMoney((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
+                      <td className="px-2 py-2 text-right">
+                        <button onClick={() => setInv({ ...inv, items: inv.items.filter((_, i) => i !== idx) })} className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600" title="Remove line" aria-label={`Remove invoice line ${idx + 1}`} data-testid={`item-delete-${idx}`}><Trash2 size={16} /></button>
                       </td>
                     </tr>))}</tbody>
                 </table>

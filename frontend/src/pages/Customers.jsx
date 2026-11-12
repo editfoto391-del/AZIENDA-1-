@@ -216,7 +216,7 @@ export default function Customers() {
             <Input label="Name *" value={modal.name} onChange={(e) => setModal({ ...modal, name: e.target.value })} data-testid="customer-name-input" />
             <Input label="Client Number" value={modal.client_number || ""} onChange={(e) => setModal({ ...modal, client_number: e.target.value })} data-testid="customer-client-number-input" />
             <div className="grid grid-cols-2 gap-3">
-              <Input label="Phone" value={modal.phone} onChange={(e) => setModal({ ...modal, phone: e.target.value })} />
+              <Input label={modal.id ? "Phone" : undefined} aria-label="Phone" value={modal.phone} onChange={(e) => setModal({ ...modal, phone: e.target.value })} />
               <Input label="Email" value={modal.email} onChange={(e) => setModal({ ...modal, email: e.target.value })} />
             </div>
             <div className="grid grid-cols-2 gap-3">

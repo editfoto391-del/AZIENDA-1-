@@ -18,6 +18,7 @@ const normalizeWhatsAppPhone = (phone) => {
 export default function InvoiceList({ express = false }) {
   const { user } = useAuth();
   const isInvoiceOwner = user?.is_owner || user?.is_company_owner || user?.role === "owner";
+  const canAccessInvoiceArchive = Boolean(isInvoiceOwner);
   const canManageInvoices = user?.is_admin || user?.role === "admin" || user?.is_owner
     || (user?.is_worker && user?.allowed_sections?.includes(express ? "express-invoices" : "invoices")
       && user?.write_permissions?.[express ? "express-invoices" : "invoices"]?.delete !== "deny");
@@ -39,6 +40,7 @@ export default function InvoiceList({ express = false }) {
   const [viewOpen, setViewOpen] = useState(false);
   const [viewLoading, setViewLoading] = useState(false);
   const [viewInvoice, setViewInvoice] = useState(null);
+  const [permanentDeleteRequest, setPermanentDeleteRequest] = useState(null);
   const [viewCustomer, setViewCustomer] = useState(null);
   const [whatsappDraft, setWhatsappDraft] = useState(null);
   const detailRequest = useRef(0);
@@ -57,7 +59,7 @@ export default function InvoiceList({ express = false }) {
     setSel([]);
     api.get("/invoices", {
       express,
-      include_archived: showArchived,
+      include_archived: showArchived && canAccessInvoiceArchive,
       page,
       page_size: 50,
       q: debouncedQ,
@@ -76,7 +78,7 @@ export default function InvoiceList({ express = false }) {
       if (active) setLoading(false);
     });
     return () => { active = false; };
-  }, [express, showArchived, page, debouncedQ, status, zone, invoiceDate, user?.company_id, reload]);
+  }, [express, showArchived, canAccessInvoiceArchive, page, debouncedQ, status, zone, invoiceDate, user?.company_id, reload]);
 
   useEffect(() => {
     setList([]);
@@ -147,13 +149,24 @@ export default function InvoiceList({ express = false }) {
       load();
     } catch (e) { toast.error(apiError(e)); }
   };
-  const permanentlyDelete = async (invoice) => {
-    if (!showArchived || !invoice.archived) return;
-    if (!window.confirm(`Permanently delete invoice ${invoice.number || "DRAFT"} for ${invoice.customer_name}? This cannot be undone and its payment records will also be deleted.`)) return;
+  const permanentlyDelete = async (reversePayments) => {
+    if (!permanentDeleteRequest || !canAccessInvoiceArchive || !showArchived) return;
     try {
-      await api.del(`/invoices/${invoice.id}/permanent`);
-      toast.success("Invoice permanently deleted");
-      if (viewInvoice?.id === invoice.id) setViewOpen(false);
+      if (permanentDeleteRequest.ids.length === 1) {
+        const [id] = permanentDeleteRequest.ids;
+        const invoice = permanentDeleteRequest.invoices[0];
+        const result = await api.del(`/invoices/${id}/permanent?reverse_payments=${reversePayments}`);
+        toast.success(`Invoice ${invoice?.number || "DRAFT"} permanently deleted${result.payments_reversed ? ` and ${result.payments_reversed} payment(s) reversed` : ""}`);
+        if (viewInvoice?.id === id) setViewOpen(false);
+      } else {
+        const result = await api.post("/invoices/bulk-permanent-delete", {
+          ids: permanentDeleteRequest.ids,
+          reverse_payments: reversePayments,
+        });
+        toast.success(`${result.deleted} archived invoice(s) permanently deleted${reversePayments ? ` and ${result.payments_reversed} payment(s) reversed` : ""}`);
+        setSel([]);
+      }
+      setPermanentDeleteRequest(null);
       load();
     } catch (e) { toast.error(apiError(e)); }
   };
@@ -169,17 +182,14 @@ export default function InvoiceList({ express = false }) {
       toast.error(apiError(error));
     }
   };
-  const permanentlyDeleteMany = async (ids) => {
-    if (!showArchived || ids.length === 0) return;
-    if (!window.confirm(`Permanently delete ${ids.length} archived invoice(s)? This cannot be undone and their payment records will also be deleted.`)) return;
-    try {
-      const result = await api.post("/invoices/bulk-permanent-delete", { ids });
-      setSel([]);
-      toast.success(`${result.deleted} archived invoice(s) permanently deleted`);
-      load();
-    } catch (error) {
-      toast.error(apiError(error));
-    }
+  const requestPermanentDeleteMany = (ids) => {
+    if (!canAccessInvoiceArchive || !showArchived || ids.length === 0) return;
+    const invoices = ids.map((id) => list.find((invoice) => invoice.id === id)).filter(Boolean);
+    setPermanentDeleteRequest({
+      ids,
+      invoices,
+      hasPaymentHistory: invoices.some((invoice) => invoice.has_payment_history),
+    });
   };
   const sendInvoiceViaWhatsApp = async (event, invoice) => {
     event.stopPropagation();
@@ -237,15 +247,15 @@ export default function InvoiceList({ express = false }) {
         {!unifiedPriceList && <select value={zone} onChange={(e) => { setZone(e.target.value); setPage(1); }} className="rounded-lg border border-input px-3 py-2.5 text-sm">
           <option value="all">All Zones</option><option value="1">Zone 1</option><option value="2">Zone 2</option>
         </select>}
-        {isInvoiceOwner && <label className="flex items-center gap-2 text-sm text-slate-600">
+        {canAccessInvoiceArchive && <label className="flex items-center gap-2 text-sm text-slate-600">
             <input type="checkbox" checked={showArchived} onChange={(e) => { setShowArchived(e.target.checked); setPage(1); }} />
             Show archived invoices
         </label>}
       </Card>
 
-      {canManageInvoices && sel.length > 0 && <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2" data-testid="bulk-bar">
+      {canManageInvoices && (!showArchived || canAccessInvoiceArchive) && sel.length > 0 && <div className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50 px-4 py-2" data-testid="bulk-bar">
         <span className="text-sm font-semibold text-amber-800">{sel.length} selected</span>
-        <Btn variant="danger" onClick={() => showArchived ? permanentlyDeleteMany(sel) : removeMany(sel)} data-testid="bulk-delete-btn">
+        <Btn variant="danger" onClick={() => showArchived ? requestPermanentDeleteMany(sel) : removeMany(sel)} data-testid="bulk-delete-btn">
           <Trash2 size={15} /> {showArchived ? "Permanently delete selected" : "Delete selected"}
         </Btn>
       </div>}
@@ -275,9 +285,9 @@ export default function InvoiceList({ express = false }) {
                     </button>
                     {i.archived ? (
                       <>
-                        {canManageInvoices && <>
+                        {canManageInvoices && canAccessInvoiceArchive && <>
                           <button onClick={(e) => { e.stopPropagation(); restore(i.id); }} data-testid={`restore-invoice-row-${i.id}`} title="Restore invoice" aria-label={`Restore invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center rounded-lg border border-emerald-200 px-2 py-1 text-emerald-700 hover:bg-emerald-50"><RotateCcw size={12} /></button>
-                          {showArchived && <button onClick={(e) => { e.stopPropagation(); permanentlyDelete(i); }} data-testid={`permanently-delete-invoice-row-${i.id}`} title="Permanently delete invoice" aria-label={`Permanently delete invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50"><Trash2 size={12} /><span>Delete permanently</span></button>}
+                          {showArchived && canAccessInvoiceArchive && <button onClick={(e) => { e.stopPropagation(); setPermanentDeleteRequest({ ids: [i.id], invoices: [i], hasPaymentHistory: i.has_payment_history }); }} data-testid={`permanently-delete-invoice-row-${i.id}`} title="Permanently delete invoice" aria-label={`Permanently delete invoice ${i.number || "draft"}`} className="ml-2 inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50"><Trash2 size={12} /><span>Delete permanently</span></button>}
                         </>}
                       </>
                     ) : i.status !== "void" && (
@@ -423,6 +433,37 @@ export default function InvoiceList({ express = false }) {
             >
               <MessageCircle size={15} /> Open WhatsApp
             </a>
+          </div>
+        </div>
+      </Modal>
+      <Modal
+        open={!!permanentDeleteRequest}
+        onClose={() => setPermanentDeleteRequest(null)}
+        title="Permanently delete archived invoice"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-slate-600">
+            This action cannot be undone. {permanentDeleteRequest?.ids.length > 1
+              ? `${permanentDeleteRequest.ids.length} archived invoices will be permanently deleted.`
+              : `Invoice ${permanentDeleteRequest?.invoices[0]?.number || "DRAFT"} will be permanently deleted.`}
+          </p>
+          {permanentDeleteRequest?.hasPaymentHistory && <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            {permanentDeleteRequest.ids.length > 1
+              ? "Deleting these invoices may also reverse the payments clients made for them."
+              : "Deleting this invoice will also reverse the payment the client made for the invoice."}
+          </p>}
+          <div className="flex flex-wrap justify-end gap-2">
+            <Btn variant="outline" onClick={() => setPermanentDeleteRequest(null)}>Cancel</Btn>
+            {permanentDeleteRequest?.hasPaymentHistory ? <>
+              <Btn variant="danger" onClick={() => permanentlyDelete(false)} data-testid="delete-invoice-without-reversing-payment">
+                Don&apos;t reverse {permanentDeleteRequest.ids.length > 1 ? "payments" : "payment"}
+              </Btn>
+              <Btn variant="danger" onClick={() => permanentlyDelete(true)} data-testid="delete-invoice-and-reverse-payment">
+                Reverse {permanentDeleteRequest.ids.length > 1 ? "payments" : "payment"} &amp; delete
+              </Btn>
+            </> : <Btn variant="danger" onClick={() => permanentlyDelete(false)} data-testid="confirm-permanent-invoice-delete">
+              Delete permanently
+            </Btn>}
           </div>
         </div>
       </Modal>

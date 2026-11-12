@@ -22,6 +22,8 @@ def _matches(document, query):
                 return False
             if "$in" in expected and actual not in expected["$in"]:
                 return False
+            if "$nin" in expected and actual in expected["$nin"]:
+                return False
             if "$lt" in expected and (actual is None or actual >= expected["$lt"]):
                 return False
             if "$regex" in expected:
@@ -58,6 +60,14 @@ class FakeCollection:
                 self.documents.pop(index)
                 return type("DeleteResult", (), {"deleted_count": 1})()
         return type("DeleteResult", (), {"deleted_count": 0})()
+
+    async def delete_many(self, query):
+        before = len(self.documents)
+        self.documents = [
+            document for document in self.documents
+            if not _matches(document, query)
+        ]
+        return type("DeleteResult", (), {"deleted_count": before - len(self.documents)})()
 
     async def find_one_and_update(self, query, update, **kwargs):
         for document in self.documents:
@@ -129,6 +139,7 @@ class FakeDatabase:
             "grvs": FakeCollection(),
             "buyings": FakeCollection(),
             "company_inventory": FakeCollection(),
+            "company_inventory_daily_updates": FakeCollection(),
             "chemical_inventory": FakeCollection(),
             "raw_material_movements": FakeCollection(),
             "prices": FakeCollection(),
@@ -171,7 +182,8 @@ def _install_fake_grv_dependencies(monkeypatch, fake_db):
             return None
 
     async def insert(collection, data):
-        record = {**deepcopy(data), "id": f"{collection}-{len(fake_db[collection].documents) + 1}"}
+        record = deepcopy(data)
+        record.setdefault("id", f"{collection}-{len(fake_db[collection].documents) + 1}")
         await fake_db[collection].insert_one(record)
         return record
 
@@ -548,6 +560,135 @@ def test_raw_grv_delete_removes_full_company_inventory_quantity_even_if_used(mon
 
     assert fake_db.company_inventory.documents[0]["loose_units"] == -15
     assert fake_db.raw_material_movements.documents[-1]["direction"] == -1
+
+
+def test_raw_inventory_target_reuses_existing_item_with_legacy_blank_fields(monkeypatch):
+    fake_db = FakeDatabase()
+    fake_db.company_inventory.documents.append({
+        "id": "inventory-tape",
+        "name": "Tape",
+        "loose_units": 4,
+    })
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+
+    collection, item = asyncio.run(server._raw_inventory_target({
+        "product": "tape",
+        "category": "Other",
+        "size": "",
+        "unit": "",
+    }, False, create=True))
+
+    assert collection == "company_inventory"
+    assert item["id"] == "inventory-tape"
+    assert item["category"] == "Other"
+    assert len(fake_db.company_inventory.documents) == 1
+
+
+def test_superiqfoam_company_inventory_rebuild_replays_confirmed_grvs_without_duplicates(monkeypatch):
+    fake_db = FakeDatabase()
+    fabric_line_1 = {
+        "product": "Fabric Roll", "category": "FABBRIC", "size": "25",
+        "unit": "rolls", "container_type": "Barrel", "accepted_quantity": 10,
+    }
+    fabric_line_2 = {
+        "product": "Fabric Roll", "category": "Fabric", "size": "25",
+        "unit": "rolls", "container_type": "Barrel", "accepted_quantity": 5,
+    }
+    plastic_line = {
+        "product": "Plastic Roll", "category": "Plastic Rolls", "size": "20",
+        "unit": "rolls", "container_type": "Barrel", "accepted_quantity": 4,
+    }
+    fake_db.grvs.documents.extend([
+        {
+            "id": "grv-fabric-1", "grv_number": "GRV-1", "purpose": "raw_material",
+            "status": "completed", "is_chemical": False, "items": [fabric_line_1],
+        },
+        {
+            "id": "grv-fabric-2", "grv_number": "GRV-2", "purpose": "raw_material",
+            "status": "partially_received", "is_chemical": False,
+            "items": [fabric_line_2, plastic_line],
+        },
+        {
+            "id": "grv-draft", "purpose": "raw_material", "status": "draft",
+            "is_chemical": False, "items": [fabric_line_1],
+        },
+    ])
+    fake_db.company_inventory.documents.extend([
+        {
+            "id": "inventory-fabric", "name": "Fabric Roll", "category": "FABBRIC",
+            "size": "25", "unit": "rolls", "loose_units": 3,
+        },
+        {
+            "id": "inventory-fabric-duplicate", "name": "fabric roll",
+            "category": "Fabric", "size": "25", "unit": "rolls", "loose_units": 2,
+        },
+        {"id": "inventory-manual", "name": "Manual entry", "category": "Other"},
+    ])
+    fake_db.company_inventory_daily_updates.documents.append({
+        "id": "daily-fabric", "company_inventory_id": "inventory-fabric",
+    })
+    fake_db.raw_material_movements.documents.append({
+        "id": "movement-fabric-1",
+        "dedupe_key": f"grv-raw:in:grv-fabric-1:{server._raw_key(fabric_line_1)}",
+        "grv_id": "grv-fabric-1", "collection": "company_inventory",
+        "target_id": "inventory-fabric-duplicate", "quantity": 10, "direction": 1,
+    })
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    user = {
+        "id": "owner", "email": "owner@example.test", "name": "Owner",
+        "_active_role": "owner", "_active_company_id": "superiqfoam",
+    }
+    token = server.active_company_id.set("superiqfoam")
+
+    try:
+        result = asyncio.run(server.rebuild_company_inventory_from_grvs(user))
+        first_items = deepcopy(fake_db.company_inventory.documents)
+        retry = asyncio.run(server.rebuild_company_inventory_from_grvs(user))
+    finally:
+        server.active_company_id.reset(token)
+
+    assert result == {
+        "ok": True,
+        "grvs_replayed": 2,
+        "inventory_items": 2,
+    }
+    assert len(first_items) == 2, first_items
+    assert retry == result
+    items = {item["category"]: item for item in fake_db.company_inventory.documents}
+    assert items["Fabric"]["loose_units"] == 15
+    assert items["Fabric"]["size"] == "25"
+    assert "Plastic Rolls" in items, items
+    assert items["Plastic Rolls"]["loose_units"] == 4
+    assert len(fake_db.company_inventory.documents) == 2
+    assert fake_db.company_inventory_daily_updates.documents == []
+    assert len(fake_db.raw_material_movements.documents) == 3
+    assert all(
+        movement["target_id"] == items["Fabric"]["id"]
+        and movement["collection"] == "company_inventory"
+        for movement in fake_db.raw_material_movements.documents
+        if movement["grv_id"] in ("grv-fabric-1", "grv-fabric-2")
+        and (movement.get("product") == "Fabric Roll" or movement["grv_id"] == "grv-fabric-1")
+    )
+
+
+def test_company_inventory_rebuild_is_limited_to_superiqfoam_owners():
+    user = {
+        "id": "admin", "email": "admin@example.test",
+        "_active_role": "admin", "_active_company_id": "other-company",
+    }
+    token = server.active_company_id.set("other-company")
+    try:
+        with pytest.raises(HTTPException) as wrong_profile:
+            asyncio.run(server.rebuild_company_inventory_from_grvs(user))
+        assert wrong_profile.value.status_code == 404
+
+        user["_active_company_id"] = "superiqfoam"
+        server.active_company_id.set("superiqfoam")
+        with pytest.raises(HTTPException) as not_owner:
+            asyncio.run(server.rebuild_company_inventory_from_grvs(user))
+        assert not_owner.value.status_code == 403
+    finally:
+        server.active_company_id.reset(token)
 
 
 @pytest.mark.parametrize("lock_at", [None, "expired"])

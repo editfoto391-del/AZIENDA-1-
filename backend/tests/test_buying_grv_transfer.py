@@ -282,6 +282,13 @@ def test_raw_grv_updates_company_inventory_once_with_blank_unit(
     }
 
     class InventoryCollection:
+        def find(self, query, *_args, **_kwargs):
+            async def matching_inventory():
+                if query.get("name"):
+                    yield dict(inventory)
+
+            return matching_inventory()
+
         async def find_one(self, query, *_args, **_kwargs):
             if query.get("id") == inventory["id"]:
                 return dict(inventory)

@@ -14,6 +14,19 @@ PNG_DATA = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l2cAAAAASUVORK5CYII="
 )
 
+def test_delivery_invoice_verification_accepts_legacy_order_without_customer_id():
+    assert server.delivery_invoice_matches_order(
+        {"customer_id": "customer-1", "customer_name": "Acme Ltd"},
+        {"customer_name": "  ACME   LTD  "},
+    )
+
+
+def test_delivery_invoice_verification_rejects_mismatched_customer_ids():
+    assert not server.delivery_invoice_matches_order(
+        {"customer_id": "customer-1", "customer_name": "Acme Ltd"},
+        {"customer_id": "customer-2", "customer_name": "Acme Ltd"},
+    )
+
 
 def test_driver_confirmation_request_trims_name_and_requires_acknowledgement():
     request = server.DriverDeliveryConfirmationIn(

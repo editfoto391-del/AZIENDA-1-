@@ -27,11 +27,18 @@ def test_global_owner_can_create_expense_without_supervisor_password(monkeypatch
     }
 
     expense = asyncio.run(server.add_expense(
-        server.ExpenseIn(description="Test expense", amount=125),
+        server.ExpenseIn(
+            description="Test expense",
+            amount=125,
+            category="Diesel",
+            vehicle_id="truck-1",
+            destination_city=" Harding ",
+        ),
         global_owner,
     ))
     assert expense["supervisor_approved_by"] == "global-owner"
     assert expense["amount"] == 125
+    assert expense["destination_city"] == "Harding"
     assert created == [expense]
 
 
@@ -79,6 +86,46 @@ def test_personal_expense_categories_are_not_available_outside_superiqfoam(categ
         description="Personal expense",
         amount=100,
         category=category,
+    )
+    with pytest.raises(HTTPException) as error:
+        server._check_expense(expense, {"_active_company_id": "iqfoam-manufactoring"})
+    assert error.value.status_code == 400
+
+
+def test_superiqfoam_diesel_destination_requires_a_vehicle():
+    expense = server.ExpenseIn(
+        description="Diesel",
+        amount=1000,
+        category="Diesel",
+        vehicle_id="truck-1",
+        destination_city="Harding",
+    )
+    server._check_expense(expense, {"_active_company_id": server.DEFAULT_COMPANY_ID})
+
+
+@pytest.mark.parametrize("changes", [
+    {"category": "General", "vehicle_id": "truck-1"},
+    {"category": "Diesel", "vehicle_id": ""},
+])
+def test_diesel_destination_requires_diesel_and_vehicle(changes):
+    expense = server.ExpenseIn(
+        description="Diesel",
+        amount=1000,
+        destination_city="Harding",
+        **changes,
+    )
+    with pytest.raises(HTTPException) as error:
+        server._check_expense(expense, {"_active_company_id": server.DEFAULT_COMPANY_ID})
+    assert error.value.status_code == 400
+
+
+def test_diesel_destination_is_not_available_outside_superiqfoam():
+    expense = server.ExpenseIn(
+        description="Diesel",
+        amount=1000,
+        category="Diesel",
+        vehicle_id="truck-1",
+        destination_city="Harding",
     )
     with pytest.raises(HTTPException) as error:
         server._check_expense(expense, {"_active_company_id": "iqfoam-manufactoring"})

@@ -7,6 +7,8 @@ export const dedicatedCompanyDomain = () =>
 
 export const usesUnifiedPriceList = (companyId) => UNIFIED_PRICE_COMPANIES.has(companyId);
 
+export const includePreviousInvoiceBalanceByDefault = (companyId) => companyId !== "superiqfoam";
+
 export const companyBrandName = (companyId) => ({
   "iqfoam-whole-sallers": "IQ FOAM WHOLESALERS",
   "iqfoam-manufactoring": "IQ FOAM MANUFACTURING",
