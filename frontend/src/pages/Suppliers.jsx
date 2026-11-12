@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Link, useNavigate } from "react-router-dom";
-import { Handshake, Eye, Pencil, Plus, Search, ShoppingCart, Trash2 } from "lucide-react";
+import { ClipboardCheck, Handshake, Eye, Minus, Pencil, Plus, Search, ShoppingCart, Trash2 } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { fmtDate, fmtMoney } from "@/lib/format";
+import { fmtDate, fmtMoney, today } from "@/lib/format";
 import { Badge, Btn, Card, Empty, Input, Modal, PageHeader, Textarea } from "@/components/common";
 
 const blankSupplier = () => ({
@@ -25,8 +25,10 @@ export default function Suppliers() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [modal, setModal] = useState(null);
+  const [balanceModal, setBalanceModal] = useState(null);
   const [profile, setProfile] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [savingBalance, setSavingBalance] = useState(false);
 
   const load = () => api.get("/suppliers")
     .then(setSuppliers)
@@ -56,8 +58,11 @@ export default function Suppliers() {
     if (saving) return;
     setSaving(true);
     try {
-      if (modal.id) await api.put(`/suppliers/${modal.id}`, modal);
-      else await api.post("/suppliers", modal);
+      const supplier = { ...modal };
+      delete supplier.balance;
+      delete supplier.balance_history;
+      if (modal.id) await api.put(`/suppliers/${modal.id}`, supplier);
+      else await api.post("/suppliers", supplier);
       toast.success("Supplier saved");
       setModal(null);
       await load();
@@ -65,6 +70,29 @@ export default function Suppliers() {
       toast.error(apiError(error));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const saveBalanceAdjustment = async () => {
+    if (!balanceModal || savingBalance) return;
+    const amount = Number(balanceModal.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return toast.error("Enter an amount greater than zero");
+    setSavingBalance(true);
+    try {
+      const updatedSupplier = await api.post(`/suppliers/${balanceModal.supplier.id}/balance`, {
+        direction: balanceModal.direction,
+        amount,
+        date: balanceModal.date,
+        notes: balanceModal.notes,
+      });
+      setSuppliers((current) => current.map((item) => item.id === updatedSupplier.id ? updatedSupplier : item));
+      setProfile((current) => current?.id === updatedSupplier.id ? updatedSupplier : current);
+      setBalanceModal(null);
+      toast.success(`Supplier balance ${balanceModal.direction === "add" ? "increased" : "reduced"}`);
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setSavingBalance(false);
     }
   };
 
@@ -96,7 +124,7 @@ export default function Suppliers() {
   return (
     <div>
       <PageHeader title="Suppliers" subtitle={suppliers === null ? "Loading suppliers..." : `${suppliers.length} suppliers`}>
-        <Link to="/buyings" className="inline-flex items-center gap-2 rounded-md border border-border bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-secondary" data-testid="suppliers-buyings-link"><ShoppingCart size={16} /> View Buyings</Link>
+        <Link to="/grv" className="inline-flex items-center gap-2 rounded-md border border-border bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-secondary" data-testid="suppliers-grv-link"><ClipboardCheck size={16} /> View GRV's</Link>
         <Btn onClick={() => setModal(blankSupplier())} data-testid="add-supplier-btn"><Plus size={16} /> Add Supplier</Btn>
       </PageHeader>
 
@@ -129,12 +157,13 @@ export default function Suppliers() {
           <Empty icon={Handshake} title="No suppliers found" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[700px] text-sm">
+            <table className="w-full min-w-[820px] text-sm">
               <thead>
                 <tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-400">
                   <th className="px-4 py-3 font-semibold">Name</th>
                   <th className="px-4 py-3 font-semibold">Phone</th>
                   <th className="px-4 py-3 font-semibold">Email</th>
+                  <th className="px-4 py-3 text-right font-semibold">Balance</th>
                   <th className="px-4 py-3 font-semibold">Terms</th>
                   <th className="px-4 py-3 text-center font-semibold">Status</th>
                   <th className="px-4 py-3 text-right font-semibold">Actions</th>
@@ -149,6 +178,7 @@ export default function Suppliers() {
                     </td>
                     <td className="px-4 text-slate-500">{supplier.phone || "-"}</td>
                     <td className="px-4 text-slate-500">{supplier.email || "-"}</td>
+                    <td className="px-4 text-right font-mono text-slate-700">{fmtMoney(supplier.balance ?? 0)}</td>
                     <td className="max-w-64 px-4 py-3 text-slate-500"><span className="line-clamp-2">{supplier.terms || "-"}</span></td>
                     <td className="px-4 text-center">
                       <Badge cls={supplier.active !== false ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-slate-100 text-slate-500 border-slate-200"}>
@@ -229,6 +259,7 @@ export default function Suppliers() {
                 ["Contact", profile.contact],
                 ["Address", profile.address],
                 ["City", profile.city],
+                ["Balance", fmtMoney(profile.balance ?? 0)],
                 ["Terms", profile.terms],
                 ["Notes", profile.notes],
                 ["Status", profile.active === false ? "Inactive" : "Active"],
@@ -239,13 +270,77 @@ export default function Suppliers() {
                 </div>
               ))}
             </div>
+            <section data-testid="supplier-balance-history">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="font-semibold text-slate-800">Balance history</h3>
+                  <p className="text-xs text-slate-400">Additions and deductions recorded for this supplier</p>
+                </div>
+                <div className="flex gap-2">
+                  <Btn variant="outline" onClick={() => setBalanceModal({ supplier: profile, direction: "add", amount: "", date: today(), notes: "" })} data-testid="supplier-balance-add">
+                    <Plus size={15} /> Add balance
+                  </Btn>
+                  <Btn variant="outline" onClick={() => setBalanceModal({ supplier: profile, direction: "subtract", amount: "", date: today(), notes: "" })} data-testid="supplier-balance-subtract">
+                    <Minus size={15} /> Deduct balance
+                  </Btn>
+                </div>
+              </div>
+              {(() => {
+                const transactions = [...(profile.balance_history || [])]
+                  .sort((a, b) => `${a.date || ""}${a.created_at || ""}`.localeCompare(`${b.date || ""}${b.created_at || ""}`));
+                const trackedChanges = transactions.reduce(
+                  (total, entry) => total + (entry.direction === "add" ? entry.amount : -entry.amount),
+                  0,
+                );
+                const openingBalance = Number(profile.balance || 0) - trackedChanges;
+                let runningBalance = openingBalance;
+                const history = transactions.map((entry) => {
+                  runningBalance += entry.direction === "add" ? entry.amount : -entry.amount;
+                  return { ...entry, balance_after: runningBalance };
+                }).reverse();
+                if (Math.abs(openingBalance) >= 0.01) {
+                  history.push({
+                    id: "opening-balance",
+                    direction: openingBalance >= 0 ? "add" : "subtract",
+                    amount: Math.abs(openingBalance),
+                    date: "",
+                    balance_after: openingBalance,
+                    created_by_name: "Before balance tracking",
+                  });
+                }
+                return history.length ? (
+                  <ol className="max-h-72 space-y-2 overflow-y-auto">
+                    {history.map((entry) => (
+                      <li key={entry.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-sm" data-testid={`supplier-balance-entry-${entry.id}`}>
+                        <div>
+                          <p className="font-semibold text-slate-800">
+                            {entry.id === "opening-balance" ? "Balance before tracked adjustments" : entry.direction === "add" ? "Balance added" : "Balance deducted"}
+                          </p>
+                          <p className="text-xs text-slate-400">
+                            {entry.date ? fmtDate(entry.date) : "Legacy balance"}
+                            {entry.created_by_name ? ` · ${entry.created_by_name}` : ""}
+                            {entry.notes ? ` · ${entry.notes}` : ""}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <p className={`font-mono font-semibold ${entry.direction === "add" ? "text-emerald-700" : "text-red-700"}`}>
+                            {entry.direction === "add" ? "+" : "−"}{fmtMoney(entry.amount)}
+                          </p>
+                          <p className="text-xs text-slate-400">Balance: {fmtMoney(entry.balance_after)}</p>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                ) : <p className="rounded-lg bg-slate-50 p-3 text-sm text-slate-400">No balance changes recorded yet.</p>;
+              })()}
+            </section>
             <section>
               <div className="mb-2 flex items-center justify-between gap-3">
                 <div>
                   <h3 className="font-semibold text-slate-800">Purchase history</h3>
                   <p className="text-xs text-slate-400">Buyings linked to this supplier</p>
                 </div>
-                <Btn variant="outline" onClick={() => navigate("/buyings")}><ShoppingCart size={15} /> View Buyings</Btn>
+                <Btn variant="outline" onClick={() => navigate("/grv")}><ClipboardCheck size={15} /> View GRV's</Btn>
               </div>
               {buyings === null ? <p className="py-3 text-sm text-slate-400">Loading purchase history...</p> : (() => {
                 const supplierBuyings = buyings.filter((buying) =>
@@ -267,6 +362,48 @@ export default function Suppliers() {
                   </div>;
               })()}
             </section>
+          </div>
+        )}
+      </Modal>
+      <Modal
+        open={!!balanceModal}
+        onClose={() => !savingBalance && setBalanceModal(null)}
+        title={`${balanceModal?.direction === "add" ? "Add to" : "Deduct from"} ${balanceModal?.supplier.name || "supplier"} balance`}
+      >
+        {balanceModal && (
+          <div className="space-y-4">
+            <p className="text-sm text-slate-600">
+              Current balance: <strong>{fmtMoney(balanceModal.supplier.balance ?? 0)}</strong>
+            </p>
+            <Input
+              label="Amount (R) *"
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={balanceModal.amount}
+              onChange={(event) => setBalanceModal({ ...balanceModal, amount: event.target.value })}
+              data-testid="supplier-balance-amount"
+            />
+            <Input
+              label="Transaction date"
+              type="date"
+              value={balanceModal.date}
+              onChange={(event) => setBalanceModal({ ...balanceModal, date: event.target.value })}
+              data-testid="supplier-balance-date"
+            />
+            <Textarea
+              label="Notes / reference"
+              rows={2}
+              value={balanceModal.notes}
+              onChange={(event) => setBalanceModal({ ...balanceModal, notes: event.target.value })}
+              data-testid="supplier-balance-notes"
+            />
+            <div className="flex justify-end gap-2">
+              <Btn variant="outline" onClick={() => setBalanceModal(null)} disabled={savingBalance}>Cancel</Btn>
+              <Btn onClick={saveBalanceAdjustment} disabled={savingBalance} data-testid="supplier-balance-save">
+                {savingBalance ? "Saving..." : balanceModal.direction === "add" ? "Add balance" : "Deduct balance"}
+              </Btn>
+            </div>
           </div>
         )}
       </Modal>

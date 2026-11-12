@@ -356,7 +356,6 @@ export default function Warehouses() {
         toast.error("Loaded quantity cannot exceed the ordered quantity.");
         return;
       }
-      report.total_quantity_loaded = report.dispatches.reduce((total, dispatch) => total + dispatch.loaded_quantity, 0);
     }
 
     setSaving(true);

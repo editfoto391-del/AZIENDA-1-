@@ -11783,6 +11783,7 @@ class SupplierIn(BaseModel):
     email: Optional[str] = ""
     address: Optional[str] = ""
     city: Optional[str] = ""
+    balance: float = Field(default=0, allow_inf_nan=False)
     terms: Optional[str] = ""
     active: bool = True
     notes: Optional[str] = ""
@@ -11816,11 +11817,75 @@ async def edit_supplier(supplier_id: str, body: SupplierIn, user=Depends(get_cur
     if await db.suppliers.find_one({"name_key": name.casefold(), "id": {"$ne": supplier_id}}):
         raise HTTPException(409, "A supplier with this name already exists")
     data = body.model_dump()
-    data.update({"name": name, "name_key": name.casefold()})
+    data.update({
+        "name": name,
+        "name_key": name.casefold(),
+        "balance": before.get("balance", 0),
+    })
     rec = await update_doc("suppliers", supplier_id, data)
     await log_audit("supplier", supplier_id, "updated", user, before=before, after=rec)
     await emit_workflow_event("supplier.updated", rec)
     return rec
+
+
+class SupplierBalanceIn(BaseModel):
+    direction: Literal["add", "subtract"]
+    amount: float = Field(gt=0, le=1_000_000_000, allow_inf_nan=False)
+    date: str = Field(default_factory=today_str, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    notes: str = Field(default="", max_length=500)
+
+    @field_validator("date")
+    @classmethod
+    def supplier_balance_date_valid(cls, value):
+        try:
+            date.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("Enter a valid transaction date") from error
+        return value
+
+
+@api.post("/suppliers/{supplier_id}/balance")
+async def adjust_supplier_balance(
+    supplier_id: str,
+    body: SupplierBalanceIn,
+    user=Depends(get_current_user),
+):
+    before = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+    if not before:
+        raise HTTPException(404, "Supplier not found")
+    amount = r2(body.amount)
+    if amount <= 0:
+        raise HTTPException(400, "Balance adjustment must be at least R0.01")
+    signed_amount = amount if body.direction == "add" else -amount
+    transaction = {
+        "id": new_id(),
+        "direction": body.direction,
+        "amount": amount,
+        "date": body.date,
+        "notes": body.notes.strip(),
+        "created_at": now_iso(),
+        "created_by": user.get("id", ""),
+        "created_by_name": user.get("name") or user.get("username") or user.get("email") or "",
+    }
+    result = await db.suppliers.update_one(
+        {"id": supplier_id},
+        {
+            "$inc": {"balance": signed_amount},
+            "$push": {"balance_history": transaction},
+            "$set": {"updated_at": now_iso()},
+        },
+    )
+    if not result.matched_count:
+        raise HTTPException(404, "Supplier not found")
+    after = await db.suppliers.find_one({"id": supplier_id}, {"_id": 0})
+    if not after:
+        raise RuntimeError("Supplier balance was updated but the supplier could not be reloaded")
+    await log_audit(
+        "supplier", supplier_id, f"balance_{body.direction}",
+        user, before=before, after=after, reason=body.notes.strip(),
+    )
+    return clean(after)
+
 
 @api.delete("/suppliers/{supplier_id}")
 async def deactivate_supplier(supplier_id: str, permanent: bool = False, user=Depends(get_current_user)):

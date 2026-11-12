@@ -53,6 +53,7 @@ export default function Expenses() {
   const [viewExpense, setViewExpense] = useState(null);
   const [cat, setCat] = useState("");
   const [month, setMonth] = useState("");
+  const [dateFilter, setDateFilter] = useState("");
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
@@ -64,7 +65,12 @@ export default function Expenses() {
   };
   useEffect(() => { load(); api.get("/vehicles").then(setVehicles); }, []);
 
-  const filtered = useMemo(() => (list || []).filter((e) => (!cat || e.category === cat) && (!month || (e.date || "").startsWith(month)) && (!q || `${e.description} ${e.reference || ""}`.toLowerCase().includes(q.toLowerCase()))), [list, cat, month, q]);
+  const filtered = useMemo(() => (list || []).filter((e) => (
+    (!cat || e.category === cat)
+    && (!month || (e.date || "").startsWith(month))
+    && (!dateFilter || (e.date || "").startsWith(dateFilter))
+    && (!q || `${e.description} ${e.reference || ""}`.toLowerCase().includes(q.toLowerCase()))
+  )), [list, cat, month, dateFilter, q]);
   const filteredTotal = filtered.reduce((s, e) => s + (e.amount || 0), 0);
 
   const save = async () => {
@@ -179,7 +185,8 @@ export default function Expenses() {
       <Card className="overflow-hidden">
         <div className="flex flex-wrap items-end gap-3 p-4 border-b border-border">
           <div className="w-44"><Select label="Category" value={cat} onChange={(e) => setCat(e.target.value)} data-testid="expense-filter-category"><option value="">All</option>{categories.map((c) => <option key={c}>{c}</option>)}</Select></div>
-          <div className="w-44"><Input label="Month" type="month" value={month} onChange={(e) => setMonth(e.target.value)} data-testid="expense-filter-month" /></div>
+          <div className="w-44"><Input label="Date" type="date" value={dateFilter} onChange={(e) => { setDateFilter(e.target.value); if (e.target.value) setMonth(""); }} data-testid="expense-filter-date" /></div>
+          <div className="w-44"><Input label="Month" type="month" value={month} onChange={(e) => { setMonth(e.target.value); if (e.target.value) setDateFilter(""); }} data-testid="expense-filter-month" /></div>
           <div className="w-56"><Input label="Search" placeholder="Description or reference" value={q} onChange={(e) => setQ(e.target.value)} data-testid="expense-search-input" /></div>
           <div className="ml-auto text-sm text-slate-500">Filtered total: <span className="font-mono font-bold text-slate-800" data-testid="expense-filtered-total">{fmtMoney(filteredTotal)}</span></div>
         </div>

@@ -29,6 +29,7 @@ const weekPeriodForDate = (value) => {
 
 export default function Attendance() {
   const { user } = useAuth();
+  const isSuperIqFoam = user?.company_id === "superiqfoam";
   const isIqfoamWholesaler = user?.company_id === "iqfoam-whole-sallers";
   const canManageDepartments = user?.is_owner || user?.is_company_owner || user?.is_admin || user?.role === "admin"
     || user?.company_roles?.[user?.company_id] === "admin";
@@ -98,7 +99,11 @@ export default function Attendance() {
   }, [date]);
 
   const active = employees.filter((e) => e.active !== false);
-  const statusOf = (eid) => records.find((r) => r.employee_id === eid && r.date === date)?.status;
+  const statusOf = (eid) => {
+    const status = records.find((record) => record.employee_id === eid && record.date === date)?.status;
+    if (!isSuperIqFoam) return status;
+    return ["Present", "Half Day"].includes(status) ? "Present" : "Absent";
+  };
   const groups = useMemo(() => {
     const g = {};
     active.forEach((e) => {
@@ -347,7 +352,11 @@ export default function Attendance() {
         const recordsForEmployee = days.map((day) =>
           attendanceMap.get(`${employee.id}:${day}`),
         );
-        const fullDays = recordsForEmployee.filter((record) => record?.status === "Present").length;
+        const fullDays = recordsForEmployee.filter((record) =>
+          isSuperIqFoam
+            ? ["Present", "Half Day"].includes(record?.status)
+            : record?.status === "Present"
+        ).length;
         const halfDays = recordsForEmployee.filter((record) => record?.status === "Half Day").length;
         const hours = recordsForEmployee.reduce((sum, record) => {
           if (!record?.start_time || !record?.end_time) return sum;
@@ -387,6 +396,9 @@ export default function Attendance() {
           align: "center",
           value: (row) => {
             const record = row.records[index];
+            if (isSuperIqFoam) {
+              return ["Present", "Half Day"].includes(record?.status) ? "P" : "A";
+            }
             if (!record) return "-";
             return ({
               Present: "P",
@@ -422,13 +434,17 @@ export default function Attendance() {
         pdf.setTextColor(75, 82, 78);
         pdf.setFontSize(7.5);
         pdf.text(
-          "Daily status: P Present   HD Half day   A Absent   L Leave   SL Sick leave   AL Annual leave   O Other   - Not marked",
+          isSuperIqFoam
+            ? "Daily status: P Present   A Absent (default unless marked present)"
+            : "Daily status: P Present   HD Half day   A Absent   L Leave   SL Sick leave   AL Annual leave   O Other   - Not marked",
           margin,
           23,
           { maxWidth: pageWidth - margin * 2 },
         );
         pdf.text(
-          "Full days and half days are counted separately. Hours worked use saved start/end times; overtime hours are shown separately.",
+          isSuperIqFoam
+            ? "Employees without a saved attendance record are counted as absent."
+            : "Full days and half days are counted separately. Hours worked use saved start/end times; overtime hours are shown separately.",
           margin,
           28,
           { maxWidth: pageWidth - margin * 2 },
@@ -511,7 +527,12 @@ export default function Attendance() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Attendance" subtitle="Tap Present or Absent for each employee">
+      <PageHeader
+        title="Attendance"
+        subtitle={isSuperIqFoam
+          ? "Everyone is absent by default. Mark only the employees who are present."
+          : "Tap Present or Absent for each employee"}
+      >
         {section === "attendance" && <>
           <Btn variant="outline" disabled={attendanceReportDownloading || loading} onClick={downloadWeeklyAttendanceReport} data-testid="attendance-weekly-report">
             <Download size={16} /> {attendanceReportDownloading ? "Preparing report..." : "Weekly Attendance Report"}
@@ -520,7 +541,7 @@ export default function Attendance() {
             setNewDepartmentName("");
             setEmpModal({ name: "", department: "", active: true, is_general_worker: false });
           }} data-testid="add-employee-btn"><Plus size={16} /> Employee</Btn>
-          <Btn disabled={loading || busy || !active.length} onClick={markAll} data-testid="mark-all-present-btn"><CheckCheck size={16} /> Mark All Present</Btn>
+          {!isSuperIqFoam && <Btn disabled={loading || busy || !active.length} onClick={markAll} data-testid="mark-all-present-btn"><CheckCheck size={16} /> Mark All Present</Btn>}
         </>}
       </PageHeader>
       <div className="flex gap-2 border-b border-border">
@@ -550,10 +571,10 @@ export default function Attendance() {
       <div className="flex flex-wrap items-end gap-4">
         <div className="w-48"><Input label="Date" type="date" value={date} onChange={(e) => { setDate(e.target.value); setOvertimeDraft({}); setWorkTimeDraft({}); setShiftModeDraft({}); }} data-testid="attendance-date-input" /></div>
       </div>
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className={`grid grid-cols-2 ${isSuperIqFoam ? "lg:grid-cols-4" : "lg:grid-cols-5"} gap-4`}>
         <Stat l="Present (day)" v={loading ? "..." : present} cls="text-emerald-600" k="day-present" />
-        <Stat l="Absent (day)" v={loading ? "..." : absent} cls="text-red-600" k="day-absent" />
-        <Stat l="Not marked" v={loading ? "..." : active.length - present - absent} cls="text-slate-500" k="day-unmarked" />
+        <Stat l="Absent (day)" v={loading ? "..." : isSuperIqFoam ? active.length - present : absent} cls="text-red-600" k="day-absent" />
+        {!isSuperIqFoam && <Stat l="Not marked" v={loading ? "..." : active.length - present - absent} cls="text-slate-500" k="day-unmarked" />}
         <Stat l="Present days (week)" v={loading ? "..." : summary?.week_total ?? 0} cls="text-slate-800" k="week" />
         <Stat l="Present days (month)" v={loading ? "..." : summary?.month_total ?? 0} cls="text-slate-800" k="month" />
       </div>
@@ -598,9 +619,24 @@ export default function Attendance() {
                     Delete
                   </Btn>}
                 </>}
-                <button disabled={!!attendanceSaving[e.id]} onClick={() => mark(e, "Present")} data-testid={`present-btn-${e.id}`} className={`h-12 w-32 rounded-xl text-sm font-bold border-2 transition-colors disabled:opacity-60 ${s === "Present" ? "bg-emerald-600 border-emerald-600 text-white" : "border-emerald-200 text-emerald-700 hover:bg-emerald-50"}`}>{attendanceSaving[e.id] && s === "Present" ? "Saving…" : "Present"}</button>
-                <button disabled={!!attendanceSaving[e.id]} onClick={() => mark(e, "Absent")} data-testid={`absent-btn-${e.id}`} className={`h-12 w-32 rounded-xl text-sm font-bold border-2 transition-colors disabled:opacity-60 ${s === "Absent" ? "bg-red-600 border-red-600 text-white" : "border-red-200 text-red-700 hover:bg-red-50"}`}>{attendanceSaving[e.id] && s === "Absent" ? "Saving…" : "Absent"}</button>
-                {e.pay_type !== "piece" && ["Present", "Half Day"].includes(s) && <>
+                {isSuperIqFoam ? (
+                  <label className="inline-flex h-12 items-center gap-2 rounded-xl border border-border px-4 text-sm font-semibold text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={s === "Present"}
+                      disabled={!!attendanceSaving[e.id]}
+                      onChange={(event) => mark(e, event.target.checked ? "Present" : "Absent")}
+                      aria-label={`Present: ${e.name}`}
+                      data-testid={`attendance-present-toggle-${e.id}`}
+                      className="h-4 w-4 accent-emerald-600"
+                    />
+                    {attendanceSaving[e.id] ? "Saving..." : s === "Present" ? "Present" : "Absent"}
+                  </label>
+                ) : <>
+                  <button disabled={!!attendanceSaving[e.id]} onClick={() => mark(e, "Present")} data-testid={`present-btn-${e.id}`} className={`h-12 w-32 rounded-xl text-sm font-bold border-2 transition-colors disabled:opacity-60 ${s === "Present" ? "bg-emerald-600 border-emerald-600 text-white" : "border-emerald-200 text-emerald-700 hover:bg-emerald-50"}`}>{attendanceSaving[e.id] && s === "Present" ? "Saving…" : "Present"}</button>
+                  <button disabled={!!attendanceSaving[e.id]} onClick={() => mark(e, "Absent")} data-testid={`absent-btn-${e.id}`} className={`h-12 w-32 rounded-xl text-sm font-bold border-2 transition-colors disabled:opacity-60 ${s === "Absent" ? "bg-red-600 border-red-600 text-white" : "border-red-200 text-red-700 hover:bg-red-50"}`}>{attendanceSaving[e.id] && s === "Absent" ? "Saving…" : "Absent"}</button>
+                </>}
+                {!isSuperIqFoam && e.pay_type !== "piece" && ["Present", "Half Day"].includes(s) && <>
                   <div className="w-40"><Select label="Work shift" value={shiftMode} disabled={!!attendanceSaving[e.id] || !!workTimeSaving[e.id]}
                     onChange={(event) => {
                       const mode = event.target.value;
