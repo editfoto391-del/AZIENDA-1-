@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { CreditCard, Eye, ReceiptText, Search, Wallet } from "lucide-react";
+import { CreditCard, Download, Eye, ReceiptText, Search, Wallet } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtMoney, newKey, STATUS_META, today } from "@/lib/format";
 import { Badge, Btn, Card, Empty, Input, Modal, PageHeader, Select, Textarea } from "@/components/common";
 import { usesUnifiedPriceList } from "@/lib/company";
+import { downloadCustomerBalancePdf } from "@/lib/customerBalancePdf.mjs";
 import { PAYMENT_METHODS, RECEIVING_OPTIONS } from "@/lib/paymentMethods";
 import { useAuth } from "@/context/AuthContext";
 
@@ -32,6 +33,7 @@ export default function ClientPayments({ express = false }) {
   const [query, setQuery] = useState("");
   const [balanceFilter, setBalanceFilter] = useState("all");
   const [loading, setLoading] = useState(true);
+  const [downloadingBalances, setDownloadingBalances] = useState(false);
   const [profile, setProfile] = useState(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [payment, setPayment] = useState(null);
@@ -122,6 +124,20 @@ export default function ClientPayments({ express = false }) {
     (total, customer) => total + (balanceCentsByCustomer[customer.id] || 0),
     0,
   );
+  const downloadBalances = async () => {
+    if (downloadingBalances) return;
+    setDownloadingBalances(true);
+    try {
+      await downloadCustomerBalancePdf(customers, balanceCentsByCustomer, {
+        express,
+        generatedDate: today(),
+      });
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setDownloadingBalances(false);
+    }
+  };
   const visibleCustomers = filteredCustomers.filter((customer) => {
     const hasBalance = (balanceCentsByCustomer[customer.id] || 0) > 0;
     return balanceFilter === "all" || (balanceFilter === "with-balance" ? hasBalance : !hasBalance);
@@ -289,6 +305,16 @@ export default function ClientPayments({ express = false }) {
   return (
     <div>
       <PageHeader title={express ? "Express Website Payments and Balances" : "Clients Payments and Balances"} subtitle={loading ? "Loading clients..." : `${customers.length} clients`}>
+        {user?.company_id === "superiqfoam" && (
+          <Btn
+            variant="outline"
+            onClick={downloadBalances}
+            disabled={loading || downloadingBalances}
+            data-testid={express ? "express-client-balances-pdf" : "client-balances-pdf"}
+          >
+            <Download size={16} /> {downloadingBalances ? "Generating PDF..." : "Download all balances"}
+          </Btn>
+        )}
         <Btn
           variant="outline"
           onClick={() => {
