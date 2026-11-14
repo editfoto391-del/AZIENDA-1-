@@ -198,7 +198,13 @@ export default function InvoiceList({ express = false }) {
         }
       }
       if (detailRequest.current !== requestId) return;
-      let phone = resolveWhatsAppPhone(customer?.phone, invoice.customer_phone, invoice.phone);
+      let phone = resolveWhatsAppPhone(
+        customer?.phone,
+        invoice.customer_phone,
+        invoice.phone,
+        customer?.client_number,
+        invoice.client_number,
+      );
       if (!phone && invoice.customer_name && !invoice.customer_deleted) {
         const result = await api.getUncached("/customers", {
           page: 1,
@@ -209,7 +215,7 @@ export default function InvoiceList({ express = false }) {
         const exactMatch = (result.items || []).find(
           (item) => item.name?.trim().toLowerCase() === invoice.customer_name.trim().toLowerCase(),
         );
-        phone = resolveWhatsAppPhone(exactMatch?.phone);
+        phone = resolveWhatsAppPhone(exactMatch?.phone, exactMatch?.client_number);
       }
       if (!phone) throw new Error("This customer does not have a valid phone number.");
 

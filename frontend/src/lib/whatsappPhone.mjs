@@ -3,6 +3,7 @@ export const normalizeWhatsAppPhone = (phone) => {
   if (digits.startsWith("00")) digits = digits.slice(2);
   if (digits.startsWith("0")) digits = `27${digits.slice(1)}`;
   if (digits.startsWith("270")) digits = `27${digits.slice(3)}`;
+  if (/^[6-8]\d{8}$/.test(digits)) digits = `27${digits}`;
   return digits.length >= 7 && digits.length <= 15 ? digits : "";
 };
 
