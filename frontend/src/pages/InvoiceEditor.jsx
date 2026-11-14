@@ -107,7 +107,7 @@ export default function InvoiceEditor({ express = false }) {
   const [stockItems, setStockItems] = useState([]);
   const [settings, setSettings] = useState({});
   const [inv, setInv] = useState({
-    customer_id: "", customer_name: "", date: today(), due_date: today(), zone: 1,
+    customer_id: "", customer_name: "", customer_phone: "", customer_city: "", date: today(), due_date: today(), zone: 1,
     payment_terms: defaultInvoicePaymentTerms(user?.company_id), reference: "", notes: "", items: [emptyItem()],
     discount: 0, extra_charges: 0, delivery_fee: 0, made_by: "",
     client_number: "", assigned_driver_id: "", assigned_driver_name: "",
@@ -197,6 +197,17 @@ export default function InvoiceEditor({ express = false }) {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, user?.can_edit_invoices_without_supervisor, isInvoiceOwner, express]);
+
+  useEffect(() => {
+    if (!id || !inv.customer_id) return;
+    const customer = customers.find((item) => item.id === inv.customer_id);
+    if (!customer) return;
+    setInv((current) => ({
+      ...current,
+      customer_phone: current.customer_phone ?? customer.phone ?? "",
+      customer_city: current.customer_city ?? customer.city ?? "",
+    }));
+  }, [customers, id, inv.customer_id]);
 
   useEffect(() => {
     if (id) {
@@ -503,7 +514,7 @@ export default function InvoiceEditor({ express = false }) {
       else selectedZone = inv.zone;
     }
     setZoneFromLastInvoice(!unifiedPriceList && lastZone.fromLastInvoice && selectedZone === zone);
-    setInv({ ...inv, customer_id: cid, customer_name: c.name, client_number: c.client_number || "", payment_terms: user?.company_id === "superiqfoam" ? defaultInvoicePaymentTerms(user.company_id) : c.payment_terms, zone: selectedZone, items, destination: inv.destination || c.city || "" });
+    setInv({ ...inv, customer_id: cid, customer_name: c.name, customer_phone: c.phone || "", customer_city: c.city || "", client_number: c.client_number || "", payment_terms: user?.company_id === "superiqfoam" ? defaultInvoicePaymentTerms(user.company_id) : c.payment_terms, zone: selectedZone, items, destination: inv.destination || c.city || "" });
     if (!c.city) toast.info("This customer has no saved city. Please confirm the delivery destination.");
   };
 
@@ -542,6 +553,8 @@ export default function InvoiceEditor({ express = false }) {
       ...current,
       customer_id: customer?.id || order.customer_id || "",
       customer_name: customer?.name || order.customer_name || "",
+      customer_phone: customer?.phone || "",
+      customer_city: customer?.city || "",
       client_number: customer?.client_number || "",
       payment_terms: user?.company_id === "superiqfoam" ? defaultInvoicePaymentTerms(user.company_id) : customer?.payment_terms || current.payment_terms,
       zone,
@@ -560,7 +573,7 @@ export default function InvoiceEditor({ express = false }) {
     }
     zoneLookupRef.current += 1;
     setZoneFromLastInvoice(false);
-    setInv((prev) => ({ ...prev, customer_id: "", customer_name: name, client_number: "", destination: "" }));
+    setInv((prev) => ({ ...prev, customer_id: "", customer_name: name, customer_phone: "", customer_city: "", client_number: "", destination: "" }));
   };
 
   const paymentTermOptions = [...new Set([
@@ -646,7 +659,9 @@ export default function InvoiceEditor({ express = false }) {
       outstanding: Number(outstanding) || 0,
     })),
     include_previous_balance: inv.include_previous_balance !== false,
-    customer_id: inv.customer_id, customer_name: inv.customer_name, date: inv.date,
+    customer_id: inv.customer_id, customer_name: inv.customer_name,
+    customer_phone: inv.customer_phone || "", customer_city: inv.customer_city || "",
+    date: inv.date,
     due_date: inv.due_date, zone: inv.zone, payment_terms: inv.payment_terms,
     reference: inv.reference, notes: inv.notes, destination: inv.destination || "",
     order_ids: selectedDeliveryNote ? [selectedDeliveryNote] : [],
@@ -713,6 +728,8 @@ export default function InvoiceEditor({ express = false }) {
         else if (inv.customer_name.trim()) {
           const createdCustomer = await api.post("/customers", {
             name: inv.customer_name.trim(),
+            phone: inv.customer_phone || "",
+            city: inv.customer_city || "",
             default_zone: inv.zone,
             payment_terms: inv.payment_terms,
             active: true,
@@ -720,6 +737,16 @@ export default function InvoiceEditor({ express = false }) {
           customerId = createdCustomer.id;
           setCustomers((current) => [...current, createdCustomer]);
         }
+      }
+      const savedCustomer = customers.find((customer) => customer.id === customerId);
+      const contactChanges = {};
+      const phone = (inv.customer_phone || "").trim();
+      const city = (inv.customer_city || "").trim();
+      if (phone && phone !== (savedCustomer?.phone || "")) contactChanges.phone = phone;
+      if (city && city !== (savedCustomer?.city || "")) contactChanges.city = city;
+      if (customerId && Object.keys(contactChanges).length) {
+        const updatedCustomer = await api.put(`/customers/${customerId}/invoice-contact`, contactChanges);
+        setCustomers((current) => current.map((customer) => customer.id === customerId ? updatedCustomer : customer));
       }
       const newProductsToSave = saveNewEntries && !invoiceItemPriceLocked ? (pendingSave?.newProducts || []) : [];
       if (newProductsToSave.length) {
@@ -1008,7 +1035,12 @@ export default function InvoiceEditor({ express = false }) {
       true,
     );
   };
-  const custObj = customers.find((c) => c.id === inv.customer_id) || {};
+  const savedCustomer = customers.find((c) => c.id === inv.customer_id) || {};
+  const custObj = {
+    ...savedCustomer,
+    phone: inv.customer_phone ?? savedCustomer.phone ?? "",
+    city: inv.customer_city ?? savedCustomer.city ?? "",
+  };
   const canEditClientNumber = !user?.is_worker || user.allowed_sections?.includes("customers");
   const previousInvoicesBalance = previousInvoices.reduce(
     (total, invoice) => total + (Number(invoice.outstanding) || 0),
@@ -1140,14 +1172,7 @@ export default function InvoiceEditor({ express = false }) {
                 </Select>}
                 <Input label="Customer *" list="invoice-customer-options" value={inv.customer_name || ""} onChange={(e) => setCustomerName(e.target.value)} data-testid="invoice-customer-select" />
                 <datalist id="invoice-customer-options">{customers.filter((customer) => customer.active).map((customer) => <option key={customer.id} value={customer.name} />)}</datalist>
-                <div className={`grid ${unifiedPriceList ? "grid-cols-1" : "grid-cols-2"} gap-3`}>{!unifiedPriceList && <div>
-                  <Select label="Price Zone" value={inv.zone} onChange={(e) => changeZone(Number(e.target.value))} data-testid="invoice-zone-select">
-                    <option value={1}>Zone 1</option><option value={2}>Zone 2</option>
-                  </Select>
-                  {zoneFromLastInvoice && <p className="mt-1 text-[10px] text-slate-500" data-testid="invoice-zone-last-used-note">Selected automatically based on the customer's last invoice.</p>}
-                </div>}<Select label="Payment Terms" value={inv.payment_terms} onChange={(e) => setInv({ ...inv, payment_terms: e.target.value })}>
-                  {paymentTermOptions.map((t) => <option key={t}>{t}</option>)}
-                </Select></div>
+                <Input label="Client Number" value={inv.client_number || ""} onChange={(event) => setInv({ ...inv, client_number: event.target.value })} disabled={!canEditClientNumber} data-testid="invoice-client-number" />
                 {isCod && <div className="grid grid-cols-2 gap-3 rounded-md border border-amber-200 bg-amber-50/50 p-3" data-testid="invoice-cod-fields">
                   <Input label="Cash to collect (R)" type="number" min="0" step="0.01" value={inv.cod_amount_due ?? ""} placeholder={totals.total ? String(Math.round(totals.total * 100) / 100) : ""} onChange={(e) => setInv({ ...inv, cod_amount_due: e.target.value })} data-testid="invoice-cod-due" />
                   <Input label="Cash actually collected (R)" type="number" min="0" step="0.01" value={inv.cod_amount_collected ?? ""} onChange={(e) => setInv({ ...inv, cod_amount_collected: e.target.value })} data-testid="invoice-cod-collected" />
@@ -1159,9 +1184,16 @@ export default function InvoiceEditor({ express = false }) {
               <Card className="p-5"><div className="flex items-center justify-between mb-4"><h3 className="font-bold text-slate-800 font-display">2. Invoice Details</h3><span className="font-mono text-sm font-bold text-primary">{inv.number || nextNum || "DRAFT"}</span></div>
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-3"><Input label="Invoice Date" type="date" value={inv.date} onChange={(e) => setInv({ ...inv, date: e.target.value })} /><Input label="Due Date" type="date" value={inv.due_date} onChange={(e) => setInv({ ...inv, due_date: e.target.value })} /></div>
+                  <div className={`grid ${unifiedPriceList ? "grid-cols-1" : "grid-cols-2"} gap-3`}>{!unifiedPriceList && <div>
+                    <Select label="Price Zone" value={inv.zone} onChange={(e) => changeZone(Number(e.target.value))} data-testid="invoice-zone-select">
+                      <option value={1}>Zone 1</option><option value={2}>Zone 2</option>
+                    </Select>
+                    {zoneFromLastInvoice && <p className="mt-1 text-[10px] text-slate-500" data-testid="invoice-zone-last-used-note">Selected automatically based on the customer's last invoice.</p>}
+                  </div>}<Select label="Payment Terms" value={inv.payment_terms} onChange={(e) => setInv({ ...inv, payment_terms: e.target.value })}>
+                    {paymentTermOptions.map((t) => <option key={t}>{t}</option>)}
+                  </Select></div>
                   {!id ? <>
                     <Input label="Made By *" value={inv.made_by || ""} onChange={(event) => setInv({ ...inv, made_by: event.target.value })} required data-testid="invoice-made-by" />
-                    <Input label="Client Number" value={inv.client_number || ""} onChange={(event) => setInv({ ...inv, client_number: event.target.value })} disabled={!canEditClientNumber} data-testid="invoice-client-number" />
                     <Select label="Assigned Driver" value={inv.assigned_driver_id || ""} onChange={(event) => {
                       const driver = drivers.find((item) => item.id === event.target.value);
                       setInv({ ...inv, assigned_driver_id: event.target.value, assigned_driver_name: driver?.name || "" });
@@ -1170,7 +1202,6 @@ export default function InvoiceEditor({ express = false }) {
                     </Select>
                   </> : <>
                     <Input label="Made By" value={inv.made_by || ""} readOnly data-testid="invoice-made-by" />
-                    <Input label="Client Number" value={inv.client_number || ""} onChange={(event) => setInv({ ...inv, client_number: event.target.value })} disabled={!canEditClientNumber} data-testid="invoice-client-number" />
                     <Select label="Assigned Driver" value={inv.assigned_driver_id || ""} onChange={(event) => {
                       const driver = drivers.find((item) => item.id === event.target.value);
                       setInv({ ...inv, assigned_driver_id: event.target.value, assigned_driver_name: driver?.name || "" });

@@ -203,7 +203,7 @@ export default function ClientPayments({ express = false }) {
     if (reason === null) return;
     if (!reason.trim()) return toast.error("A reason is required");
     const pendingAction = { record, reason: reason.trim() };
-    if (user?.can_skip_supervisor_approval) {
+    if (record.advance_payment || user?.can_skip_supervisor_approval) {
       performInvoicePaymentAction(record, pendingAction.reason);
     } else {
       setPendingPaymentReverse(pendingAction);

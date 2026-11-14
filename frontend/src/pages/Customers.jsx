@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
-import { fmtMoney, fmtDate, STATUS_META } from "@/lib/format";
-import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
+import { fmtMoney, fmtDate, newKey, STATUS_META, today } from "@/lib/format";
+import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty, Textarea } from "@/components/common";
 import { useAuth } from "@/context/AuthContext";
 import { usesUnifiedPriceList } from "@/lib/company";
 import { Users, Search, Plus, Pencil, Eye, Trash2 } from "lucide-react";
+import { PAYMENT_METHODS, RECEIVING_OPTIONS } from "@/lib/paymentMethods";
 
 const blank = { name: "", client_number: "", phone: "", email: "", address: "", city: "", notes: "", default_zone: 1, payment_terms: "Due on Delivery", active: true };
 
@@ -35,6 +36,9 @@ export default function Customers() {
   const [reload, setReload] = useState(0);
   const [modal, setModal] = useState(null); // form data or null
   const [profile, setProfile] = useState(null);
+  const [advanceForm, setAdvanceForm] = useState(null);
+  const [advanceAllocation, setAdvanceAllocation] = useState(null);
+  const [advanceSaving, setAdvanceSaving] = useState(false);
   const [sp, setSp] = useSearchParams();
   const nav = useNavigate();
   const profileRequest = useRef(0);
@@ -152,9 +156,92 @@ export default function Customers() {
   const pageCount = Math.max(1, Math.ceil(total / 50));
   const rangeStart = total === 0 ? 0 : (page - 1) * 50 + 1;
   const rangeEnd = Math.min(page * 50, total);
+  const availableAdvancePayments = (profile?.advance_payments || []).filter(
+    (payment) => !payment.reversed && !payment.archived && Number(payment.available_amount) > 0,
+  );
+  const unpaidInvoicesForAdvance = (payment) => (profile?.invoices || []).filter(
+    (invoice) => (invoice.invoice_type === "express") === Boolean(payment.express)
+      && !["draft", "void"].includes(invoice.status)
+      && Boolean(invoice.number)
+      && Number(invoice.outstanding) > 0,
+  );
+  const selectedAdvanceInvoice = advanceAllocation
+    ? unpaidInvoicesForAdvance(advanceAllocation.payment).find((invoice) => invoice.id === advanceAllocation.invoice_id)
+    : null;
+  const advanceApplicationLimit = selectedAdvanceInvoice && advanceAllocation
+    ? Math.min(Number(advanceAllocation.payment.available_amount), Number(selectedAdvanceInvoice.outstanding))
+    : 0;
   const otherBalancePayments = profile?.other_balance_payments?.length
     ? profile.other_balance_payments
     : profile?.c?.other_balance_payments || [];
+
+  const openAdvancePayment = () => setAdvanceForm({
+    amount: "",
+    method: "Cash",
+    receiving_on: "",
+    date: today(),
+    express: false,
+    reference: "",
+    notes: "",
+    idempotency_key: newKey(),
+  });
+  const saveAdvancePayment = async () => {
+    if (!profile || advanceSaving) return;
+    const amount = Number(advanceForm.amount);
+    if (!(amount > 0)) return toast.error("Amount must be greater than 0");
+    if (advanceForm.method !== "Cash" && !advanceForm.receiving_on) {
+      return toast.error("Select where the payment was received");
+    }
+    setAdvanceSaving(true);
+    try {
+      await api.post(`/customers/${profile.c.id}/advance-payments`, { ...advanceForm, amount });
+      setAdvanceForm(null);
+      toast.success("Advance payment recorded");
+      await openProfile(profile.c);
+      load();
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setAdvanceSaving(false);
+    }
+  };
+  const openAdvanceAllocation = (payment) => {
+    const invoice = unpaidInvoicesForAdvance(payment)[0];
+    setAdvanceAllocation({
+      payment,
+      invoice_id: invoice?.id || "",
+      amount: invoice
+        ? Math.min(Number(payment.available_amount), Number(invoice.outstanding)).toFixed(2)
+        : "",
+      idempotency_key: newKey(),
+    });
+  };
+  const applyAdvancePayment = async () => {
+    if (!profile || !advanceAllocation || advanceSaving) return;
+    const amount = Number(advanceAllocation.amount);
+    if (!(amount > 0) || amount > advanceApplicationLimit) {
+      return toast.error(`Amount must be between R 0.01 and ${fmtMoney(advanceApplicationLimit)}`);
+    }
+    setAdvanceSaving(true);
+    try {
+      await api.post(
+        `/customers/${profile.c.id}/advance-payments/${advanceAllocation.payment.id}/apply`,
+        {
+          invoice_id: advanceAllocation.invoice_id,
+          amount,
+          idempotency_key: advanceAllocation.idempotency_key,
+        },
+      );
+      setAdvanceAllocation(null);
+      toast.success("Advance payment applied to invoice");
+      await openProfile(profile.c);
+      load();
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setAdvanceSaving(false);
+    }
+  };
 
   return (
     <div>
@@ -245,8 +332,103 @@ export default function Customers() {
           </div>
         )}
       </Modal>
+      <Modal open={!!advanceForm} onClose={() => !advanceSaving && setAdvanceForm(null)} title="Record Advance Payment">
+        {advanceForm && (
+          <div className="space-y-4">
+            <p className="text-sm text-slate-500">{profile?.c.name} · This payment will be available to apply to the customer's invoices.</p>
+            <Input
+              label="Amount (R)"
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={advanceForm.amount}
+              onChange={(event) => setAdvanceForm({ ...advanceForm, amount: event.target.value })}
+              data-testid="advance-payment-amount"
+            />
+            <Select
+              label="Invoice type"
+              value={advanceForm.express ? "express" : "standard"}
+              onChange={(event) => setAdvanceForm({ ...advanceForm, express: event.target.value === "express" })}
+              data-testid="advance-payment-invoice-type"
+            >
+              <option value="standard">Standard</option>
+              <option value="express">Express Website</option>
+            </Select>
+            <div className="grid grid-cols-2 gap-3">
+              <Select label="Payment Method" value={advanceForm.method} onChange={(event) => setAdvanceForm({ ...advanceForm, method: event.target.value })}>
+                {PAYMENT_METHODS.map((method) => <option key={method}>{method}</option>)}
+              </Select>
+              <Input label="Date" type="date" value={advanceForm.date} onChange={(event) => setAdvanceForm({ ...advanceForm, date: event.target.value })} />
+            </div>
+            <Select label="Receiving on" value={advanceForm.receiving_on} onChange={(event) => setAdvanceForm({ ...advanceForm, receiving_on: event.target.value })}>
+              <option value="">Select receiving account</option>
+              {RECEIVING_OPTIONS.map((option) => <option key={option}>{option}</option>)}
+            </Select>
+            <Input label="Reference (optional)" value={advanceForm.reference} onChange={(event) => setAdvanceForm({ ...advanceForm, reference: event.target.value })} />
+            <Textarea label="Notes (optional)" rows={2} value={advanceForm.notes} onChange={(event) => setAdvanceForm({ ...advanceForm, notes: event.target.value })} />
+            <div className="flex justify-end gap-2">
+              <Btn variant="outline" disabled={advanceSaving} onClick={() => setAdvanceForm(null)}>Cancel</Btn>
+              <Btn variant="success" disabled={advanceSaving} onClick={saveAdvancePayment} data-testid="confirm-advance-payment">
+                {advanceSaving ? "Saving..." : "Record Payment"}
+              </Btn>
+            </div>
+          </div>
+        )}
+      </Modal>
+      <Modal open={!!advanceAllocation} onClose={() => !advanceSaving && setAdvanceAllocation(null)} title="Apply Advance Payment">
+        {advanceAllocation && (
+          <div className="space-y-4">
+            <p className="text-sm text-slate-500">
+              Available credit: {fmtMoney(advanceAllocation.payment.available_amount)}
+            </p>
+            <Select
+              label="Invoice"
+              value={advanceAllocation.invoice_id}
+              onChange={(event) => {
+                const invoice = unpaidInvoicesForAdvance(advanceAllocation.payment)
+                  .find((item) => item.id === event.target.value);
+                setAdvanceAllocation({
+                  ...advanceAllocation,
+                  invoice_id: event.target.value,
+                  amount: invoice
+                    ? Math.min(Number(advanceAllocation.payment.available_amount), Number(invoice.outstanding)).toFixed(2)
+                    : "",
+                });
+              }}
+              data-testid="advance-invoice-select"
+            >
+              <option value="">Select invoice</option>
+              {unpaidInvoicesForAdvance(advanceAllocation.payment).map((invoice) => (
+                <option key={invoice.id} value={invoice.id}>
+                  {invoice.number || "Invoice"} · Outstanding {fmtMoney(invoice.outstanding)}
+                </option>
+              ))}
+            </Select>
+            <p className="text-xs text-slate-500">Outstanding: {fmtMoney(selectedAdvanceInvoice?.outstanding || 0)}</p>
+            <Input
+              label="Amount to apply (R)"
+              type="number"
+              min="0.01"
+              max={advanceApplicationLimit}
+              step="0.01"
+              value={advanceAllocation.amount}
+              onChange={(event) => setAdvanceAllocation({ ...advanceAllocation, amount: event.target.value })}
+              data-testid="advance-application-amount"
+            />
+            <div className="flex justify-end gap-2">
+              <Btn variant="outline" disabled={advanceSaving} onClick={() => setAdvanceAllocation(null)}>Cancel</Btn>
+              <Btn
+                variant="success"
+                disabled={advanceSaving || !advanceAllocation.invoice_id || !(advanceApplicationLimit > 0)}
+                onClick={applyAdvancePayment}
+                data-testid="confirm-advance-application"
+              >{advanceSaving ? "Applying..." : "Apply to Invoice"}</Btn>
+            </div>
+          </div>
+        )}
+      </Modal>
 
-      <Modal open={!!profile} onClose={() => setProfile(null)} title={profile?.c.name} wide>
+      <Modal open={!!profile && !advanceForm && !advanceAllocation} onClose={() => setProfile(null)} title={profile?.c.name} wide>
         {profile && (
           <div className="space-y-5">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -268,6 +450,39 @@ export default function Customers() {
                 </button>
                 <Btn variant="success" onClick={saveOtherBalance} data-testid="save-other-balance-btn">Save balances</Btn>
               </div>
+            </Card>
+            <Card className="space-y-3 p-4" data-testid="customer-advance-payments">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-bold text-slate-700">Advance payments</h4>
+                  <p className="text-xs text-slate-500">Available credit: <b>{fmtMoney(availableAdvancePayments.reduce((total, payment) => total + Number(payment.available_amount || 0), 0))}</b></p>
+                </div>
+                <Btn variant="success" onClick={openAdvancePayment} data-testid="record-advance-payment">
+                  <Plus size={15} /> Record advance payment
+                </Btn>
+              </div>
+              {availableAdvancePayments.length > 0 ? (
+                <div className="space-y-2">
+                  {availableAdvancePayments.map((payment) => (
+                    <div key={payment.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-sm">
+                      <span className="text-slate-500">
+                        {fmtDate(payment.date)} · {payment.method} · Received {fmtMoney(payment.amount)} · Available {fmtMoney(payment.available_amount)}
+                      </span>
+                      {!unpaidInvoicesForAdvance(payment).length && <span className="text-xs text-slate-500">
+                        No issued {payment.express ? "Express" : "Standard"} invoice with an outstanding balance.
+                      </span>}
+                      <Btn
+                        variant="outline"
+                        disabled={!unpaidInvoicesForAdvance(payment).length}
+                        onClick={() => openAdvanceAllocation(payment)}
+                        data-testid={`apply-advance-payment-${payment.id}`}
+                      >Apply to invoice</Btn>
+                    </div>
+                  ))}
+                </div>
+              ) : <p className="text-sm text-slate-400">No advance credit available.</p>}
+              {!profile.invoices.some((invoice) => !["draft", "void"].includes(invoice.status) && Number(invoice.outstanding) > 0)
+                && <p className="text-xs text-slate-500">The customer needs an issued invoice with an outstanding balance before credit can be applied.</p>}
             </Card>
             {otherBalancePayments.length > 0 && (
               <section>
@@ -305,6 +520,8 @@ export default function Customers() {
                   <div key={p.id} className="flex items-center justify-between text-sm border border-border rounded-lg px-3 py-2">
                     <span>
                       {fmtDate(p.date)} · {p.method}
+                      {p.advance_payment && <span className="ml-1 text-slate-500">· Advance payment</span>}
+                      {p.advance_allocation && <span className="ml-1 text-slate-500">· Applied to invoice {p.invoice_number || ""}</span>}
                       {p.reversed && <span className="ml-2 font-semibold text-red-600">Reversed</span>}
                       {p.archived && <span className="ml-2 font-semibold text-slate-500">Archived invoice</span>}
                     </span>

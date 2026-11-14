@@ -6,8 +6,11 @@ import { fmtDateTime, fmtMoney } from "@/lib/format";
 import { companyProfileName, usesUnifiedPriceList } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
-import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2, Search, X, ChevronDown, ChevronUp, Download, Layers3 } from "lucide-react";
+import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2, Search, X, ChevronDown, ChevronUp, Download } from "lucide-react";
 import { listViewState, loadListRequest } from "@/lib/listRequest.mjs";
+import { PRODUCT_RANGE_SECTIONS, REPORT_PRODUCT_NAMES, normalizeReportValue } from "@/lib/stockRangeReport.mjs";
+import { drawStockRangeReportPdf } from "@/lib/stockRangeReportPdf.mjs";
+import { canonicalStockProduct, deduplicateStockRows, normalizeStockLabel, uniqueStockCategories } from "@/lib/stockCatalog.mjs";
 
 const ProductIdentificationManager = lazy(() => import("@/components/ProductIdentificationManager"));
 
@@ -24,49 +27,6 @@ const STOCK_CATEGORY = {
   "Ribbon Balck": ["Ribbon Black", "Black"],
   "Ribbon Pink": ["Ribbon Pink", "Ribbon"],
 };
-const isUppercaseCategory = (value) => {
-  const name = String(value).trim();
-  return name !== name.toLowerCase() && name === name.toUpperCase();
-};
-const WEEKLY_RANGE_SIZES = ["760x50", "760x75", "760x100", "760x120", "760x150", "910x50", "910x75", "910x100", "910x120", "910x150", "1070x50", "1070x75", "1070x100", "1070x120", "1070x150", "1370x50", "1370x75", "1370x100", "1370x120", "1370x150"];
-const PRODUCT_RANGE_SECTIONS = [
-  {
-    title: "MIX-COLOR RANGE",
-    columns: ["#", "SIZE (mm)", "TYPE", "QTY / STOCK"],
-    rows: WEEKLY_RANGE_SIZES.map((size, index) => ({ number: index + 1, size, type: "MIX-COLOR", group: "mix" })),
-  },
-  {
-    title: "RIBBON RANGE",
-    columns: ["#", "SIZE (mm)", "COLOR", "QTY / STOCK"],
-    rows: ["760x100", "760x120", "760x150", "910x100", "910x120", "910x150"].flatMap((size, index) => [
-      { number: index * 2 + 21, size, type: "RIBBON BLACK", group: "ribbon-black" },
-      { number: index * 2 + 22, size, type: "RIBBON PINK", group: "ribbon-pink" },
-    ]),
-  },
-  {
-    title: "STRONG BOY RANGE",
-    columns: ["#", "SIZE (mm)", "TYPE", "QTY / STOCK"],
-    rows: ["760x125", "910x125", "1070x125", "1370x125"].map((size, index) => ({
-      number: index + 33, size, type: "STRONG BOY", group: "strong-boy",
-    })),
-  },
-  {
-    title: "UNCOVERED RANGE",
-    columns: ["#", "SIZE (mm)", "TYPE", "QTY / STOCK"],
-    rows: ["910x100", "1070x100"].map((size, index) => ({
-      number: index + 37, size, type: "UNCOVERED (BLUE 16 DENSITY)", group: "uncovered-blue",
-    })),
-  },
-];
-const REPORT_PRODUCT_NAMES = {
-  mix: new Set(["simple", "standard", "simplemixcolor", "mixcolor"]),
-  "ribbon-black": new Set(["ribbonblack", "ribbonbalck", "black"]),
-  "ribbon-pink": new Set(["ribbonpink", "ribbon"]),
-  "strong-boy": new Set(["strongboy"]),
-  "uncovered-blue": new Set(["uncoveredblue16density"]),
-};
-const normalizeReportValue = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-
 export default function Stock() {
   const { user } = useAuth();
   const canViewStockCosts = user?.is_owner || user?.is_company_owner || user?.role === "owner";
@@ -102,29 +62,19 @@ export default function Stock() {
   };
   useEffect(() => { load(); }, []);
 
-  const filteredList = (list || []).filter((item) =>
-    (!category || (STOCK_CATEGORY[category] || [category]).includes(item.product))
-    && (!stockSearch.trim() || `${item.product} ${item.size}`.toLowerCase().includes(stockSearch.trim().toLowerCase()))
-  );
-  const stockCategories = [...new Set((list || []).map((item) => item.product).filter(Boolean))]
-    .filter((name) => !isUppercaseCategory(name));
-
   const run = async (fn, ok) => {
     if (busy) return; setBusy(true);
     try { await fn(); toast.success(ok); load(); return true; } catch (e) { toast.error(apiError(e)); return false; } finally { setBusy(false); }
   };
 
   // One row per product+size (latest record), so duplicate legacy rows are not counted twice.
-  const getCanonicalStock = () => {
-    const latest = new Map();
-    (list || []).forEach((stock) => {
-      const key = `${String(stock.product).toLowerCase()}|${String(stock.size).toLowerCase()}`;
-      const existing = latest.get(key);
-      if (!existing || String(stock.created_at || "") > String(existing.created_at || "")) latest.set(key, stock);
-    });
-    return [...latest.values()];
-  };
-  const canonicalStock = getCanonicalStock();
+  const canonicalStock = deduplicateStockRows(list || [], STOCK_CATEGORY);
+  const stockCategories = uniqueStockCategories(list || [], STOCK_CATEGORY);
+  const getCanonicalStock = () => canonicalStock;
+  const filteredList = canonicalStock.filter((item) =>
+    (!category || normalizedStockLabel(canonicalStockProduct(item.product)) === normalizedStockLabel(canonicalStockProduct(category)))
+    && (!stockSearch.trim() || `${item.product} ${item.size}`.toLowerCase().includes(stockSearch.trim().toLowerCase()))
+  );
   const getRangeReportQuantity = (group, size) => {
     const names = REPORT_PRODUCT_NAMES[group];
     const matches = canonicalStock.filter((item) =>
@@ -136,45 +86,20 @@ export default function Stock() {
     return quantity.toLocaleString(undefined, { maximumFractionDigits: 2 });
   };
   const downloadRangeReport = async ({ blank = false } = {}) => {
-    const sourceSheet = document.getElementById("superiqfoam-product-range-report");
-    const sheet = blank ? sourceSheet?.cloneNode(true) : sourceSheet;
-    if (!sheet || downloadingRangeReport) return;
+    if (downloadingRangeReport) return;
     setDownloadingRangeReport(true);
-    if (blank) {
-      sheet.removeAttribute("id");
-      sheet.classList.add("download-only-sheet");
-      sheet.setAttribute("aria-hidden", "true");
-      sheet.querySelectorAll("[data-stock-quantity]").forEach((cell) => {
-        cell.textContent = "";
-      });
-      document.body.appendChild(sheet);
-    }
     try {
-      await document.fonts?.ready;
-      const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
-        import("html2canvas-pro"),
-        import("jspdf"),
-      ]);
-      const canvas = await html2canvas(sheet, {
-        scale: 2,
-        backgroundColor: "#ffffff",
-        logging: false,
-        width: sheet.scrollWidth,
-        height: sheet.scrollHeight,
-        windowWidth: Math.max(document.documentElement.clientWidth, window.innerWidth, sheet.scrollWidth),
-      });
+      const { jsPDF } = await import("jspdf");
       const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
-      const margin = 6;
-      const scale = Math.min((297 - margin * 2) / canvas.width, (210 - margin * 2) / canvas.height);
-      const width = canvas.width * scale;
-      const height = canvas.height * scale;
-      pdf.addImage(canvas.toDataURL("image/png"), "PNG", (297 - width) / 2, (210 - height) / 2, width, height);
+      drawStockRangeReportPdf(pdf, PRODUCT_RANGE_SECTIONS, {
+        blank,
+        getQuantity: getRangeReportQuantity,
+      });
       pdf.save(blank ? "superiqfoam-stock-calculation-sheet.pdf" : "superiqfoam-current-stock.pdf");
       toast.success(blank ? "Stock calculation sheet downloaded" : "Current stock PDF downloaded");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not download the stock PDF");
     } finally {
-      if (blank) sheet.remove();
       setDownloadingRangeReport(false);
     }
   };
@@ -182,7 +107,8 @@ export default function Stock() {
   const getTotalsByCategory = () => {
     const totals = {};
     getCanonicalStock().forEach((s) => {
-      totals[s.product] = (totals[s.product] || 0) + Number(s.current || 0);
+      const key = normalizedStockLabel(canonicalStockProduct(s.product));
+      totals[key] = (totals[key] || 0) + Number(s.current || 0);
     });
     return totals;
   };
@@ -216,8 +142,8 @@ export default function Stock() {
     if (stock.product === "Candy") priceCategory = "Ribbon Black";
     return prices.find((item) =>
       item.zone === (unifiedPriceList ? 1 : zone)
-      && item.category === priceCategory
-      && item.size === stock.size
+      && normalizedStockLabel(item.category) === normalizedStockLabel(priceCategory)
+      && normalizedStockLabel(item.size) === normalizedStockLabel(stock.size)
       && item.active
     );
   };
@@ -338,79 +264,6 @@ export default function Stock() {
     <div>
       <PageHeader title="Finished Stock" subtitle="Calculated from the stock movement ledger" />
 
-      {isSuperIqFoam && (
-        <div className="download-only-sheet" aria-hidden="true">
-            <div
-              id="superiqfoam-product-range-report"
-              className="stock-range-report mx-auto min-w-[1000px] max-w-[1100px] rounded-lg border border-slate-300 bg-white p-4 text-slate-900 shadow-sm"
-              data-testid="product-range-report"
-            >
-              <header className="mb-3 rounded-t-md bg-[#10263e] px-4 py-3 text-white">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3 border-r border-white/60 pr-4">
-                    <Layers3 size={48} strokeWidth={2.5} className="shrink-0" aria-hidden="true" />
-                    <div className="leading-none">
-                      <h3 className="whitespace-nowrap text-[28px] font-black tracking-tight">SUPER IQ-FOAM</h3>
-                      <p className="mt-2 whitespace-nowrap text-[11px] font-bold tracking-[0.16em]">QUALITY · COMFORT · TRUST</p>
-                    </div>
-                  </div>
-                  <h3 className="text-right text-[32px] font-black leading-[1.05]">PRODUCT RANGE<br />REPORT</h3>
-                </div>
-              </header>
-              <div className="mb-3 grid grid-cols-3 gap-4 bg-slate-100 px-3 py-2 text-[13px] font-bold">
-                {["DATE:", "PREPARED BY:", "WAREHOUSE:"].map((label) => (
-                  <div key={label} className="flex items-end gap-1">
-                    <span className="whitespace-nowrap">{label}</span>
-                    <span className="mb-0.5 min-w-0 flex-1 border-b border-slate-500" aria-hidden="true" />
-                  </div>
-                ))}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                {PRODUCT_RANGE_SECTIONS.map((section) => (
-                  <section
-                    key={section.title}
-                    className={`overflow-hidden rounded-md border border-slate-400 ${section.title.includes("STRONG") || section.title.includes("UNCOVERED") ? "" : "col-span-2"}`}
-                  >
-                    <h4 className="bg-[#10263e] px-3 py-2 text-[18px] font-extrabold text-white">{section.title}</h4>
-                    <table className="w-full table-fixed border-collapse text-[13px] leading-[1.2]">
-                      <colgroup>
-                        {section.columns.map((column, index) => (
-                          <col key={column} style={{ width: index === 0 ? "11%" : index === 1 ? "30%" : index === 2 ? "31%" : "28%" }} />
-                        ))}
-                      </colgroup>
-                      <thead>
-                        <tr className="bg-slate-200 font-extrabold">
-                          {section.columns.map((column) => <th key={column} scope="col" className="border border-slate-400 px-2 py-2 text-center">{column}</th>)}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {section.rows.map((row) => (
-                          <tr key={`${row.number}-${row.size}`} className="h-[24px]">
-                            <td className="border border-slate-400 px-2 py-1 text-center font-semibold">{row.number}</td>
-                            <td className="border border-slate-400 px-2 py-1 text-center font-bold">{row.size.replace("x", " X ")}</td>
-                            <td className="border border-slate-400 px-2 py-1 text-center font-semibold">{row.type}</td>
-                            <td className="border border-slate-400 px-2 py-1 text-center font-bold" data-stock-quantity>{getRangeReportQuantity(row.group, row.size)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </section>
-                ))}
-              </div>
-              <footer className="mt-3 grid grid-cols-[1fr_0.7fr] gap-3">
-                <section className="flex h-16 items-center gap-3 overflow-hidden rounded-md border border-slate-500">
-                  <h4 className="flex h-full shrink-0 items-center bg-[#10263e] px-3 text-[13px] font-extrabold text-white">NOTES /<br />REMARKS:</h4>
-                  <div className="flex-1" />
-                </section>
-                <section className="flex h-16 flex-col justify-between rounded-md bg-[#10263e] px-4 py-2 text-white">
-                  <h4 className="text-[13px] font-extrabold">SIGNATURE:</h4>
-                  <div className="border-b border-white" />
-                </section>
-              </footer>
-            </div>
-          </div>
-      )}
-
       <div className="no-print -mt-3 mb-4 flex flex-wrap items-end gap-3">
         <div className="grid w-full max-w-2xl flex-1 gap-3 sm:grid-cols-2">
           {showStockSearch && (
@@ -490,7 +343,7 @@ export default function Stock() {
               ) : (
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
                   {stockCategories.map((cat) => {
-                    const total = getTotalsByCategory()[cat] || 0;
+                    const total = getTotalsByCategory()[normalizedStockLabel(canonicalStockProduct(cat))] || 0;
                     return total > 0 ? (
                       <div key={cat} className="bg-white rounded-md p-3 border border-slate-200">
                         <p className="text-xs text-slate-500 font-semibold">{cat}</p>
@@ -504,11 +357,11 @@ export default function Stock() {
                   </div>
                   <div className="bg-white rounded-md p-3 border border-slate-200">
                     <p className="text-xs text-slate-500 font-semibold">Ribbon Total</p>
-                    <p className="text-lg font-mono font-bold text-slate-800">{(getTotalsByCategory()["Ribbon Pink"] || 0) + (getTotalsByCategory()["Ribbon Black"] || 0)}</p>
+                    <p className="text-lg font-mono font-bold text-slate-800">{(getTotalsByCategory()[normalizedStockLabel(canonicalStockProduct("Ribbon Pink"))] || 0) + (getTotalsByCategory()[normalizedStockLabel(canonicalStockProduct("Ribbon Black"))] || 0)}</p>
                   </div>
                   <div className="bg-white rounded-md p-3 border border-slate-200">
                     <p className="text-xs text-slate-500 font-semibold">Strong Boy Total</p>
-                    <p className="text-lg font-mono font-bold text-slate-800">{getTotalsByCategory()["Strong Boy"] || 0}</p>
+                    <p className="text-lg font-mono font-bold text-slate-800">{getTotalsByCategory()[normalizedStockLabel(canonicalStockProduct("Strong Boy"))] || 0}</p>
                   </div>
                   {canViewStockCosts && (() => {
                     const value = getStockValueTotal(valueZone);

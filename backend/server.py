@@ -4686,6 +4686,10 @@ class CustomerIn(BaseModel):
             raise ValueError("Customer name is required")
         return value
 
+class CustomerInvoiceContactIn(BaseModel):
+    phone: Optional[str] = Field(default=None, max_length=100)
+    city: Optional[str] = Field(default=None, max_length=120)
+
 @api.get("/customers")
 async def get_customers(
     page: Optional[int] = Query(None, ge=1),
@@ -4789,6 +4793,31 @@ async def edit_customer(cid: str, body: CustomerIn, user=Depends(get_current_use
     await emit_workflow_event("customer.updated", record)
     return record
 
+@api.put("/customers/{cid}/invoice-contact")
+async def update_customer_invoice_contact(
+    cid: str,
+    body: CustomerInvoiceContactIn,
+    user=Depends(get_current_user),
+):
+    before = await db.customers.find_one({"id": cid}, {"_id": 0})
+    if not before:
+        raise HTTPException(404, "Customer not found")
+    contact = {
+        key: value.strip()
+        for key, value in body.model_dump(exclude_unset=True).items()
+        if value is not None and value.strip()
+    }
+    if not contact:
+        return before
+    record = await update_doc("customers", cid, contact)
+    await log_audit(
+        "customer", cid, "invoice_contact_updated", user,
+        before={key: before.get(key, "") for key in ("phone", "city")},
+        after={key: record.get(key, "") for key in ("phone", "city")},
+    )
+    await emit_workflow_event("customer.updated", record)
+    return record
+
 class OtherBalancePayIn(BaseModel):
     amount: float = Field(gt=0, le=1_000_000_000)
     note: Optional[str] = ""
@@ -4884,11 +4913,18 @@ async def customer_summary(
             history_invoice_query["invoice_type"] = {"$ne": "express"}
         history_invoices = await listall("invoices", history_invoice_query, limit=10000)
         invoice_ids = [invoice["id"] for invoice in history_invoices]
-        payment_records = await listall(
-            "payments",
-            {"customer_id": cid, "invoice_id": {"$in": invoice_ids}},
-            ("created_at", -1),
-        ) if invoice_ids else []
+        all_customer_payments = await listall(
+            "payments", {"customer_id": cid}, ("created_at", -1),
+        )
+        selected_express = express_only or invoice_type == "express"
+        payment_records = [
+            payment for payment in all_customer_payments
+            if payment.get("invoice_id") in invoice_ids
+            or (
+                payment.get("advance_payment")
+                and bool(payment.get("express")) == selected_express
+            )
+        ]
     for i in invs:
         i["status"] = derive_status(i)
         invoice_for_user(i, user)
@@ -4902,10 +4938,12 @@ async def customer_summary(
     ]
     customer_payments = [p for p in payment_records if not p.get("other_balance_payment")]
     pays = [p for p in customer_payments if not p.get("reversed") and not p.get("archived")]
+    advance_payments = [p for p in customer_payments if p.get("advance_payment")]
     other_balance_record = await db.customers.find_one({"id": cid}, {"_id": 0, "other_balance": 1})
     other_balance = (other_balance_record or {}).get("other_balance") or 0
     invoices_outstanding = dsum(i.get("outstanding", 0) for i in valid)
     return {"invoices": invs, "payments": customer_payments,
+            "advance_payments": advance_payments,
             "other_balance_payments": other_balance_history,
             "invoices_outstanding": invoices_outstanding,
             "other_balance": other_balance or 0,
@@ -4913,7 +4951,9 @@ async def customer_summary(
             "overdue": dsum(i.get("outstanding", 0) for i in valid if i["status"] == "overdue"),
             "total_invoiced": dsum(i.get("total", 0) for i in valid if not i.get("opening_balance")),
             "opening_balance": dsum(i.get("outstanding", 0) for i in valid if i.get("opening_balance")),
-            "payments_received": dsum(p.get("amount", 0) for p in pays),
+            "payments_received": dsum(
+                p.get("amount", 0) for p in pays if not p.get("advance_allocation")
+            ),
             "open_orders": [o for o in orders if o.get("status") in OPEN_ORDER_STATUSES],
             "upcoming_deliveries": [d for d in dels if d.get("status") in ("Planned", "Assigned", "Ready")]}
 
@@ -5185,6 +5225,8 @@ class PreviousInvoiceBalanceIn(BaseModel):
 class InvoiceIn(BaseModel):
     customer_id: Optional[str] = ""
     customer_name: str = ""
+    customer_phone: Optional[str] = Field(default="", max_length=100)
+    customer_city: Optional[str] = Field(default="", max_length=120)
     date: str = Field(default_factory=today_str)
     due_date: Optional[str] = None
     zone: int = 1
@@ -6437,6 +6479,14 @@ class PaymentIn(BaseModel):
     notes: Optional[str] = ""
     idempotency_key: Optional[str] = None
 
+class AdvancePaymentIn(PaymentIn):
+    express: bool = False
+
+class AdvancePaymentApplyIn(BaseModel):
+    invoice_id: str
+    amount: float = Field(gt=0, le=1_000_000_000)
+    idempotency_key: Optional[str] = None
+
 async def recalc_invoice_payments(iid):
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     pays = await listall("payments", {"invoice_id": iid, "reversed": {"$ne": True}, "archived": {"$ne": True}})
@@ -6444,6 +6494,188 @@ async def recalc_invoice_payments(iid):
     compute_invoice(inv)
     await db.invoices.update_one({"id": iid}, {"$set": {"amount_paid": inv["amount_paid"], "outstanding": inv["outstanding"], "updated_at": now_iso()}})
     return inv
+
+@api.post("/customers/{cid}/advance-payments")
+async def record_advance_payment(cid: str, body: AdvancePaymentIn, user=Depends(get_current_user)):
+    customer = await db.customers.find_one({"id": cid}, {"_id": 0})
+    if not customer:
+        raise HTTPException(404, "Customer not found")
+    amount = r2(body.amount)
+    if amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+    if body.idempotency_key:
+        duplicate = await db.payments.find_one(
+            {"idempotency_key": body.idempotency_key}, {"_id": 0},
+        )
+        if duplicate:
+            if duplicate.get("customer_id") != cid or not duplicate.get("advance_payment"):
+                raise HTTPException(409, "This payment key was already used for a different payment")
+            return duplicate
+
+    payment = body.model_dump()
+    payment.pop("express", None)
+    payment.update({
+        "amount": amount,
+        "available_amount": amount,
+        "invoice_id": None,
+        "invoice_number": "Advance payment",
+        "advance_payment": True,
+        "express": body.express,
+        "customer_id": cid,
+        "customer_name": customer.get("name"),
+        "reversed": False,
+        "user": user["email"],
+    })
+    if not body.idempotency_key:
+        payment.pop("idempotency_key", None)
+    try:
+        record = await insert("payments", payment)
+    except DuplicateKeyError:
+        duplicate = await db.payments.find_one(
+            {"idempotency_key": body.idempotency_key}, {"_id": 0},
+        )
+        if duplicate and duplicate.get("customer_id") == cid and duplicate.get("advance_payment"):
+            return duplicate
+        raise
+    await log_audit("payment", record["id"], "advance_payment_recorded", user, after=record)
+    await emit_workflow_event("payment.recorded", record)
+    return record
+
+@api.post("/customers/{cid}/advance-payments/{pid}/apply")
+async def apply_advance_payment(
+    cid: str,
+    pid: str,
+    body: AdvancePaymentApplyIn,
+    user=Depends(get_current_user),
+):
+    if body.idempotency_key:
+        duplicate = await db.payments.find_one(
+            {"idempotency_key": body.idempotency_key}, {"_id": 0},
+        )
+        if duplicate:
+            if (
+                duplicate.get("advance_payment_id") != pid
+                or duplicate.get("invoice_id") != body.invoice_id
+            ):
+                raise HTTPException(409, "This payment key was already used for a different invoice")
+            return duplicate
+
+    advance = await db.payments.find_one(
+        {
+            "id": pid, "customer_id": cid, "advance_payment": True,
+            "reversed": {"$ne": True}, "archived": {"$ne": True},
+        },
+        {"_id": 0},
+    )
+    if not advance:
+        raise HTTPException(404, "Available advance payment not found")
+    invoice = await db.invoices.find_one({"id": body.invoice_id}, {"_id": 0})
+    if not invoice or invoice.get("customer_id") != cid:
+        raise HTTPException(400, "Select an invoice belonging to this customer")
+    if invoice.get("archived"):
+        raise HTTPException(409, "Restore this invoice before applying an advance payment")
+    if invoice.get("status") in ("draft", "void") or not invoice.get("number"):
+        raise HTTPException(400, "Issue the invoice before applying an advance payment")
+    invoice_is_express = invoice.get("invoice_type") == "express"
+    if bool(advance.get("express")) != invoice_is_express:
+        raise HTTPException(400, "Advance payment and invoice must have the same invoice type")
+
+    amount = r2(body.amount)
+    if amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+    invoice_lock = await db.invoices.find_one_and_update(
+        {"id": body.invoice_id, "payment_lock": {"$ne": True}},
+        {"$set": {"payment_lock": True}},
+        projection={"_id": 0},
+    )
+    if not invoice_lock:
+        raise HTTPException(409, "Another payment for this invoice is being processed. Please retry")
+
+    advance_locked = False
+    try:
+        current = await recalc_invoice_payments(body.invoice_id)
+        outstanding = r2(current["outstanding"])
+        if amount > outstanding:
+            raise HTTPException(400, f"Amount exceeds invoice outstanding balance of R {outstanding:.2f}")
+
+        locked_advance = await db.payments.find_one_and_update(
+            {
+                "id": pid,
+                "customer_id": cid,
+                "advance_payment": True,
+                "reversed": {"$ne": True},
+                "available_amount": {"$gte": amount},
+                "advance_lock": {"$ne": True},
+            },
+            {"$set": {"advance_lock": True}},
+            projection={"_id": 0},
+        )
+        if not locked_advance:
+            raise HTTPException(409, "Advance payment no longer has enough available credit")
+        advance_locked = True
+
+        payment = {
+            "amount": amount,
+            "method": advance.get("method") or "Advance payment",
+            "receiving_on": advance.get("receiving_on") or "",
+            "date": advance.get("date") or today_str(),
+            "reference": advance.get("reference") or "",
+            "notes": f"Applied from advance payment {pid}",
+            "invoice_id": body.invoice_id,
+            "invoice_number": invoice.get("number"),
+            "customer_id": cid,
+            "customer_name": invoice.get("customer_name") or advance.get("customer_name"),
+            "advance_allocation": True,
+            "advance_payment_id": pid,
+            "express": invoice_is_express,
+            "reversed": False,
+            "user": user["email"],
+        }
+        if body.idempotency_key:
+            payment["idempotency_key"] = body.idempotency_key
+        await db.payments.update_one(
+            {"id": pid, "advance_lock": True},
+            {"$inc": {"available_amount": -amount}},
+        )
+        try:
+            record = await insert("payments", payment)
+        except DuplicateKeyError:
+            await db.payments.update_one(
+                {"id": pid, "advance_lock": True},
+                {"$inc": {"available_amount": amount}},
+            )
+            duplicate = await db.payments.find_one(
+                {"idempotency_key": body.idempotency_key}, {"_id": 0},
+            )
+            if (
+                duplicate
+                and duplicate.get("advance_payment_id") == pid
+                and duplicate.get("invoice_id") == body.invoice_id
+            ):
+                return duplicate
+            raise
+        except Exception:
+            await db.payments.update_one(
+                {"id": pid, "advance_lock": True},
+                {"$inc": {"available_amount": amount}},
+            )
+            raise
+        await db.payments.update_one(
+            {"id": pid, "advance_lock": True},
+            {"$unset": {"advance_lock": ""}},
+        )
+        advance_locked = False
+        await recalc_invoice_payments(body.invoice_id)
+        audit = invoice.get("audit", [])
+        audit.append({"action": "advance_payment_applied", "amount": amount, "at": now_iso(), "by": user["email"]})
+        await db.invoices.update_one({"id": body.invoice_id}, {"$set": {"audit": audit}})
+        await log_audit("payment", record["id"], "advance_payment_applied", user, after=record)
+        await emit_workflow_event("payment.recorded", record)
+        return record
+    finally:
+        if advance_locked:
+            await db.payments.update_one({"id": pid}, {"$unset": {"advance_lock": ""}})
+        await db.invoices.update_one({"id": body.invoice_id}, {"$unset": {"payment_lock": ""}})
 
 @api.post("/invoices/{iid}/payments")
 async def record_payment(iid: str, body: PaymentIn, user=Depends(get_current_user)):
@@ -6500,10 +6732,27 @@ async def reverse_payment(pid: str, body: ReasonIn, user=Depends(get_current_use
     payment = await db.payments.find_one({"id": pid, "reversed": {"$ne": True}}, {"_id": 0})
     if not payment:
         raise HTTPException(400, "Payment not found or already reversed")
-    if not payment.get("other_balance_payment"):
+    if payment.get("advance_payment"):
+        allocations = await db.payments.find({
+            "advance_payment_id": pid,
+            "advance_allocation": True,
+            "reversed": {"$ne": True},
+        }).to_list(None)
+        if allocations:
+            raise HTTPException(409, "Reverse all invoice allocations before reversing this advance payment")
+    elif not payment.get("other_balance_payment"):
         await consume_invoice_action_authorization(
             body.supervisor_authorization, payment["invoice_id"], "reverse_payment", user, pid,
         )
+    advance_source = None
+    if payment.get("advance_allocation"):
+        advance_source = await db.payments.find_one({
+            "id": payment.get("advance_payment_id"),
+            "advance_payment": True,
+            "reversed": {"$ne": True},
+        }, {"_id": 0})
+        if not advance_source:
+            raise HTTPException(409, "The source advance payment is no longer available")
     p = await db.payments.find_one_and_update(
         {"id": pid, "reversed": {"$ne": True}},
         {"$set": {"reversed": True, "reversed_reason": body.reason, "reversed_at": now_iso(), "reversed_by": user["email"]}},
@@ -6518,8 +6767,15 @@ async def reverse_payment(pid: str, body: ReasonIn, user=Depends(get_current_use
             {"id": p["customer_id"], "other_balance_payments.payment_id": pid},
             {"$set": {"other_balance_payments.$.reversed": True}},
         )
-    else:
+    elif p.get("advance_allocation"):
+        await db.payments.update_one(
+            {"id": p["advance_payment_id"], "reversed": {"$ne": True}},
+            {"$inc": {"available_amount": r2(p.get("amount", 0))}},
+        )
         await recalc_invoice_payments(p["invoice_id"])
+    else:
+        if not p.get("advance_payment"):
+            await recalc_invoice_payments(p["invoice_id"])
     await log_audit("payment", pid, "reversed", user, before={"reversed": False}, after={"reversed": True}, reason=body.reason)
     await emit_workflow_event("payment.reversed", p)
     return p
@@ -6567,13 +6823,26 @@ async def get_payments_summary(payment_date: str, user=Depends(get_current_user)
         for payment in payments
         if payment.get("other_balance_payment") and not payment.get("express")
     ]
+    advance_rows = [
+        {
+            "id": payment.get("id"), "invoice_id": None, "date": payment.get("date"),
+            "amount": r2(payment.get("amount", 0)), "method": payment.get("method") or "",
+            "receiving_on": payment.get("receiving_on") or "", "reference": payment.get("reference") or "",
+            "notes": payment.get("notes") or "", "invoice_number": "Advance payment",
+            "customer_name": payment.get("customer_name") or "",
+        }
+        for payment in payments
+        if payment.get("advance_payment") and not payment.get("express")
+    ]
     invoice_ids = list({
         payment.get("invoice_id")
         for payment in payments
-        if payment.get("invoice_id") and not payment.get("other_balance_payment")
+        if payment.get("invoice_id")
+        and not payment.get("other_balance_payment")
+        and not payment.get("advance_allocation")
     })
     if not invoice_ids:
-        return other_balance_rows
+        return other_balance_rows + advance_rows
     invoices = await db.invoices.find(
         {
             "id": {"$in": invoice_ids},
@@ -6583,7 +6852,7 @@ async def get_payments_summary(payment_date: str, user=Depends(get_current_user)
         {"_id": 0, "id": 1, "number": 1, "customer_name": 1},
     ).to_list(None)
     invoice_by_id = {invoice["id"]: invoice for invoice in invoices}
-    return other_balance_rows + [
+    return other_balance_rows + advance_rows + [
         {
             "id": payment.get("id"),
             "invoice_id": payment.get("invoice_id"),
@@ -6597,7 +6866,7 @@ async def get_payments_summary(payment_date: str, user=Depends(get_current_user)
             "customer_name": payment.get("customer_name") or invoice_by_id[payment["invoice_id"]].get("customer_name") or "",
         }
         for payment in payments
-        if payment.get("invoice_id") in invoice_by_id
+        if payment.get("invoice_id") in invoice_by_id and not payment.get("advance_allocation")
     ]
 
 
@@ -6628,9 +6897,24 @@ async def get_express_payments(payment_date: str, user=Depends(get_current_user)
         for payment in payments
         if payment.get("other_balance_payment") and payment.get("express")
     ]
-    payment_invoice_ids = list({payment.get("invoice_id") for payment in payments if payment.get("invoice_id")})
+    advance_rows = [
+        {
+            "id": payment.get("id"), "invoice_id": None, "date": payment.get("date"),
+            "amount": r2(payment.get("amount", 0)), "method": payment.get("method") or "",
+            "receiving_on": payment.get("receiving_on") or "", "reference": payment.get("reference") or "",
+            "notes": payment.get("notes") or "", "invoice_number": "Advance payment",
+            "customer_name": payment.get("customer_name") or "",
+            "include_on_daily_report": bool(payment.get("include_on_daily_report")),
+        }
+        for payment in payments
+        if payment.get("advance_payment") and payment.get("express")
+    ]
+    payment_invoice_ids = list({
+        payment.get("invoice_id") for payment in payments
+        if payment.get("invoice_id") and not payment.get("advance_allocation")
+    })
     if not payment_invoice_ids:
-        return other_balance_rows
+        return other_balance_rows + advance_rows
     invoices = await db.invoices.find(
         {
             "id": {"$in": payment_invoice_ids},
@@ -6641,9 +6925,9 @@ async def get_express_payments(payment_date: str, user=Depends(get_current_user)
     ).to_list(None)
     invoice_by_id = {invoice["id"]: invoice for invoice in invoices}
     if not invoice_by_id:
-        return other_balance_rows
+        return other_balance_rows + advance_rows
 
-    return other_balance_rows + [
+    return other_balance_rows + advance_rows + [
         {
             "id": payment.get("id"),
             "invoice_id": payment.get("invoice_id"),
@@ -6662,7 +6946,7 @@ async def get_express_payments(payment_date: str, user=Depends(get_current_user)
             ),
         }
         for payment in payments
-        if payment.get("invoice_id") in invoice_by_id
+        if payment.get("invoice_id") in invoice_by_id and not payment.get("advance_allocation")
     ]
 
 class PaymentDailyReportInclusionIn(BaseModel):
@@ -6677,7 +6961,10 @@ async def set_payment_daily_report_inclusion(
         raise HTTPException(404, "Payment not found")
     if payment.get("reversed") or payment.get("archived"):
         raise HTTPException(409, "Reversed or archived payments cannot be included in the daily report")
-    if not payment.get("other_balance_payment"):
+    if payment.get("advance_payment"):
+        if not payment.get("express"):
+            raise HTTPException(400, "Only Express Website payments can be selected separately for the daily report")
+    elif not payment.get("other_balance_payment"):
         invoice = await db.invoices.find_one({"id": payment.get("invoice_id")}, {"_id": 0})
         if not invoice:
             raise HTTPException(404, "Invoice not found")
@@ -14327,8 +14614,15 @@ async def get_daily_report(report_date: Optional[str] = None, user=Depends(get_c
     invoice_by_id = {invoice["id"]: invoice for invoice in linked_invoices}
     payment_rows = []
     for payment in payments:
+        if payment.get("advance_allocation"):
+            continue
         invoice = invoice_by_id.get(payment.get("invoice_id"), {})
-        if invoice.get("invoice_type") == "express" or (payment.get("other_balance_payment") and payment.get("express")):
+        if (
+            invoice.get("invoice_type") == "express"
+            or (
+                payment.get("other_balance_payment") or payment.get("advance_payment")
+            ) and payment.get("express")
+        ):
             if payment.get("daily_report_inclusion_set"):
                 if not payment.get("include_on_daily_report"):
                     continue
@@ -14624,7 +14918,7 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
              "items": invoice.get("items") or []})
     payment_rows = []
     for payment in payments:
-        if payment.get("reversed") or payment.get("archived"):
+        if payment.get("reversed") or payment.get("archived") or payment.get("advance_allocation"):
             continue
         linked_invoice = referenced_invoices_by_id.get(payment.get("invoice_id"))
         payment_rows.append(
@@ -15392,7 +15686,11 @@ async def dashboard_stock_movement_totals(stock_ids):
 
 async def dashboard_all_time_payment_total():
     rows = await db.payments.aggregate([
-        {"$match": {"reversed": {"$ne": True}, "archived": {"$ne": True}}},
+        {"$match": {
+            "reversed": {"$ne": True},
+            "archived": {"$ne": True},
+            "advance_allocation": {"$ne": True},
+        }},
         {"$group": {
             "_id": {"$ifNull": ["$id", "$_id"]},
             "amount": {"$first": "$amount"},
@@ -17177,8 +17475,10 @@ async def bulk_attendance(body: BulkAttendanceIn, user=Depends(get_current_user)
     missing = [eid for eid in employee_ids if eid not in known]
     if missing:
         raise HTTPException(400, "Employee not found")
-    for eid in employee_ids:
-        await add_attendance(AttendanceIn(employee_id=eid, date=body.date, status=body.status), user)
+    await asyncio.gather(*(
+        add_attendance(AttendanceIn(employee_id=eid, date=body.date, status=body.status), user)
+        for eid in employee_ids
+    ))
     return {"ok": True, "count": len(employee_ids)}
 
 # ---------------- Trip planner ----------------

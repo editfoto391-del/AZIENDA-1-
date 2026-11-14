@@ -85,11 +85,32 @@ class FakeEmployeeCollection:
         {"id": "employee-2", "name": "Ayanda Tailor"},
         ]
 
+    def find(self, query, projection=None):
+        employee_ids = query["id"]["$in"]
+        return FakeAsyncIterable([
+            record for record in self.records if record["id"] in employee_ids
+        ])
+
     async def find_one(self, query, projection=None):
         return deepcopy(next((
         record for record in self.records
         if all(record.get(key) == value for key, value in query.items())
         ), None))
+
+
+class FakeAsyncIterable:
+    def __init__(self, records):
+        self.records = records
+
+    def __aiter__(self):
+        self.records = iter(self.records)
+        return self
+
+    async def __anext__(self):
+        try:
+            return deepcopy(next(self.records))
+        except StopIteration:
+            raise StopAsyncIteration
 
 
 class FakeDailyDatabase:
@@ -180,6 +201,36 @@ def test_attendance_endpoint_updates_the_existing_employee_day(monkeypatch):
     assert present["id"] == absent["id"]
     assert absent["status"] == "Absent"
     assert len(database.attendance.records) == 1
+
+
+def test_bulk_attendance_saves_unique_employees_concurrently(monkeypatch):
+    database = FakeDailyDatabase()
+    monkeypatch.setattr(server, "db", database)
+    active_saves = 0
+    max_active_saves = 0
+    saved_employee_ids = []
+
+    async def save_attendance(body, user):
+        nonlocal active_saves, max_active_saves
+        active_saves += 1
+        max_active_saves = max(max_active_saves, active_saves)
+        await asyncio.sleep(0)
+        saved_employee_ids.append(body.employee_id)
+        active_saves -= 1
+
+    monkeypatch.setattr(server, "add_attendance", save_attendance)
+
+    result = asyncio.run(server.bulk_attendance(
+        server.BulkAttendanceIn(
+            date="2026-10-26",
+            employee_ids=["employee-1", "employee-2", "employee-1"],
+        ),
+        {"id": "admin"},
+    ))
+
+    assert result == {"ok": True, "count": 2}
+    assert sorted(saved_employee_ids) == ["employee-1", "employee-2"]
+    assert max_active_saves == 2
 
 
 def test_piecework_endpoint_saves_asive_tailor_even_without_piece_pay_flag(monkeypatch):

@@ -9,6 +9,7 @@ const SUPER_IQ_FOAM_BANK_ACCOUNTS = [
   ["FNB", "711 security", "63189328412"],
   ["Standard bank", "IQ FOAM", "301654387"],
   ["Capitec business", "Super  IQ FOAM", "1051246610"],
+  ["Red chili Absa bank", "Red chili", "4125668765"],
 ];
 
 const Logo = () => (
@@ -140,7 +141,6 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
                 <img src={shop2shopQr} alt="Shop2Shop QR code for N29RXH" className="h-16 w-16 border border-slate-300 bg-white p-0.5" />
                 <p><b>SHOP2SHOP</b><br /><b>N29RXH</b></p>
               </div>
-              <p>Reference: Use invoice number</p>
             </div>
           ) : (
             <>

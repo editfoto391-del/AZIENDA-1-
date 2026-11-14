@@ -46,6 +46,14 @@ def test_payment_summary_lists_standard_invoice_and_other_balance_payments(monke
             "id": "standard-other-balance", "other_balance_payment": True,
             "customer_name": "Old Balance Client", "amount": 25, "date": "2026-11-06",
         },
+        {
+            "id": "advance-payment", "advance_payment": True,
+            "customer_name": "Advance Client", "amount": 50, "date": "2026-11-06",
+        },
+        {
+            "id": "advance-allocation", "advance_allocation": True,
+            "invoice_id": "standard-invoice", "amount": 50, "date": "2026-11-06",
+        },
         {"id": "express-payment", "invoice_id": "express-invoice", "amount": 50},
         {"id": "archived-payment", "invoice_id": "archived-invoice", "amount": 10},
         {"id": "express-other-balance", "other_balance_payment": True, "express": True, "amount": 8},
@@ -64,11 +72,13 @@ def test_payment_summary_lists_standard_invoice_and_other_balance_payments(monke
     result = asyncio.run(server.get_payments_summary("2026-11-06", user={}))
 
     assert [payment["id"] for payment in result] == [
-        "standard-other-balance", "standard-payment",
+        "standard-other-balance", "advance-payment", "standard-payment",
     ]
-    assert result[1]["customer_name"] == "Standard Client"
-    assert result[1]["invoice_number"] == "INV-1"
-    assert sum(payment["amount"] for payment in result) == 125
+    assert result[1]["customer_name"] == "Advance Client"
+    assert result[1]["invoice_number"] == "Advance payment"
+    assert result[2]["customer_name"] == "Standard Client"
+    assert result[2]["invoice_number"] == "INV-1"
+    assert sum(payment["amount"] for payment in result) == 175
 
 
 def test_payment_summary_rejects_invalid_date():
