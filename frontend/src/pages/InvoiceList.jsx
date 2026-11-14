@@ -7,13 +7,7 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { usesUnifiedPriceList } from "@/lib/company";
-
-const normalizeWhatsAppPhone = (phone) => {
-  const digits = String(phone || "").replace(/\D/g, "");
-  if (digits.startsWith("00")) return digits.slice(2);
-  if (digits.startsWith("0")) return `27${digits.slice(1)}`;
-  return digits;
-};
+import { resolveWhatsAppPhone } from "@/lib/whatsappPhone.mjs";
 
 export default function InvoiceList({ express = false }) {
   const { user } = useAuth();
@@ -195,9 +189,16 @@ export default function InvoiceList({ express = false }) {
     event.stopPropagation();
     const requestId = ++detailRequest.current;
     try {
-      const customer = await api.get(`/customers/${invoice.customer_id}`);
+      let customer = null;
+      if (invoice.customer_id && !invoice.customer_deleted) {
+        try {
+          customer = await api.getUncached(`/customers/${invoice.customer_id}`);
+        } catch (error) {
+          if (error.response?.status !== 404) throw error;
+        }
+      }
       if (detailRequest.current !== requestId) return;
-      const phone = normalizeWhatsAppPhone(customer?.phone);
+      const phone = resolveWhatsAppPhone(customer?.phone, invoice.customer_phone, invoice.phone);
       if (!phone) throw new Error("This customer does not have a valid phone number.");
 
       const { token } = await api.post(`/invoices/${invoice.id}/share-link`, {});
