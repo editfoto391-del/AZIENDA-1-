@@ -129,12 +129,12 @@ export function Modal({ open, onClose, title, children, wide = false }) {
 
 export function PageHeader({ title, subtitle, children }) {
   return (
-    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
-      <div>
-        <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 font-display">{title}</h1>
+    <div className="flex min-w-0 flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+      <div className="min-w-0">
+        <h1 className="break-words text-2xl sm:text-3xl font-bold text-slate-900 font-display">{title}</h1>
         {subtitle && <p className="text-sm text-slate-500 mt-1">{subtitle}</p>}
       </div>
-      <div className="flex items-center gap-2">{children}</div>
+      <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">{children}</div>
     </div>
   );
 }
