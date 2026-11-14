@@ -3,6 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 
 PIECEWORK_THRESHOLD = 70
+DAILY_PIECEWORK_TARGET = 55
 SATURDAY_PIECEWORK_THRESHOLD = 40
 PIECEWORK_LOW_RATE = Decimal("2.50")
 PIECEWORK_HIGH_RATE = Decimal("3.50")
@@ -12,7 +13,10 @@ def _money(amount):
     return float(amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
-def calculate_piecework(records, *, include_sunday=True, start_date=None, end_date=None):
+def calculate_piecework(
+    records, *, include_sunday=True, start_date=None, end_date=None,
+    daily_rate_tiers=False,
+):
     daily_pieces = {}
     recorded_dates = set()
     week_starts = set()
@@ -47,11 +51,12 @@ def calculate_piecework(records, *, include_sunday=True, start_date=None, end_da
             pieces = daily_pieces.get(work_date, 0)
             recorded = work_date in recorded_dates
             weekday_pieces += pieces
-            deficit = max(0, PIECEWORK_THRESHOLD - pieces) if recorded else 0
-            surplus = max(0, pieces - PIECEWORK_THRESHOLD) if recorded else 0
+            target = DAILY_PIECEWORK_TARGET if daily_rate_tiers else PIECEWORK_THRESHOLD
+            deficit = max(0, target - pieces) if recorded else 0
+            surplus = max(0, pieces - target) if recorded else 0
             weekday_surplus += surplus
             own_deficit = {"date": work_date, "remaining": deficit}
-            if deficit:
+            if deficit and not daily_rate_tiers:
                 outstanding.append(own_deficit)
 
             recovered = 0
@@ -68,7 +73,8 @@ def calculate_piecework(records, *, include_sunday=True, start_date=None, end_da
                 "date": work_date.isoformat(),
                 "pieces": pieces,
                 "recorded": recorded,
-                "target": PIECEWORK_THRESHOLD,
+                "target": target,
+                **({"high_rate_target": PIECEWORK_THRESHOLD} if daily_rate_tiers else {}),
                 "surplus": surplus,
                 "deficit": deficit,
                 "recovered_previous_deficits": recovered,
@@ -93,11 +99,18 @@ def calculate_piecework(records, *, include_sunday=True, start_date=None, end_da
         weekday_low_pieces = 0
         weekday_pay = Decimal("0")
         for row in weekday_rows:
-            low_pieces = min(row["pieces"], row["unrecovered_deficit"]["remaining"])
+            if daily_rate_tiers:
+                low_pieces = row["pieces"] if row["pieces"] < PIECEWORK_THRESHOLD else 0
+                row["unrecovered_deficit"] = row["deficit"]
+            else:
+                low_pieces = min(row["pieces"], row["unrecovered_deficit"]["remaining"])
+                row["unrecovered_deficit"] = row["unrecovered_deficit"]["remaining"]
             high_pieces = row["pieces"] - low_pieces
-            row["unrecovered_deficit"] = row["unrecovered_deficit"]["remaining"]
             row["high_rate_pieces"] = high_pieces
             row["low_rate_pieces"] = low_pieces
+            row["piece_rate"] = float(
+                PIECEWORK_HIGH_RATE if high_pieces else PIECEWORK_LOW_RATE
+            )
             row["high_rate_pay"] = _money(Decimal(high_pieces) * PIECEWORK_HIGH_RATE)
             row["low_rate_pay"] = _money(Decimal(low_pieces) * PIECEWORK_LOW_RATE)
             row["pay"] = _money(
@@ -110,12 +123,23 @@ def calculate_piecework(records, *, include_sunday=True, start_date=None, end_da
             daily.append(row)
 
         saturday_rate = (
-            PIECEWORK_HIGH_RATE
+            PIECEWORK_LOW_RATE
+            if daily_rate_tiers
+            else PIECEWORK_HIGH_RATE
             if saturday_recorded and saturday_pieces >= SATURDAY_PIECEWORK_THRESHOLD
             else PIECEWORK_LOW_RATE
         )
-        saturday_high_pieces = saturday_pieces if saturday_recorded and saturday_pieces >= SATURDAY_PIECEWORK_THRESHOLD else 0
-        saturday_low_pieces = saturday_pieces if saturday_recorded and saturday_pieces < SATURDAY_PIECEWORK_THRESHOLD else 0
+        saturday_high_pieces = (
+            0 if daily_rate_tiers
+            else saturday_pieces
+            if saturday_recorded and saturday_pieces >= SATURDAY_PIECEWORK_THRESHOLD
+            else 0
+        )
+        saturday_low_pieces = (
+            saturday_pieces
+            if daily_rate_tiers or saturday_recorded and saturday_pieces < SATURDAY_PIECEWORK_THRESHOLD
+            else 0
+        )
         saturday_pay = Decimal(saturday_high_pieces) * PIECEWORK_HIGH_RATE + Decimal(saturday_low_pieces) * PIECEWORK_LOW_RATE
         daily.append({
             "date": saturday.isoformat(),

@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, fmtDateTime, today, newKey, STATUS_META, documentFilename } from "@/lib/format";
 import {
+  defaultInvoicePaymentTerms,
   includePreviousInvoiceBalanceByDefault,
   invoiceCustomerBalanceLabels,
   usesUnifiedPriceList,
@@ -94,6 +95,7 @@ export default function InvoiceEditor({ express = false }) {
   const nav = useNavigate();
   const invoicesPath = express ? "/express-invoices" : "/invoices";
   const [customers, setCustomers] = useState([]);
+  const [zoneFromLastInvoice, setZoneFromLastInvoice] = useState(false);
   const [drivers, setDrivers] = useState([]);
   const [deliveryNotes, setDeliveryNotes] = useState([]);
   const [loadingDeliveryNotes, setLoadingDeliveryNotes] = useState(false);
@@ -106,7 +108,7 @@ export default function InvoiceEditor({ express = false }) {
   const [settings, setSettings] = useState({});
   const [inv, setInv] = useState({
     customer_id: "", customer_name: "", date: today(), due_date: today(), zone: 1,
-    payment_terms: "Due on Delivery", reference: "", notes: "", items: [emptyItem()],
+    payment_terms: defaultInvoicePaymentTerms(user?.company_id), reference: "", notes: "", items: [emptyItem()],
     discount: 0, extra_charges: 0, delivery_fee: 0, made_by: "",
     client_number: "", assigned_driver_id: "", assigned_driver_name: "",
     idempotency_key: newKey(), tax_enabled: false, tax_rate: 15, status: "draft",
@@ -122,6 +124,7 @@ export default function InvoiceEditor({ express = false }) {
   const [pendingUnmatchedStock, setPendingUnmatchedStock] = useState(null);
   const [downloadIssuedDraft, setDownloadIssuedDraft] = useState(false);
   const docRef = useRef(null);
+  const zoneLookupRef = useRef(0);
   const saveLockRef = useRef(false);
   const pdfBusyRef = useRef(false);
   const [pdfBusy, setPdfBusy] = useState(false);
@@ -457,25 +460,56 @@ export default function InvoiceEditor({ express = false }) {
   };
 
   const changeZone = (zone) => {
+    zoneLookupRef.current += 1;
+    setZoneFromLastInvoice(false);
     const next = repriceItems(inv.items, zone);
     if (!confirmReprice(inv.items, next)) return;
     setInv({ ...inv, zone, items: next });
   };
 
-  const selectCustomer = (cid) => {
+  const lastInvoiceZoneForCustomer = async (customer) => {
+    if (user?.company_id !== "superiqfoam" || !customer?.id) {
+      return { zone: Number(customer?.default_zone) || 1, fromLastInvoice: false };
+    }
+    try {
+      const { zone } = await api.getUncached(
+        `/customers/${customer.id}/last-invoice-zone?express=${express}`,
+      );
+      if (zone === 1 || zone === 2) return { zone, fromLastInvoice: true };
+    } catch (error) {
+      toast.error(`Could not load the customer's last invoice zone: ${apiError(error)}`);
+    }
+    return { zone: Number(customer.default_zone) || 1, fromLastInvoice: false };
+  };
+
+  const selectCustomer = async (cid) => {
     const c = customers.find((x) => x.id === cid);
-    if (!c) { setInv((prev) => ({ ...prev, customer_id: "", customer_name: "" })); return; }
-    const zone = unifiedPriceList ? 1 : c.default_zone;
+    if (!c) {
+      zoneLookupRef.current += 1;
+      setZoneFromLastInvoice(false);
+      setInv((prev) => ({ ...prev, customer_id: "", customer_name: "" }));
+      return;
+    }
+    const lookupId = ++zoneLookupRef.current;
+    setZoneFromLastInvoice(false);
+    const lastZone = await lastInvoiceZoneForCustomer(c);
+    if (lookupId !== zoneLookupRef.current) return;
+    const zone = unifiedPriceList ? 1 : lastZone.zone;
     let items = inv.items;
+    let selectedZone = zone;
     if (!unifiedPriceList && zone !== inv.zone) {
       const next = repriceItems(inv.items, zone);
       if (confirmReprice(inv.items, next)) items = next;
+      else selectedZone = inv.zone;
     }
-    setInv({ ...inv, customer_id: cid, customer_name: c.name, client_number: c.client_number || "", payment_terms: c.payment_terms, zone: items === inv.items ? inv.zone : zone, items, destination: inv.destination || c.city || "" });
+    setZoneFromLastInvoice(!unifiedPriceList && lastZone.fromLastInvoice && selectedZone === zone);
+    setInv({ ...inv, customer_id: cid, customer_name: c.name, client_number: c.client_number || "", payment_terms: user?.company_id === "superiqfoam" ? defaultInvoicePaymentTerms(user.company_id) : c.payment_terms, zone: selectedZone, items, destination: inv.destination || c.city || "" });
     if (!c.city) toast.info("This customer has no saved city. Please confirm the delivery destination.");
   };
 
-  const loadDeliveryNote = (orderId) => {
+  const loadDeliveryNote = async (orderId) => {
+    const lookupId = ++zoneLookupRef.current;
+    setZoneFromLastInvoice(false);
     setSelectedDeliveryNote(orderId);
     if (!orderId) return;
     const order = deliveryNotes.find((item) => item.id === orderId);
@@ -490,7 +524,9 @@ export default function InvoiceEditor({ express = false }) {
 
     const customer = customers.find((item) => item.id === order.customer_id)
       || customers.find((item) => item.name.trim().toLowerCase() === String(order.customer_name || "").trim().toLowerCase());
-    const zone = unifiedPriceList ? 1 : Number(customer?.default_zone || inv.zone);
+    const lastZone = await lastInvoiceZoneForCustomer(customer);
+    if (lookupId !== zoneLookupRef.current) return;
+    const zone = unifiedPriceList ? 1 : Number(customer ? lastZone.zone : inv.zone);
     const noteItems = orderLines(order).map((item) => ({
       ...emptyItem(["Standard", "Simple"].includes(item.category) ? "Simple/Mix color" : item.category || ""),
       qty: Number(item.qty) || 0,
@@ -507,11 +543,12 @@ export default function InvoiceEditor({ express = false }) {
       customer_id: customer?.id || order.customer_id || "",
       customer_name: customer?.name || order.customer_name || "",
       client_number: customer?.client_number || "",
-      payment_terms: customer?.payment_terms || current.payment_terms,
+      payment_terms: user?.company_id === "superiqfoam" ? defaultInvoicePaymentTerms(user.company_id) : customer?.payment_terms || current.payment_terms,
       zone,
       destination: order.destination || customer?.city || "",
       items,
     }));
+    setZoneFromLastInvoice(!unifiedPriceList && lastZone.fromLastInvoice);
     toast.success(`Loaded customer and products from delivery note ${order.reference}`);
   };
 
@@ -521,6 +558,8 @@ export default function InvoiceEditor({ express = false }) {
       selectCustomer(match.id);
       return;
     }
+    zoneLookupRef.current += 1;
+    setZoneFromLastInvoice(false);
     setInv((prev) => ({ ...prev, customer_id: "", customer_name: name, client_number: "", destination: "" }));
   };
 
@@ -1101,9 +1140,12 @@ export default function InvoiceEditor({ express = false }) {
                 </Select>}
                 <Input label="Customer *" list="invoice-customer-options" value={inv.customer_name || ""} onChange={(e) => setCustomerName(e.target.value)} data-testid="invoice-customer-select" />
                 <datalist id="invoice-customer-options">{customers.filter((customer) => customer.active).map((customer) => <option key={customer.id} value={customer.name} />)}</datalist>
-                <div className={`grid ${unifiedPriceList ? "grid-cols-1" : "grid-cols-2"} gap-3`}>{!unifiedPriceList && <Select label="Price Zone" value={inv.zone} onChange={(e) => changeZone(Number(e.target.value))} data-testid="invoice-zone-select">
-                  <option value={1}>Zone 1</option><option value={2}>Zone 2</option>
-                </Select>}<Select label="Payment Terms" value={inv.payment_terms} onChange={(e) => setInv({ ...inv, payment_terms: e.target.value })}>
+                <div className={`grid ${unifiedPriceList ? "grid-cols-1" : "grid-cols-2"} gap-3`}>{!unifiedPriceList && <div>
+                  <Select label="Price Zone" value={inv.zone} onChange={(e) => changeZone(Number(e.target.value))} data-testid="invoice-zone-select">
+                    <option value={1}>Zone 1</option><option value={2}>Zone 2</option>
+                  </Select>
+                  {zoneFromLastInvoice && <p className="mt-1 text-[10px] text-slate-500" data-testid="invoice-zone-last-used-note">Selected automatically based on the customer's last invoice.</p>}
+                </div>}<Select label="Payment Terms" value={inv.payment_terms} onChange={(e) => setInv({ ...inv, payment_terms: e.target.value })}>
                   {paymentTermOptions.map((t) => <option key={t}>{t}</option>)}
                 </Select></div>
                 {isCod && <div className="grid grid-cols-2 gap-3 rounded-md border border-amber-200 bg-amber-50/50 p-3" data-testid="invoice-cod-fields">

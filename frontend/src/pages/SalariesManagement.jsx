@@ -98,19 +98,17 @@ const fetchPeriodPayments = async (period, periodType) => {
   return lists.flat();
 };
 
-const calculateReportTotals = (report, payments, monthlyIncluded, periodType) => {
-  const paymentByEmployee = Object.fromEntries((payments || []).map((payment) => [payment.employee_id, payment]));
+const calculateReportTotals = (report, monthlyIncluded, periodType) => {
   const includedRows = (report?.employees || [])
     .filter((employee) => !monthlyEmployee(employee)
       || (monthlyIncluded[employee.employee_id] ?? periodType === "monthly"))
     .map((employee) => {
-      const payment = paymentByEmployee[employee.employee_id];
-      const grossCents = cents(payment ? payment.gross_amount : employee.gross_salary);
-      const cutCents = cents(payment ? payment.deduction_amount : employee.cut);
+      const grossCents = cents(employee.gross_salary);
+      const cutCents = cents(employee.cut);
       return {
         grossCents,
         cutCents,
-        netCents: payment ? cents(payment.net_amount) : grossCents - cutCents,
+        netCents: grossCents - cutCents,
       };
     });
   return sumPayrollRows(includedRows);
@@ -193,7 +191,7 @@ function PayrollEmployeeCard({
         <div>
           <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Days attended</p>
           <p className="mt-1 text-sm font-semibold tabular-nums text-slate-700 sm:text-base">
-            {showPieces ? `${employee.piece_days?.length || 0} days` : `${employee.present_days || 0} full · ${employee.half_days || 0} half`}
+            {showPieces ? `${employee.piece_days?.length || 0} days` : `${employee.present_days || 0} full · ${employee.half_days || 0} half`} · {Number(employee.overtime_hours || 0).toLocaleString("en-ZA", { maximumFractionDigits: 2 })} {Number(employee.overtime_hours || 0) === 1 ? "hour" : "hours"} overtime
           </p>
         </div>
         <div>
@@ -205,7 +203,7 @@ function PayrollEmployeeCard({
           <p className="mt-1 font-mono text-sm font-semibold tabular-nums text-slate-700 sm:text-base">{fmtMoney(cutCents / 100)}</p>
         </div>
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Net payable</p>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Take-home salary</p>
           <p className="mt-1 font-mono text-sm font-bold tabular-nums text-slate-950 sm:text-base">{fmtMoney(netCents / 100)}</p>
         </div>
       </div>
@@ -234,13 +232,13 @@ function PayrollEmployeeCard({
           </div>
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Attendance pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.regular_pay || 0)}</p></div>
-            <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Overtime</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.overtime_pay || 0)}</p></div>
+            <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Overtime</p><p className="mt-1 font-mono font-semibold">{Number(employee.overtime_hours || 0).toLocaleString("en-ZA", { maximumFractionDigits: 2 })} {Number(employee.overtime_hours || 0) === 1 ? "hour" : "hours"} overtime · {Number(employee.overtime_pay || 0).toLocaleString("en-ZA", { maximumFractionDigits: 2 })} ZAR</p></div>
             {showPieces ? <>
               <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Piecework pay</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.piece_pay || 0)}</p></div>
               <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Recorded production</p><p className="mt-1 font-mono font-semibold">{employee.total_pieces || 0} pieces</p></div>
             </> : <>
               <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Working days</p><p className="mt-1 font-mono font-semibold">{employee.present_days || 0} full · {employee.half_days || 0} half</p></div>
-              <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Hours worked</p><p className="mt-1 font-mono font-semibold">{Number(employee.regular_hours || 0) + Number(employee.overtime_hours || 0)} hours</p></div>
+              <div className="rounded-xl bg-slate-50 p-3"><p className="text-slate-500">Hours worked this {periodType === "weekly" ? "week" : "month"} (lunch excluded)</p><p className="mt-1 font-mono font-semibold">{Number(employee.worked_hours ?? (Number(employee.regular_hours || 0) + Number(employee.overtime_hours || 0)))} hours</p></div>
             </>}
           </div>
           {employee.salary_rate_missing && <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">No configured {monthly ? "monthly" : "weekly"} salary rate is available. Payroll is shown as R0.00 and cannot be marked paid.</p>}
@@ -274,6 +272,7 @@ function PayrollEmployeeCard({
             <p className="font-semibold"><BadgeCheck size={16} className="mr-1 inline" /> Payment recorded</p>
             <p className="mt-2">Paid on {payment.payment_date}</p>
             <p className="mt-1 font-mono text-lg font-semibold">{fmtMoney(payment.net_amount)}</p>
+            <p className="mt-1 text-xs">This is the amount actually recorded as paid. Attendance and balance cuts recalculate the current take-home salary above, but do not change this payment record.</p>
             <p className="mt-1 text-xs">This record is locked and cannot be paid twice.</p>
           </div> : monthly && periodType !== "monthly"
             ? <p className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">This employee can be paid once from the Monthly payroll.</p>
@@ -461,15 +460,15 @@ export default function SalariesManagement() {
     const monthly = monthlyEmployee(employee);
     const included = !monthly || (monthlyIncluded[employee.employee_id] ?? periodType === "monthly");
     const payment = paymentByEmployee[employee.employee_id] || null;
-    const grossCents = cents(payment ? payment.gross_amount : employee.gross_salary);
-    const cutCents = cents(payment ? payment.deduction_amount : employee.cut);
+    const grossCents = cents(employee.gross_salary);
+    const cutCents = cents(employee.cut);
     return {
       employee,
       monthly,
       included,
       grossCents,
       cutCents,
-      netCents: payment ? cents(payment.net_amount) : grossCents - cutCents,
+      netCents: grossCents - cutCents,
       payment,
     };
   }).sort((a, b) =>
@@ -640,7 +639,6 @@ export default function SalariesManagement() {
       if (refreshed) {
         const recalculatedTotals = calculateReportTotals(
           refreshed.report,
-          refreshed.payments,
           monthlyIncluded,
           periodType,
         );
@@ -954,7 +952,7 @@ export default function SalariesManagement() {
                 </div>}
           <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-slate-500">
             <span>{reportRows.length} employees included · {includedPaidRows.length} settled</span>
-            <span>Paid records are snapshots; new borrowed balances carry forward separately.</span>
+            <span>Attendance and cuts update current payroll; recorded payments stay unchanged.</span>
           </div>
         </section>
 

@@ -12,6 +12,48 @@ def weekly_result(*daily_counts):
     ], include_sunday=False)
 
 
+def daily_tier_result(*daily_counts):
+    dates = [
+        "2026-10-26", "2026-10-27", "2026-10-28",
+        "2026-10-29", "2026-10-30", "2026-10-31",
+    ]
+    return calculate_piecework([
+        {"date": work_date, "pieces": pieces}
+        for work_date, pieces in zip(dates, daily_counts)
+    ], include_sunday=False, daily_rate_tiers=True)
+
+
+def test_daily_rate_tiers_pay_weekdays_at_two_fifty_until_70_then_three_fifty():
+    result = daily_tier_result(54, 55, 69, 70, 75, 40)
+
+    week = result["weeks"][0]
+    assert [day["target"] for day in week["days"][:5]] == [55] * 5
+    assert [day["high_rate_target"] for day in week["days"][:5]] == [70] * 5
+    assert [day["pay"] for day in week["days"][:5]] == [135, 137.5, 172.5, 245, 262.5]
+    assert [day["piece_rate"] for day in week["days"][:5]] == [2.5, 2.5, 2.5, 3.5, 3.5]
+
+
+def test_daily_rate_tiers_pay_saturday_at_two_fifty_with_a_40_piece_target():
+    result = daily_tier_result(70, 70, 70, 70, 70, 40)
+
+    saturday = result["weeks"][0]["days"][-1]
+    assert saturday["target"] == 40
+    assert saturday["piece_rate"] == 2.5
+    assert saturday["high_rate_pieces"] == 0
+    assert saturday["low_rate_pieces"] == 40
+    assert saturday["pay"] == 100
+
+
+def test_daily_rate_tiers_do_not_transfer_piece_targets_between_days():
+    result = daily_tier_result(50, 80)
+
+    week = result["weeks"][0]
+    assert week["days"][0]["pay"] == 125
+    assert week["days"][1]["pay"] == 280
+    assert week["days"][1]["recovered_previous_deficits"] == 0
+    assert week["weekday_recovery_pieces"] == 0
+
+
 def test_saturday_at_40_pays_all_pieces_at_the_high_rate():
     result = weekly_result(70, 70, 70, 70, 70, 40)
 

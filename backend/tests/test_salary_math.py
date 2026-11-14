@@ -5,6 +5,35 @@ import server
 from salary_math import calculate_salary_hours
 
 
+def test_target_tailors_salary_report_applies_daily_piece_rates(monkeypatch):
+    employee = {"id": "employee-ayanda", "name": "Ayanda Tailor"}
+    records = {
+        "employees": [employee],
+        "attendance": [],
+        "piece_production": [
+            {"employee_id": employee["id"], "date": "2026-10-26", "pieces": 55},
+            {"employee_id": employee["id"], "date": "2026-10-27", "pieces": 70},
+            {"employee_id": employee["id"], "date": "2026-10-31", "pieces": 40},
+        ],
+        "salary_advances": [],
+        "salary_cuts": [],
+    }
+
+    async def fake_listall(collection, *_args, **_kwargs):
+        return records[collection]
+
+    monkeypatch.setattr(server, "listall", fake_listall)
+
+    result = asyncio.run(
+        server.salary_report("2026-10-26", "2026-11-01")
+    )["employees"][0]
+
+    assert result["total_pieces"] == 165
+    assert result["piece_pay"] == 482.5
+    assert [day["pay"] for day in result["piece_days"][:2]] == [137.5, 245]
+    assert result["piece_days"][5]["pay"] == 100
+
+
 def test_five_weekdays_make_40_regular_hours():
     monday = date(2026, 10, 26)
     records = [
@@ -18,7 +47,7 @@ def test_five_weekdays_make_40_regular_hours():
     assert sum(day["overtime_hours"] for day in result) == 0
 
 
-def test_saturday_shift_is_five_regular_hours_even_after_full_weekdays():
+def test_saturday_shift_is_six_regular_hours_even_after_full_weekdays():
     monday = date(2026, 10, 26)
     records = [
         {"date": (monday + timedelta(days=day)).isoformat(), "status": "Present"}
@@ -27,13 +56,13 @@ def test_saturday_shift_is_five_regular_hours_even_after_full_weekdays():
     records.append({
         "date": (monday + timedelta(days=5)).isoformat(),
         "status": "Present",
-        "start_time": "08:00",
+        "start_time": "07:00",
         "end_time": "13:00",
     })
 
     result = calculate_salary_hours(records)
 
-    assert sum(day["regular_hours"] for day in result) == 45
+    assert sum(day["regular_hours"] for day in result) == 46
     assert sum(day["overtime_hours"] for day in result) == 0
 
 
@@ -47,6 +76,104 @@ def test_hours_beyond_each_days_standard_shift_are_overtime():
 
     assert result[0]["regular_hours"] == 8
     assert result[0]["overtime_hours"] == 2
+
+
+def test_custom_hours_after_17_are_paid_at_twenty_one_rand_per_hour(monkeypatch):
+    employee = {
+        "id": "employee-1",
+        "name": "Worker",
+        "weekly_salary": 1000,
+    }
+    records = {
+        "employees": [employee],
+        "attendance": [{
+            "employee_id": "employee-1",
+            "date": "2026-10-26",
+            "status": "Present",
+            "start_time": "08:00",
+            "end_time": "19:00",
+        }],
+        "piece_production": [],
+        "salary_advances": [],
+        "salary_cuts": [],
+    }
+
+    async def fake_listall(collection, *_args, **_kwargs):
+        return records[collection]
+
+    monkeypatch.setattr(server, "listall", fake_listall)
+
+    report = asyncio.run(server.salary_report("2026-10-26", "2026-11-01"))
+    result = report["employees"][0]
+
+    assert result["regular_hours"] == 8
+    assert result["overtime_hours"] == 2
+    assert result["overtime_pay"] == 42
+
+
+def test_custom_shift_after_17_does_not_count_post_17_hours_as_regular():
+    result = calculate_salary_hours([{
+        "date": "2026-10-26",
+        "status": "Present",
+        "start_time": "12:00",
+        "end_time": "19:00",
+    }])
+
+    assert result[0]["regular_hours"] == 5
+    assert result[0]["overtime_hours"] == 2
+    assert result[0]["overtime_after_17_hours"] == 2
+
+
+def test_only_time_after_17_counts_as_overtime_even_when_shift_starts_early():
+    result = calculate_salary_hours([{
+        "date": "2026-10-26",
+        "status": "Present",
+        "start_time": "07:00",
+        "end_time": "18:00",
+    }])
+
+    assert result[0]["regular_hours"] == 9
+    assert result[0]["overtime_hours"] == 1
+    assert result[0]["overtime_after_17_hours"] == 1
+
+
+def test_eight_to_eighteen_weekday_counts_nine_worked_hours_and_one_overtime():
+    result = calculate_salary_hours([{
+        "date": "2026-10-26",
+        "status": "Present",
+        "start_time": "08:00",
+        "end_time": "18:00",
+    }])[0]
+
+    assert result["regular_hours"] == 8
+    assert result["overtime_hours"] == 1
+    assert result["regular_hours"] + result["overtime_hours"] == 9
+    assert result["worked_hours"] == 9
+
+
+def test_saturday_seven_to_thirteen_counts_six_hours_without_lunch():
+    result = calculate_salary_hours([{
+        "date": "2026-10-31",
+        "status": "Present",
+        "start_time": "07:00",
+        "end_time": "13:00",
+    }])[0]
+
+    assert result["regular_hours"] == 6
+    assert result["overtime_hours"] == 0
+    assert result["attendance_fraction"] == 1
+    assert result["worked_hours"] == 6
+
+
+def test_long_custom_shift_ending_by_17_has_no_overtime():
+    result = calculate_salary_hours([{
+        "date": "2026-10-26",
+        "status": "Present",
+        "start_time": "06:00",
+        "end_time": "16:00",
+    }])
+
+    assert result[0]["overtime_hours"] == 0
 
 
 def test_standard_weekday_shift_excludes_one_hour_lunch_break():
@@ -93,14 +220,14 @@ def test_half_day_without_times_defaults_to_four_hours():
     assert result[0]["overtime_hours"] == 0
 
 
-def test_saturday_without_times_defaults_to_five_hours():
+def test_saturday_without_times_defaults_to_six_hours():
     result = calculate_salary_hours([{"date": "2026-10-31", "status": "Present"}])
 
-    assert result[0]["regular_hours"] == 5
+    assert result[0]["regular_hours"] == 6
     assert result[0]["overtime_hours"] == 0
 
 
-def test_six_day_schedule_totals_45_regular_hours():
+def test_six_day_schedule_totals_46_worked_hours():
     monday = date(2026, 10, 26)
     records = [
         {"date": (monday + timedelta(days=day)).isoformat(), "status": "Present"}
@@ -109,11 +236,11 @@ def test_six_day_schedule_totals_45_regular_hours():
 
     result = calculate_salary_hours(records)
 
-    assert sum(day["regular_hours"] for day in result) == 45
+    assert sum(day["regular_hours"] for day in result) == 46
     assert sum(day["overtime_hours"] for day in result) == 0
 
 
-def test_salary_report_prorates_fixed_salary_and_pays_overtime_at_twenty_rand(monkeypatch):
+def test_salary_report_pays_only_hours_after_17_as_overtime(monkeypatch):
     employee = {
         "id": "employee-1",
         "name": "Worker",
@@ -155,14 +282,15 @@ def test_salary_report_prorates_fixed_salary_and_pays_overtime_at_twenty_rand(mo
 
     assert result["present_days"] == 2
     assert result["half_days"] == 1
-    assert result["regular_hours"] == 17
+    assert result["regular_hours"] == 19
+    assert result["worked_hours"] == 21
     assert result["regular_pay"] == 416.67
-    assert result["overtime_hours"] == 5
-    assert result["overtime_pay"] == 100
-    assert result["gross_salary"] == 516.67
+    assert result["overtime_hours"] == 2
+    assert result["overtime_pay"] == 42
+    assert result["gross_salary"] == 458.67
     assert result["work_days_per_week"] == 6
     assert result["hours_per_week"] == 45
-    assert [day["pay"] for day in result["days"]] == [206.67, 103.33, 0, 206.67]
+    assert [day["pay"] for day in result["days"]] == [208.67, 83.33, 0, 166.67]
 
 
 def test_full_six_day_attendance_earns_the_fixed_weekly_salary(monkeypatch):
@@ -196,7 +324,7 @@ def test_full_six_day_attendance_earns_the_fixed_weekly_salary(monkeypatch):
     report = asyncio.run(server.salary_report("2026-10-26", "2026-11-01"))
     result = report["employees"][0]
 
-    assert result["regular_hours"] == 45
+    assert result["regular_hours"] == 46
     assert result["regular_pay"] == 1000
     assert result["overtime_hours"] == 0
     assert result["gross_salary"] == 1000

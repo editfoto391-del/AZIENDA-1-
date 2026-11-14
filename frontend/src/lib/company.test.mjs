@@ -1,9 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  defaultInvoicePaymentTerms,
   includePreviousInvoiceBalanceByDefault,
   invoiceCustomerBalanceLabels,
 } from "./company.js";
+
+test("Super IQ-Foam invoices default to 30 Days payment terms", () => {
+  assert.equal(defaultInvoicePaymentTerms("superiqfoam"), "30 Days");
+  assert.equal(defaultInvoicePaymentTerms("iqfoam-manufactoring"), "Due on Delivery");
+});
 
 test("previous invoice balance is hidden by default only for Super IQ-Foam", () => {
   assert.equal(includePreviousInvoiceBalanceByDefault("superiqfoam"), false);

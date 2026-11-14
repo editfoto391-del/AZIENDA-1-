@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { today } from "@/lib/format";
+import { calculateAttendanceHours } from "@/lib/attendanceHours.mjs";
 import { Card, Btn, Input, Select, Modal, PageHeader, Empty } from "@/components/common";
 import { Users, Plus, CheckCheck, Pencil, CalendarCheck, Wallet, Trash2, Download } from "lucide-react";
 import SalariesManagement from "@/pages/SalariesManagement";
@@ -51,7 +52,6 @@ export default function Attendance() {
   const [attendanceReportDownloading, setAttendanceReportDownloading] = useState(false);
   const [attendanceSaving, setAttendanceSaving] = useState({});
   const [section, setSection] = useState("attendance");
-  const [overtimeDraft, setOvertimeDraft] = useState({});
   const [workTimeDraft, setWorkTimeDraft] = useState({});
   const [shiftModeDraft, setShiftModeDraft] = useState({});
   const [workTimeSaving, setWorkTimeSaving] = useState({});
@@ -157,7 +157,7 @@ export default function Attendance() {
       department: employee.department || "",
       date,
       status,
-      overtime_hours: status === "Absent" ? 0 : previous?.overtime_hours || 0,
+      overtime_hours: 0,
       start_time: status === "Absent" ? null : times.start_time,
       end_time: status === "Absent" ? null : times.end_time,
     };
@@ -195,7 +195,7 @@ export default function Attendance() {
     const times = status === "Absent"
       ? { start_time: null, end_time: null }
       : {
-        start_time: record?.start_time || "08:00",
+        start_time: record?.start_time || (saturday ? "07:00" : "08:00"),
         end_time: record?.end_time || (saturday ? "13:00" : "17:00"),
       };
     await saveAttendance(emp, status, times);
@@ -270,17 +270,6 @@ export default function Attendance() {
       pieceSavingRef.current.delete(employee.id);
       setPieceSaving((current) => ({ ...current, [employee.id]: false }));
     }
-  };
-  const saveOvertime = async (employee) => {
-    const record = records.find((item) => item.employee_id === employee.id && item.date === date);
-    if (!record || !["Present", "Half Day"].includes(record.status)) return;
-    const overtime = Number(overtimeDraft[employee.id] ?? record.overtime_hours ?? 0);
-    if (!Number.isFinite(overtime) || overtime < 0) return toast.error("Overtime hours must be zero or more");
-    try {
-      const updated = await api.post("/attendance", { employee_id: employee.id, date, status: record.status, overtime_hours: overtime });
-      setRecords((current) => current.map((item) => item.id === updated.id ? updated : item));
-      setOvertimeDraft((current) => { const next = { ...current }; delete next[employee.id]; return next; });
-    } catch (e) { toast.error(apiError(e)); }
   };
   const markAll = async () => {
     if (busy) return; setBusy(true);
@@ -359,15 +348,12 @@ export default function Attendance() {
         ).length;
         const halfDays = recordsForEmployee.filter((record) => record?.status === "Half Day").length;
         const hours = recordsForEmployee.reduce((sum, record) => {
-          if (!record?.start_time || !record?.end_time) return sum;
-          const [startHour, startMinute] = record.start_time.split(":").map(Number);
-          const [endHour, endMinute] = record.end_time.split(":").map(Number);
-          const duration = ((endHour * 60 + endMinute) - (startHour * 60 + startMinute)) / 60;
-          return sum + (Number.isFinite(duration) && duration > 0 ? duration : 0);
+          return sum + calculateAttendanceHours(record).workedHours;
         }, 0);
-        const overtime = recordsForEmployee.reduce(
-          (sum, record) => sum + Number(record?.overtime_hours || 0), 0,
-        );
+        const overtime = recordsForEmployee.reduce((sum, record) => {
+          if (!["Present", "Half Day"].includes(record?.status)) return sum;
+          return sum + calculateAttendanceHours(record).overtimeHours;
+        }, 0);
         return {
           employee,
           records: recordsForEmployee,
@@ -569,7 +555,7 @@ export default function Attendance() {
       ) : (
       <>
       <div className="flex flex-wrap items-end gap-4">
-        <div className="w-48"><Input label="Date" type="date" value={date} onChange={(e) => { setDate(e.target.value); setOvertimeDraft({}); setWorkTimeDraft({}); setShiftModeDraft({}); }} data-testid="attendance-date-input" /></div>
+        <div className="w-48"><Input label="Date" type="date" value={date} onChange={(e) => { setDate(e.target.value); setWorkTimeDraft({}); setShiftModeDraft({}); }} data-testid="attendance-date-input" /></div>
       </div>
       <div className={`grid grid-cols-2 ${isSuperIqFoam ? "lg:grid-cols-4" : "lg:grid-cols-5"} gap-4`}>
         <Stat l="Present (day)" v={loading ? "..." : present} cls="text-emerald-600" k="day-present" />
@@ -585,15 +571,19 @@ export default function Attendance() {
             const s = statusOf(e.id);
             const per = summary?.per_employee?.find((p) => p.employee_id === e.id);
             const record = records.find((item) => item.employee_id === e.id && item.date === date);
+            const todayHours = ["Present", "Half Day"].includes(record?.status)
+              ? calculateAttendanceHours(record)
+              : null;
             const timeDraft = workTimeDraft[e.id] || {};
             const startTime = timeDraft.start_time ?? record?.start_time ?? "";
             const endTime = timeDraft.end_time ?? record?.end_time ?? "";
             const isSaturday = new Date(`${date}T00:00:00Z`).getUTCDay() === 6;
             const shiftMode = shiftModeDraft[e.id] || (
-              startTime === "08:00" && endTime === "17:00" ? "08:00-17:00"
-                : startTime === "08:00" && endTime === "13:00" ? "08:00-13:00"
-                  : startTime && endTime ? "custom"
-                    : isSaturday ? "08:00-13:00" : "08:00-17:00"
+              startTime === "07:00" && endTime === "13:00" ? "07:00-13:00"
+                : startTime === "08:00" && endTime === "17:00" ? "08:00-17:00"
+                  : startTime === "08:00" && endTime === "13:00" ? "08:00-13:00"
+                    : startTime && endTime ? "custom"
+                      : isSaturday ? "07:00-13:00" : "08:00-17:00"
             );
             return (
               <div key={e.id} className="flex flex-wrap items-center gap-3 rounded-xl border border-border px-3 py-2" data-testid={`att-row-${e.id}`}>
@@ -603,6 +593,9 @@ export default function Attendance() {
                     {e.is_general_worker && <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-600">General Worker</span>}
                   </p>
                   <p className="text-[11px] text-slate-400">Week {per?.week ?? 0} · Month {per?.month ?? 0} days</p>
+                  {todayHours && <p className="text-[11px] font-medium text-slate-600" data-testid={`attendance-hours-${e.id}`}>
+                    Today: {todayHours.workedHours} worked · {todayHours.overtimeHours} overtime hours
+                  </p>}
                 </div>
                 {e.pay_type === "piece" && <>
                   <div className="w-32"><Input label="Pieces today" type="number" min="0" step="1"
@@ -636,7 +629,7 @@ export default function Attendance() {
                   <button disabled={!!attendanceSaving[e.id]} onClick={() => mark(e, "Present")} data-testid={`present-btn-${e.id}`} className={`h-12 w-32 rounded-xl text-sm font-bold border-2 transition-colors disabled:opacity-60 ${s === "Present" ? "bg-emerald-600 border-emerald-600 text-white" : "border-emerald-200 text-emerald-700 hover:bg-emerald-50"}`}>{attendanceSaving[e.id] && s === "Present" ? "Saving…" : "Present"}</button>
                   <button disabled={!!attendanceSaving[e.id]} onClick={() => mark(e, "Absent")} data-testid={`absent-btn-${e.id}`} className={`h-12 w-32 rounded-xl text-sm font-bold border-2 transition-colors disabled:opacity-60 ${s === "Absent" ? "bg-red-600 border-red-600 text-white" : "border-red-200 text-red-700 hover:bg-red-50"}`}>{attendanceSaving[e.id] && s === "Absent" ? "Saving…" : "Absent"}</button>
                 </>}
-                {!isSuperIqFoam && e.pay_type !== "piece" && ["Present", "Half Day"].includes(s) && <>
+                {e.pay_type !== "piece" && ["Present", "Half Day"].includes(s) && <>
                   <div className="w-40"><Select label="Work shift" value={shiftMode} disabled={!!attendanceSaving[e.id] || !!workTimeSaving[e.id]}
                     onChange={(event) => {
                       const mode = event.target.value;
@@ -651,6 +644,7 @@ export default function Attendance() {
                     }} data-testid={`attendance-shift-${e.id}`}>
                     <option value="08:00-17:00">8:00–17:00</option>
                     <option value="08:00-13:00">8:00–13:00</option>
+                    <option value="07:00-13:00">7:00–13:00</option>
                     <option value="custom">Custom</option>
                   </Select></div>
                   {shiftMode === "custom" && <>
@@ -663,9 +657,8 @@ export default function Attendance() {
                   <Btn variant="outline" disabled={!!workTimeSaving[e.id]} onClick={() => saveWorkTime(e)} data-testid={`attendance-save-times-${e.id}`}>
                     {workTimeSaving[e.id] ? "Saving..." : "Save hours"}
                   </Btn>
+                  <p className="w-full text-xs text-slate-500">Overtime after 17:00: R21 per hour.</p>
                   </>}
-                  {!((record?.start_time && record?.end_time) || shiftMode !== "custom") && <div className="w-32"><Input label="Overtime hours" type="number" min="0" step="0.25" value={overtimeDraft[e.id] ?? record?.overtime_hours ?? 0}
-                  onChange={(event) => setOvertimeDraft((current) => ({ ...current, [e.id]: event.target.value }))} onBlur={() => saveOvertime(e)} data-testid={`attendance-overtime-${e.id}`} /></div>}
                 </>}
                 <button onClick={() => {
                   setNewDepartmentName("");

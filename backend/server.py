@@ -30,6 +30,7 @@ from costs_math import calculate_production_cost
 from piecework_math import calculate_piecework
 from salary_math import (
     OVERTIME_HOURLY_RATE,
+    OVERTIME_AFTER_17_HOURLY_RATE,
     STANDARD_PAID_DAYS_PER_WEEK,
     STANDARD_WEEKLY_HOURS,
     calculate_salary_hours,
@@ -4744,6 +4745,29 @@ async def get_customer(cid: str, user=Depends(get_current_user)):
     return customer
 
 
+@api.get("/customers/{cid}/last-invoice-zone")
+async def get_customer_last_invoice_zone(
+    cid: str,
+    express: bool = False,
+    user=Depends(get_current_user),
+):
+    if not await db.customers.find_one({"id": cid}, {"_id": 1}):
+        raise HTTPException(404, "Customer not found")
+    query = {
+        "customer_id": cid,
+        "invoice_type": "express" if express else {"$ne": "express"},
+        "archived": {"$ne": True},
+        "status": {"$ne": "void"},
+        "opening_balance": {"$ne": True},
+    }
+    invoices = await db.invoices.find(
+        query,
+        {"_id": 0, "zone": 1},
+    ).sort([("created_at", -1), ("date", -1)]).limit(1).to_list(1)
+    zone = invoices[0].get("zone") if invoices else None
+    return {"zone": zone if zone in (1, 2) else None}
+
+
 @api.post("/customers")
 async def add_customer(body: CustomerIn, user=Depends(get_current_user)):
     data = body.model_dump()
@@ -8204,6 +8228,12 @@ def piecework_includes_sunday(employee_name):
     normalized_name = " ".join((employee_name or "").split()).upper()
     return normalized_name not in seed_data.PIECEWORK_EMPLOYEE_NAMES
 
+
+def uses_daily_piecework_rates(employee):
+    normalized_name = " ".join((employee.get("name") or "").split()).upper()
+    return normalized_name in seed_data.PIECEWORK_EMPLOYEE_NAMES
+
+
 async def merge_duplicate_attendance(duplicate, employee, user):
     duplicate_records = await listall("attendance", {"employee_id": duplicate["id"]})
     for record in duplicate_records:
@@ -8723,10 +8753,12 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
         employee_piecework = calculate_piecework([
             record for record in piece_records if record.get("employee_id") == employee["id"]
         ], include_sunday=piecework_includes_sunday(employee.get("name", "")),
+            daily_rate_tiers=uses_daily_piecework_rates(employee),
             start_date=start_date, end_date=end_date) if is_piece_paid else {
                 "days": [], "total_pieces": 0, "piece_rate": 0, "piece_pay": 0, "weeks": [],
             }
         days = [] if is_piece_paid else calculate_salary_hours(rows)
+        worked_hours = sum(day["worked_hours"] for day in days)
         regular_hours = sum(day["regular_hours"] for day in days)
         overtime_hours = sum(day["overtime_hours"] for day in days)
         present_days = sum(day["status"] == "Present" for day in days)
@@ -8735,7 +8767,10 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
             day["regular_pay"] = r2(
                 D(weekly_salary or 0) * D(day["attendance_fraction"]) / D(STANDARD_PAID_DAYS_PER_WEEK)
             ) if not is_monthly_fixed else 0
-            day["overtime_pay"] = r2(D(day["overtime_hours"]) * D(OVERTIME_HOURLY_RATE)) if not is_monthly_fixed else 0
+            day["overtime_pay"] = r2((
+                D(day["overtime_hours"] - day["overtime_after_17_hours"]) * D(OVERTIME_HOURLY_RATE)
+                + D(day["overtime_after_17_hours"]) * D(OVERTIME_AFTER_17_HOURLY_RATE)
+            )) if not is_monthly_fixed else 0
             day["pay"] = r2(D(day["regular_pay"]) + D(day["overtime_pay"]))
         employee_advances = [item for item in advances if item.get("employee_id") == employee["id"]]
         employee_cuts = [item for item in cuts if item.get("employee_id") == employee["id"]]
@@ -8760,7 +8795,10 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
             ),
             Decimal("0"),
         )) if not is_monthly_fixed else 0
-        overtime_pay = r2(D(overtime_hours) * D(OVERTIME_HOURLY_RATE)) if not is_monthly_fixed else 0
+        overtime_pay = r2(sum(
+            (D(day["overtime_pay"]) for day in days),
+            Decimal("0"),
+        )) if not is_monthly_fixed else 0
         monthly_pay = r2(monthly_salary) if (
             is_monthly_fixed and monthly_salary is not None
             and (full_month_period or include_monthly_salaries)
@@ -8834,6 +8872,7 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
             "piece_days": employee_piecework["days"],
             "piece_weeks": employee_piecework["weeks"],
             "days": days, "present_days": present_days, "half_days": half_days,
+            "worked_hours": worked_hours,
             "regular_hours": regular_hours, "overtime_hours": overtime_hours,
             "regular_pay": regular_pay, "overtime_pay": overtime_pay, "gross_salary": gross,
             "balance_before_period": r2(balance_before_period),

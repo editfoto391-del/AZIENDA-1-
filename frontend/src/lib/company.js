@@ -9,6 +9,9 @@ export const usesUnifiedPriceList = (companyId) => UNIFIED_PRICE_COMPANIES.has(c
 
 export const includePreviousInvoiceBalanceByDefault = (companyId) => companyId !== "superiqfoam";
 
+export const defaultInvoicePaymentTerms = (companyId) =>
+  companyId === "superiqfoam" ? "30 Days" : "Due on Delivery";
+
 export const companyBrandName = (companyId) => ({
   "iqfoam-whole-sallers": "IQ FOAM WHOLESALERS",
   "iqfoam-manufactoring": "IQ FOAM MANUFACTURING",
