@@ -221,7 +221,7 @@ export default function InvoiceList({ express = false }) {
 
       const { token } = await api.post(`/invoices/${invoice.id}/share-link`, {});
       const link = `${window.location.origin}/shared-invoice/${encodeURIComponent(token)}`;
-      const message = `Hello ${invoice.customer_name || ""}, view or download your invoice PDF ${invoice.number || ""} here: ${link}`;
+      const message = `Hello Mr/Mrs,hope you're good!\nHeres your invoice,to view it pls open the following link: *${link}*`;
       setWhatsappDraft({
         url: `https://wa.me/${phone}?text=${encodeURIComponent(message)}`,
         invoiceNumber: invoice.number || "DRAFT",
