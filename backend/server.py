@@ -5517,7 +5517,8 @@ async def get_invoices(
             page_size,
             {
                 "_id": 0, "id": 1, "number": 1, "customer_id": 1,
-                "customer_name": 1, "customer_deleted": 1, "deleted_customer_name": 1,
+                "customer_name": 1, "customer_phone": 1,
+                "customer_deleted": 1, "deleted_customer_name": 1,
                 "date": 1, "due_date": 1, "zone": 1, "total": 1,
                 "amount_paid": 1, "outstanding": 1, "status": 1, "archived": 1,
                 "opening_balance": 1, "include_on_daily_report": 1, "created_at": 1,

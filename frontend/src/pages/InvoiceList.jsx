@@ -198,7 +198,19 @@ export default function InvoiceList({ express = false }) {
         }
       }
       if (detailRequest.current !== requestId) return;
-      const phone = resolveWhatsAppPhone(customer?.phone, invoice.customer_phone, invoice.phone);
+      let phone = resolveWhatsAppPhone(customer?.phone, invoice.customer_phone, invoice.phone);
+      if (!phone && invoice.customer_name && !invoice.customer_deleted) {
+        const result = await api.getUncached("/customers", {
+          page: 1,
+          page_size: 50,
+          q: invoice.customer_name,
+        });
+        if (detailRequest.current !== requestId) return;
+        const exactMatch = (result.items || []).find(
+          (item) => item.name?.trim().toLowerCase() === invoice.customer_name.trim().toLowerCase(),
+        );
+        phone = resolveWhatsAppPhone(exactMatch?.phone);
+      }
       if (!phone) throw new Error("This customer does not have a valid phone number.");
 
       const { token } = await api.post(`/invoices/${invoice.id}/share-link`, {});
