@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDateTime } from "@/lib/format";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader } from "@/components/common";
-import { Building2, Receipt, Tag, Truck, Save, Pencil, Plus, ShieldCheck, Fuel, MapPin, Smartphone, Trash2, UserPlus, CirclePause, CirclePlay, KeyRound, Database, RotateCcw, Search, X } from "lucide-react";
+import { Building2, Receipt, Tag, Truck, Save, Pencil, Plus, ShieldCheck, Fuel, MapPin, Smartphone, Trash2, UserPlus, CirclePause, CirclePlay, KeyRound, Database, RotateCcw, Search, X, Eye } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { usesUnifiedPriceList } from "@/lib/company";
 import shop2shopQr from "@/assets/shop2shop-n29rxh.png";
@@ -17,6 +17,7 @@ const TABS = [
   { k: "access", l: "Access", icon: ShieldCheck },
   { k: "profiles", l: "Password and Credentials", icon: KeyRound },
   { k: "backups", l: "Backups", icon: Database },
+  { k: "features", l: "Features", icon: Eye },
 ];
 
 function AccessTab({ users, companies, loading, currentUserId, isPrimaryOwner, onRoleChange, onStatusChange, onRemove, onCreate, onMakeOwner }) {
@@ -240,6 +241,8 @@ export default function Settings() {
   const [backupInfo, setBackupInfo] = useState(null);
   const [verified, setVerified] = useState({});
   const [recoveryCopy, setRecoveryCopy] = useState(null);
+  const [clientOrderLinkVisible, setClientOrderLinkVisible] = useState(null);
+  const [clientOrderLinkSaving, setClientOrderLinkSaving] = useState(false);
 
   const load = () => {
     api.get("/settings").then((settings) => { setS(settings); setDieselPrice(settings.diesel_price == null ? "" : String(settings.diesel_price)); });
@@ -290,6 +293,18 @@ export default function Settings() {
       .catch((error) => toast.error(apiError(error)))
       .finally(() => setBackupsLoading(false));
   }, [tab, user?.is_primary_owner]);
+  useEffect(() => {
+    if (tab !== "features" || !user?.is_primary_owner || !user?.is_owner || user?.is_worker) return;
+    let active = true;
+    api.get("/global-ui-settings")
+      .then((result) => {
+        if (active) setClientOrderLinkVisible(result.client_order_link_visible);
+      })
+      .catch((error) => {
+        if (active) toast.error(apiError(error));
+      });
+    return () => { active = false; };
+  }, [tab, user?.is_primary_owner, user?.is_owner, user?.is_worker]);
 
   const refreshBackups = async () => {
     setBackupsLoading(true);
@@ -452,6 +467,22 @@ export default function Settings() {
     catch (e) { toast.error(apiError(e)); }
   };
 
+  const saveClientOrderLinkVisibility = async () => {
+    if (clientOrderLinkVisible === null || clientOrderLinkSaving) return;
+    setClientOrderLinkSaving(true);
+    try {
+      const result = await api.put("/global-ui-settings/client-order-link", {
+        visible: clientOrderLinkVisible,
+      });
+      setClientOrderLinkVisible(result.client_order_link_visible);
+      toast.success("Client Order Link visibility updated for all profiles");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setClientOrderLinkSaving(false);
+    }
+  };
+
   const saveDieselPrice = async () => {
     const price = Number(dieselPrice);
     if (!Number.isFinite(price) || price <= 0) return toast.error("Enter a valid diesel price");
@@ -520,7 +551,7 @@ export default function Settings() {
     <div>
       <PageHeader title="Settings" subtitle="Configure your business" />
       <div className="flex gap-2 mb-6 overflow-x-auto no-print">
-        {TABS.filter((t) => (t.k !== "diesel" || user?.is_admin) && (t.k !== "access" || user?.is_owner) && (t.k !== "profiles" || user?.is_owner || user?.is_company_owner) && (t.k !== "backups" || user?.is_primary_owner)).map((t) => (
+        {TABS.filter((t) => (t.k !== "diesel" || user?.is_admin) && (t.k !== "access" || user?.is_owner) && (t.k !== "profiles" || user?.is_owner || user?.is_company_owner) && (t.k !== "backups" || user?.is_primary_owner) && (t.k !== "features" || (user?.is_primary_owner && user?.is_owner && !user?.is_worker))).map((t) => (
           <button key={t.k} onClick={() => setTab(t.k)} data-testid={`settings-tab-${t.k}`}
             className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold whitespace-nowrap ${tab === t.k ? "bg-primary text-white" : "bg-white border border-border text-slate-600"}`}>
             <t.icon size={16} /> {t.l}
@@ -676,6 +707,37 @@ export default function Settings() {
       )}
 
       {tab === "access" && user?.is_owner && <AccessTab users={accessUsers} companies={companies} loading={accessLoading} currentUserId={user.id} isPrimaryOwner={user.is_primary_owner} onRoleChange={changeRole} onStatusChange={changeStatus} onRemove={setRemoveUser} onCreate={createAccessUser} onMakeOwner={makeOwner} />}
+
+      {tab === "features" && user?.is_primary_owner && user?.is_owner && !user?.is_worker && (
+        <Card className="max-w-2xl space-y-4 p-6" data-testid="global-feature-settings">
+          <div>
+            <h3 className="font-bold text-slate-800 font-display">Client Order Link</h3>
+            <p className="mt-1 text-sm text-slate-500">
+              Show or hide the Client Order Link controls on the Orders page for every company profile.
+              Hiding the controls does not revoke existing links or stop customers from using them.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+            <input
+              type="checkbox"
+              checked={clientOrderLinkVisible === true}
+              disabled={clientOrderLinkVisible === null || clientOrderLinkSaving}
+              onChange={(event) => setClientOrderLinkVisible(event.target.checked)}
+              data-testid="client-order-link-visibility-toggle"
+            />
+            Show Client Order Link controls
+          </label>
+          <div>
+            <Btn
+              onClick={saveClientOrderLinkVisibility}
+              disabled={clientOrderLinkVisible === null || clientOrderLinkSaving}
+              data-testid="save-client-order-link-visibility"
+            >
+              <Save size={16} /> {clientOrderLinkSaving ? "Saving..." : "Save visibility"}
+            </Btn>
+          </div>
+        </Card>
+      )}
 
       {tab === "backups" && (
         <div className="space-y-4" data-testid="backups-tab">

@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtDateTime, fmtMoney, documentFilename } from "@/lib/format";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal, PageHeader, Empty } from "@/components/common";
-import { ClipboardList, Plus, Trash2, Pencil, ArrowRight, Eye, FileText, Printer, Download, Search, RotateCcw, MoreHorizontal, Factory } from "lucide-react";
+import { ClipboardList, Plus, Trash2, Pencil, ArrowRight, Eye, FileText, Printer, Download, Search, RotateCcw, MoreHorizontal, Factory, Link2 } from "lucide-react";
 import { useRef } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { DeliveryNote, orderLines } from "@/components/DeliveryNote";
@@ -53,6 +53,30 @@ const priceCategoriesForProduct = (product) => {
   if (normalized === "ribbon") return ["Ribbon", "Ribbon Black", "Ribbon Pink"];
   return [product];
 };
+
+function OrderOriginBadge({ order }) {
+  const isPublicOrder = order.source === "public_customer_order";
+  const label = isPublicOrder ? "Link entry" : "Manual entry";
+  const cls = isPublicOrder
+    ? "bg-violet-50 text-violet-700 border-violet-200"
+    : "bg-slate-100 text-slate-600 border-slate-200";
+  return <Badge cls={cls}>{label}</Badge>;
+}
+
+function CustomerMatchBadge({ order }) {
+  if (order.source !== "public_customer_order") return null;
+  const matchLabels = {
+    phone: ["Matched by phone", "bg-emerald-50 text-emerald-700 border-emerald-200"],
+    name: ["Matched by name", "bg-emerald-50 text-emerald-700 border-emerald-200"],
+    new: ["New customer created", "bg-blue-50 text-blue-700 border-blue-200"],
+    manually_assigned: ["Customer assigned by staff", "bg-blue-50 text-blue-700 border-blue-200"],
+    ambiguous_phone: ["Customer needs review", "bg-amber-50 text-amber-800 border-amber-200"],
+    ambiguous_name: ["Customer needs review", "bg-amber-50 text-amber-800 border-amber-200"],
+  };
+  const [label, cls] = matchLabels[order.customer_match_method]
+    || ["Customer match not recorded", "bg-amber-50 text-amber-800 border-amber-200"];
+  return <Badge cls={cls}>{label}</Badge>;
+}
 
 function OrderRowActions({ order, onView, onNote, onEdit, onAdvance, onCancel, onPurge, mobile = false }) {
   const nextStatus = STATUSES[STATUSES.indexOf(order.status) + 1];
@@ -311,6 +335,9 @@ export default function Orders() {
   const [selectedOrders, setSelectedOrders] = useState({});
   const [smartArrangement, setSmartArrangement] = useState(null);
   const [smartArrangementLoading, setSmartArrangementLoading] = useState(false);
+  const [customerOrderLinkEnabled, setCustomerOrderLinkEnabled] = useState(false);
+  const [customerOrderLinkVisible, setCustomerOrderLinkVisible] = useState(null);
+  const [customerOrderLinkBusy, setCustomerOrderLinkBusy] = useState(false);
   const detailRequest = useRef(0);
   const products = useMemo(() => {
     const byName = new Map();
@@ -376,6 +403,34 @@ export default function Orders() {
   }, [user?.company_id]);
 
   useEffect(() => {
+    let active = true;
+    setCustomerOrderLinkVisible(null);
+    api.get("/global-ui-settings")
+      .then((result) => {
+        if (active) setCustomerOrderLinkVisible(result.client_order_link_visible === true);
+      })
+      .catch((error) => {
+        if (active) toast.error(apiError(error));
+      });
+    return () => { active = false; };
+  }, [user?.company_id]);
+
+  const canManageCustomerOrderLink = !!user?.is_admin && !user?.is_worker;
+  useEffect(() => {
+    let active = true;
+    setCustomerOrderLinkEnabled(false);
+    if (!canManageCustomerOrderLink || customerOrderLinkVisible !== true) return undefined;
+    api.get("/customer-orders/share-link")
+      .then((result) => {
+        if (active) setCustomerOrderLinkEnabled(result.enabled);
+      })
+      .catch((error) => {
+        if (active) toast.error(apiError(error));
+      });
+    return () => { active = false; };
+  }, [canManageCustomerOrderLink, customerOrderLinkVisible, user?.company_id]);
+
+  useEffect(() => {
     if (!modal) return undefined;
     let active = true;
     setFormDataLoading(true);
@@ -405,6 +460,37 @@ export default function Orders() {
   const canMakeSmartArrangement = user?.company_id === "superiqfoam"
     && !user?.is_worker
     && (user?.is_owner || user?.is_admin || user?.is_company_owner);
+  const copyCustomerOrderLink = async () => {
+    setCustomerOrderLinkBusy(true);
+    try {
+      const result = await api.post("/customer-orders/share-link", {});
+      setCustomerOrderLinkEnabled(true);
+      const customerOrderLink = `${window.location.origin}/customer-order#${result.token}`;
+      try {
+        await navigator.clipboard.writeText(customerOrderLink);
+        toast.success("Secure customer order link copied");
+      } catch {
+        window.prompt("Copy this secure customer order link:", customerOrderLink);
+      }
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setCustomerOrderLinkBusy(false);
+    }
+  };
+  const revokeCustomerOrderLink = async () => {
+    if (!window.confirm("Disable the customer order link? Anyone using the old link will no longer be able to submit orders.")) return;
+    setCustomerOrderLinkBusy(true);
+    try {
+      await api.del("/customer-orders/share-link");
+      setCustomerOrderLinkEnabled(false);
+      toast.success("Customer order link disabled");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setCustomerOrderLinkBusy(false);
+    }
+  };
   const selectableOrders = shown.filter((order) =>
     ["To Send", "Preparing", "Assigned", "Partially Delivered"].includes(order.status),
   );
@@ -591,6 +677,10 @@ export default function Orders() {
   return (
     <div className="space-y-6">
       <PageHeader title="Orders to Send" subtitle="Track orders waiting to be prepared and shipped">
+        {canManageCustomerOrderLink && customerOrderLinkVisible === true && <>
+          <Btn variant="outline" onClick={copyCustomerOrderLink} disabled={customerOrderLinkBusy} data-testid="copy-customer-order-link"><Link2 size={16} /> {customerOrderLinkBusy ? "Preparing link..." : customerOrderLinkEnabled ? "Copy client order link" : "Create client order link"}</Btn>
+          {customerOrderLinkEnabled && <Btn variant="outline" onClick={revokeCustomerOrderLink} disabled={customerOrderLinkBusy} data-testid="revoke-customer-order-link">Disable link</Btn>}
+        </>}
         <Btn onClick={() => setModal(blank())} data-testid="add-order-btn"><Plus size={16} /> New Order</Btn>
       </PageHeader>
 
@@ -657,6 +747,10 @@ export default function Orders() {
                     <div className="col-span-2 min-w-0">
                       <dt className="text-xs font-medium text-slate-500">Customer</dt>
                       <dd className="break-words font-semibold text-slate-800">{o.customer_name || "-"}</dd>
+                      {o.submitted_customer_name && o.submitted_customer_name !== o.customer_name && (
+                        <dd className="mt-0.5 break-words text-xs text-slate-500">Submitted as: {o.submitted_customer_name}</dd>
+                      )}
+                      <dd className="mt-1"><CustomerMatchBadge order={o} /></dd>
                     </div>
                     <div className="col-span-2 min-w-0">
                       <dt className="text-xs font-medium text-slate-500">Products</dt>
@@ -693,16 +787,25 @@ export default function Orders() {
               ))}
             </div>
             <div className="hidden overflow-x-auto sm:block">
-            <table className="w-full text-sm min-w-[960px]">
+            <table className="w-full text-sm min-w-[1080px]">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
                 {canMakeSmartArrangement && <th className="w-10 px-3 py-3"><input type="checkbox" checked={allVisibleSelected} onChange={(event) => toggleVisibleOrderSelection(event.target.checked)} disabled={!selectableOrders.length || loading} aria-label="Select all visible open orders" data-testid="select-visible-orders-table" /></th>}
-                <th className="px-4 py-3 font-semibold">Ref</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">City</th><th className="px-4 font-semibold">Products</th><th className="px-4 font-semibold">Priority</th><th className="px-4 font-semibold">Status</th><th className="px-4 font-semibold">Ship Date</th><th className="px-4 font-semibold">Vehicle</th><th className="px-4 font-semibold text-right">Actions</th>
+                <th className="px-4 py-3 font-semibold">Ref</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">Order Source</th><th className="px-4 font-semibold">City</th><th className="px-4 font-semibold">Products</th><th className="px-4 font-semibold">Priority</th><th className="px-4 font-semibold">Status</th><th className="px-4 font-semibold">Ship Date</th><th className="px-4 font-semibold">Vehicle</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{shown.map((o) => (
                 <tr key={o.id} className="border-b border-border/60 hover:bg-slate-50 align-top" data-testid={`order-row-${o.id}`}>
                   {canMakeSmartArrangement && <td className="px-3 py-3">{["To Send", "Preparing", "Assigned", "Partially Delivered"].includes(o.status) && <input type="checkbox" checked={!!selectedOrders[o.id]} onChange={(event) => toggleOrderSelection(o, event.target.checked)} aria-label={`Select order ${o.reference}`} data-testid={`select-order-table-${o.id}`} />}</td>}
                   <td className="px-4 py-3 font-mono font-semibold text-slate-800 whitespace-nowrap">{o.reference}{o.invoice_number && <span className="block font-sans text-[10px] font-medium text-slate-400">Invoice {o.invoice_number}</span>}</td>
-                  <td className="px-4 py-3 font-semibold text-slate-700">{o.customer_name || "-"}</td>
+                  <td className="px-4 py-3">
+                    <div className="font-semibold text-slate-700">{o.customer_name || "-"}</div>
+                    {o.submitted_customer_name && o.submitted_customer_name !== o.customer_name && (
+                      <div className="mt-0.5 text-xs text-slate-500">Submitted as: {o.submitted_customer_name}</div>
+                    )}
+                    <div className="mt-1.5 flex flex-wrap gap-1.5">
+                      <CustomerMatchBadge order={o} />
+                    </div>
+                  </td>
+                  <td className="px-4 py-3"><OrderOriginBadge order={o} /></td>
                   <td className="px-4 py-3 text-slate-500">{o.destination}</td>
                   <td className="px-4 py-3 text-slate-600 max-w-[240px] whitespace-pre-line">{orderLines(o).map((l) => `${l.qty} × ${[l.category, l.size].filter(Boolean).join(" ")}`).join("\n") || "-"}</td>
                   <td className="px-4 py-3"><Badge cls={P_META[o.priority]}>{o.priority}</Badge></td>
@@ -740,8 +843,26 @@ export default function Orders() {
           <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
             {[
               ["Order Number", viewOrder.reference],
+              ["Order Source", viewOrder.source === "public_customer_order" ? "Submitted by customer using public order link" : "Entered manually in the ERP"],
+              ...(viewOrder.source === "public_customer_order" ? [[
+                "Customer Match",
+                ({
+                  phone: "Matched to existing customer by phone number",
+                  name: "Matched to existing customer by similar name",
+                  new: "No existing match; customer record created automatically",
+                  manually_assigned: "Customer selected by staff after submission",
+                  ambiguous_phone: "Not matched automatically; phone matches multiple customer records",
+                  ambiguous_name: "Not matched automatically; name is ambiguous",
+                })[viewOrder.customer_match_method] || "Not recorded; verify the customer",
+              ]] : []),
               ["Invoice", viewOrder.invoice_number],
               ["Customer", viewOrder.customer_name],
+              ...(viewOrder.source === "public_customer_order" ? [
+                ["Name entered by customer", viewOrder.submitted_customer_name],
+                ["Shop name entered by customer", viewOrder.submitted_customer_shop_name],
+                ["Phone entered by customer", viewOrder.submitted_customer_phone],
+                ["City entered by customer", viewOrder.submitted_city],
+              ] : []),
               ["Customer Address", viewOrder.customer_address],
               ["Phone", viewOrder.customer_phone],
               ["Email", viewOrder.customer_email],

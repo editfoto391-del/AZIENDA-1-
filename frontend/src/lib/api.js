@@ -180,7 +180,7 @@ export const api = {
   },
   getUncached: (u, params, config = {}) => client.get(u, { ...config, params }).then((r) => r.data),
   getBlob: (u) => client.get(u, { responseType: "blob" }).then((r) => r.data),
-  post: (u, d) => client.post(u, d).then((r) => { invalidateGetCache(); return r.data; }),
+  post: (u, d, config = {}) => client.post(u, d, config).then((r) => { invalidateGetCache(); return r.data; }),
   logout: () => {
     const token = activeToken();
     return client.post("/auth/logout", {}, {
