@@ -101,7 +101,7 @@ export default function Login() {
           </div>
           <div>
             <div className="text-white font-bold text-xl font-display">SUPER IQ-FOAM</div>
-            <div className="text-emerald-100/55 text-[10px] font-semibold uppercase tracking-[0.16em]">Business Management</div>
+            <div className="text-emerald-100/55 text-[10px] font-semibold tracking-[0.16em]">Koksstad</div>
           </div>
         </div>
         {personalAccessToken && !accessLink ? <section className="mx-auto max-w-md text-center" data-testid="worker-access-link-error">
