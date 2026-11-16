@@ -1,12 +1,32 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
-import { Building2, Factory, Store, Package, Cylinder, Layers, ArrowLeft, LockKeyhole } from "lucide-react";
+import { Building2, Factory, Store, Package, Layers, ArrowLeft, LockKeyhole } from "lucide-react";
 import { Navigate, useLocation, useParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { companyProfileName, dedicatedCompanyDomain } from "@/lib/company";
 
 const PROFILE_ICONS = [Building2, Factory, Store, Package];
-const PROFILE_ICONS_BY_ID = { "imraan-plastics": Cylinder };
+const PlasticRollIcon = ({ size, strokeWidth, className }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 48 48"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={strokeWidth}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="M14 9h20c5.5 0 10 6.7 10 15s-4.5 15-10 15H14" />
+    <path d="M14 9C8.5 9 4 15.7 4 24s4.5 15 10 15" />
+    <ellipse cx="14" cy="24" rx="4.2" ry="7" />
+    <path d="M23 9c4-5 8-7 13-7h8v7c-5 0-8 1-12 5" />
+    <path d="M25 10v28m6-28v28" opacity=".55" />
+  </svg>
+);
+const PROFILE_ICONS_BY_ID = { "imraan-plastics": PlasticRollIcon };
 const PROFILE_TONES = [
   "bg-emerald-100 text-emerald-900 border-emerald-200",
   "bg-lime-100 text-lime-950 border-lime-200",
