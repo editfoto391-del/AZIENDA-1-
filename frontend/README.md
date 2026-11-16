@@ -18,21 +18,6 @@ browser trying to connect to its own `localhost`. Production builds use the same
 route, which the deployed host proxies to the backend; they do not embed a machine-local backend
 URL in browser assets.
 
-Company admins create/copy or disable the active company's secure customer order link from the
-Orders page when the Global Owner has enabled its controls in Settings > Features. This visibility
-setting applies to every company profile; hiding the controls does not revoke active links. The link
-is a random, revocable capability URL, with its token in the URL fragment so
-it is not sent in HTTP requests or referrer headers; only its hash and encrypted recovery
-value are stored, and public form requests are rate limited. The form requires contact name, shop
-name, phone, city, and at least one product. Submissions are size-validated and idempotent on retry.
-Existing customers are matched by normalized phone first, then by a unique, high-confidence
-similarity against the submitted contact or shop name. A new customer record is created only when
-no likely match exists; ambiguous matches remain unlinked for staff review. Submitted data does not
-overwrite existing customer contact records. The Orders list identifies link vs manual entry and
-the match outcome; the order detail keeps the contact details submitted by the customer. If staff
-link an unmatched order to a customer, that manual assignment is recorded. Public form analytics
-and session replay are suppressed to avoid sending link tokens or submitted data to PostHog.
-
 ## Scripts
 
 - `yarn start` / `yarn dev` — Vite dev server on port 3000 (supervisor runs `yarn start`)

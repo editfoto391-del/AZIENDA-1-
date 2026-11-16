@@ -8,7 +8,7 @@ load_dotenv(ROOT_DIR / '.env.multicompany')
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-import json, re, difflib
+import json, re
 import shutil
 import calendar
 from starlette.middleware.cors import CORSMiddleware
@@ -11457,49 +11457,6 @@ async def get_settings(user=Depends(get_current_user)):
              "unified_price_list": uses_unified_price_list(active_company_id.get())}
     return {**seed_data.DEFAULT_SETTINGS, **extra, **(s or {})}
 
-
-class ClientOrderLinkVisibilityIn(BaseModel):
-    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
-    visible: bool = Field(strict=True)
-
-
-@api.get("/global-ui-settings")
-async def get_global_ui_settings(user=Depends(get_current_user)):
-    saved = await base_db.global_ui_settings.find_one(
-        {"id": "singleton"}, {"_id": 0, "client_order_link_visible": 1},
-    )
-    return {"client_order_link_visible": (
-        saved.get("client_order_link_visible", True) if saved else True
-    )}
-
-
-@api.put("/global-ui-settings/client-order-link")
-async def update_client_order_link_visibility(
-    body: ClientOrderLinkVisibilityIn,
-    user=Depends(get_current_user),
-):
-    require_global_owner(user)
-    before = await base_db.global_ui_settings.find_one(
-        {"id": "singleton"}, {"_id": 0, "client_order_link_visible": 1},
-    )
-    await base_db.global_ui_settings.update_one(
-        {"id": "singleton"},
-        {"$set": {
-            "id": "singleton",
-            "client_order_link_visible": body.visible,
-            "updated_at": now_iso(),
-            "updated_by": user.get("email", ""),
-        }},
-        upsert=True,
-    )
-    await log_audit(
-        "global_ui_settings", "singleton", "client_order_link_visibility_updated", user,
-        before={"client_order_link_visible": before.get("client_order_link_visible", True) if before else True},
-        after={"client_order_link_visible": body.visible},
-    )
-    return {"client_order_link_visible": body.visible}
-
-
 def require_primary_owner(user):
     if canonical_email(user.get("email")) != canonical_email(os.environ["ADMIN_EMAIL"]):
         raise HTTPException(403, "Primary owner access required")
@@ -16732,381 +16689,6 @@ def delivery_invoice_matches_order(invoice, order):
     order_customer_name = " ".join(str(order.get("customer_name") or "").split()).casefold()
     return bool(invoice_customer_name and invoice_customer_name == order_customer_name)
 
-
-class PublicOrderItemIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    qty: int = Field(gt=0, le=1000000)
-    category: str = Field(min_length=1, max_length=120)
-    size: Optional[str] = Field(default="", max_length=120)
-    description: Optional[str] = Field(default="", max_length=500)
-
-    @field_validator("category")
-    @classmethod
-    def public_order_product_required(cls, value):
-        value = value.strip()
-        if not value:
-            raise ValueError("Product is required")
-        return value
-
-
-class PublicOrderIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(min_length=1, max_length=160)
-    shop_name: str = Field(min_length=1, max_length=160)
-    phone: str = Field(min_length=1, max_length=100)
-    city: str = Field(min_length=1, max_length=120)
-    items: List[PublicOrderItemIn] = Field(min_length=1, max_length=50)
-    submission_id: str = Field(
-        default_factory=lambda: str(uuid.uuid4()),
-        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-    )
-    notes: Optional[str] = Field(default="", max_length=2000)
-    website: Optional[str] = Field(default="", max_length=200)
-
-    @field_validator("name", "shop_name", "phone", "city")
-    @classmethod
-    def public_order_required_text(cls, value):
-        value = value.strip()
-        if not value:
-            raise ValueError("This field is required")
-        return value
-
-    @field_validator("phone")
-    @classmethod
-    def public_order_phone_valid(cls, value):
-        if not re.fullmatch(r"[+0-9\s().-]+", value):
-            raise ValueError("Enter a valid phone number")
-        if not 7 <= len(normalize_customer_phone(value)) <= 15:
-            raise ValueError("Enter a valid phone number")
-        return value
-
-
-def normalize_customer_phone(value):
-    digits = re.sub(r"\D", "", str(value or ""))
-    if digits.startswith("27") and len(digits) >= 11:
-        return "0" + digits[2:]
-    return digits
-
-
-def normalize_customer_name(value):
-    return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
-
-
-def customer_name_similarity(first, second):
-    left = normalize_customer_name(first)
-    right = normalize_customer_name(second)
-    if not left or not right:
-        return 0
-    sequence_score = difflib.SequenceMatcher(None, left, right).ratio()
-    token_score = difflib.SequenceMatcher(None, sorted(left.split()), sorted(right.split())).ratio()
-    return max(sequence_score, token_score)
-
-
-def match_public_order_customer(customers, name, shop_name, phone):
-    def similarity(customer):
-        stored_names = (
-            customer.get("name"),
-            customer.get("shop_name"),
-            customer.get("business_name"),
-        )
-        return max(
-            customer_name_similarity(submitted_name, stored_name)
-            for submitted_name in (name, shop_name)
-            for stored_name in stored_names
-        )
-
-    normalized_phone = normalize_customer_phone(phone)
-    phone_matches = [
-        customer for customer in customers
-        if normalized_phone and normalize_customer_phone(customer.get("phone")) == normalized_phone
-    ]
-    if len(phone_matches) == 1:
-        return phone_matches[0], "phone"
-    if phone_matches:
-        ranked_phone_matches = sorted(
-            phone_matches,
-            key=similarity,
-            reverse=True,
-        )
-        top_score = similarity(ranked_phone_matches[0])
-        next_score = similarity(ranked_phone_matches[1])
-        if top_score >= 0.55 and top_score - next_score >= 0.1:
-            return ranked_phone_matches[0], "phone"
-        return None, "ambiguous_phone"
-
-    ranked = sorted(
-        customers,
-        key=similarity,
-        reverse=True,
-    )
-    if not ranked:
-        return None, "new"
-    top_score = similarity(ranked[0])
-    next_score = similarity(ranked[1]) if len(ranked) > 1 else 0
-    if top_score >= 0.9 and top_score - next_score >= 0.1:
-        return ranked[0], "name"
-    if top_score >= 0.72:
-        return None, "ambiguous_name"
-    return None, "new"
-
-
-async def customer_order_company_for_token(token):
-    if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", token or ""):
-        raise HTTPException(404, "Customer order link not found")
-    token_hash = worker_access_token_hash(token)
-    for profile in COMPANY_PROFILES:
-        company_db = tenant_database(client, base_db, profile["id"])
-        link = await company_db.customer_order_share_links.find_one(
-            {"id": "active", "token_hash": token_hash},
-            {"_id": 0, "token_hash": 1},
-        )
-        if link and secrets.compare_digest(link.get("token_hash", ""), token_hash):
-            company = await base_db.companies.find_one(
-                {"id": profile["id"], "active": True},
-                {"_id": 0, "id": 1},
-            )
-            if not company:
-                raise HTTPException(404, "Customer order link not found")
-            return profile
-    raise HTTPException(404, "Customer order link not found")
-
-
-async def issue_customer_order_share_link(company_id, user):
-    link = await db.customer_order_share_links.find_one({"id": "active"}, {"_id": 0})
-    if not link:
-        token = secrets.token_urlsafe(32)
-        try:
-            await insert("customer_order_share_links", {
-                "id": "active",
-                "token_hash": worker_access_token_hash(token),
-                "token_encrypted": encrypt_worker_access_token(token),
-            })
-            await log_audit("customer_order_link", company_id, "share_link_created", user)
-            return token
-        except DuplicateKeyError:
-            link = await db.customer_order_share_links.find_one({"id": "active"}, {"_id": 0})
-            if not link:
-                raise
-
-    try:
-        token = decrypt_worker_access_token(link.get("token_encrypted", ""))
-    except InvalidToken as error:
-        raise HTTPException(
-            500,
-            "The customer order link could not be recovered; disable it and create a new link",
-        ) from error
-    if not secrets.compare_digest(link.get("token_hash", ""), worker_access_token_hash(token)):
-        raise HTTPException(
-            500,
-            "The customer order link is invalid; disable it and create a new link",
-        )
-    return token
-
-
-async def enforce_public_customer_order_rate_limit(identity, limit, now=None):
-    now = now or datetime.now(timezone.utc)
-    window = int(now.timestamp()) // 60
-    digest = hashlib.sha256(
-        f"{JWT_SECRET}:customer-order:{identity}:{window}".encode(),
-    ).hexdigest()
-    retry_after = 60 - int(now.timestamp()) % 60
-    result = await base_db.public_customer_order_rate_limits.find_one_and_update(
-        {"_id": digest},
-        {
-            "$inc": {"count": 1},
-            "$setOnInsert": {"expires_at": now + timedelta(minutes=5)},
-        },
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
-    if result and result.get("count", 0) > limit:
-        raise HTTPException(
-            429,
-            "Too many order form requests. Please wait a minute and try again.",
-            headers={"Retry-After": str(retry_after)},
-        )
-
-
-async def enforce_public_customer_order_ip_limit(request):
-    ip_address = request.client.host if request.client else "unknown"
-    identity = hashlib.sha256(
-        f"{JWT_SECRET}:customer-order-ip:{ip_address}".encode(),
-    ).hexdigest()
-    await enforce_public_customer_order_rate_limit(identity, 60)
-
-
-@api.get("/customer-orders/share-link")
-async def get_customer_order_share_link_status(
-    response: Response,
-    user=Depends(get_current_user),
-):
-    require_admin(user)
-    response.headers["Cache-Control"] = "no-store"
-    link = await db.customer_order_share_links.find_one({"id": "active"}, {"_id": 1})
-    return {"enabled": bool(link)}
-
-
-@api.post("/customer-orders/share-link")
-async def create_customer_order_share_link(
-    response: Response,
-    user=Depends(get_current_user),
-):
-    require_admin(user)
-    response.headers["Cache-Control"] = "no-store"
-    company_id = user.get("_active_company_id") or active_company_id.get() or DEFAULT_COMPANY_ID
-    token = await issue_customer_order_share_link(company_id, user)
-    return {"token": token}
-
-
-@api.delete("/customer-orders/share-link")
-async def revoke_customer_order_share_link(
-    response: Response,
-    user=Depends(get_current_user),
-):
-    require_admin(user)
-    response.headers["Cache-Control"] = "no-store"
-    company_id = user.get("_active_company_id") or active_company_id.get() or DEFAULT_COMPANY_ID
-    result = await db.customer_order_share_links.delete_one({"id": "active"})
-    if result.deleted_count:
-        await log_audit("customer_order_link", company_id, "share_link_revoked", user)
-    return {"revoked": bool(result.deleted_count)}
-
-
-@api.get("/public/customer-orders")
-async def get_public_customer_order_form(
-    request: Request,
-    response: Response,
-):
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["X-Robots-Tag"] = "noindex, nofollow"
-    await enforce_public_customer_order_ip_limit(request)
-    profile = await customer_order_company_for_token(
-        request.headers.get("X-Customer-Order-Token", ""),
-    )
-    return {"company_id": profile["id"], "company_name": profile["name"]}
-
-
-@api.post("/public/customer-orders")
-async def submit_public_customer_order(
-    body: PublicOrderIn,
-    request: Request,
-    response: Response,
-):
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["X-Robots-Tag"] = "noindex, nofollow"
-    await enforce_public_customer_order_ip_limit(request)
-    if body.website:
-        raise HTTPException(422, "Invalid order submission")
-    token = request.headers.get("X-Customer-Order-Token", "")
-    profile = await customer_order_company_for_token(token)
-    token_hash = worker_access_token_hash(token)
-    await enforce_public_customer_order_rate_limit(f"token:{token_hash}", 40)
-    scope_token = active_company_id.set(profile["id"])
-    try:
-        existing_submission = await db.orders.find_one(
-            {"public_submission_id": body.submission_id},
-            {"_id": 0, "reference": 1},
-        )
-        if existing_submission:
-            return {"ok": True, "reference": existing_submission["reference"]}
-        customers = await listall(
-            "customers",
-            {"active": {"$ne": False}},
-            sort=("name", 1),
-        )
-        customer, match_method = match_public_order_customer(
-            customers,
-            body.name,
-            body.shop_name,
-            body.phone,
-        )
-        if customer:
-            customer_id = customer["id"]
-            customer_name = customer.get("name") or body.name
-            customer_address = customer.get("address") or ""
-            customer_phone = body.phone
-            customer_email = customer.get("email") or ""
-            customer_city = body.city
-        elif match_method in ("ambiguous_phone", "ambiguous_name"):
-            customer_id = ""
-            customer_name = body.name
-            customer_address = ""
-            customer_phone = body.phone
-            customer_email = ""
-            customer_city = body.city
-        else:
-            new_customer = await insert("customers", {
-                "name": body.shop_name,
-                "shop_name": body.shop_name,
-                "contact_name": body.name,
-                "client_number": "",
-                "phone": body.phone,
-                "email": "",
-                "address": "",
-                "city": body.city,
-                "default_zone": 1,
-                "payment_terms": "Due on Delivery",
-                "active": True,
-                "notes": "Created automatically from a customer order.",
-            })
-            customer_id = new_customer["id"]
-            customer_name = new_customer["name"]
-            customer_address = new_customer.get("address", "")
-            customer_phone = new_customer.get("phone", "")
-            customer_email = new_customer.get("email", "")
-            customer_city = new_customer.get("city", "")
-            await emit_workflow_event("customer.created", new_customer)
-
-        items = [item.model_dump() for item in body.items]
-        products = "\n".join(
-            f'{item["qty"]} x {" ".join(value for value in (item["category"], item.get("size", ""), item.get("description", "")) if value)}'
-            for item in items
-        )
-        order_data = {
-            "reference": await next_ref("ord", "ORD"),
-            "customer_id": customer_id,
-            "customer_name": customer_name,
-            "customer_address": customer_address,
-            "customer_phone": customer_phone,
-            "customer_email": customer_email,
-            "submitted_customer_name": body.name,
-            "submitted_customer_shop_name": body.shop_name,
-            "submitted_customer_phone": body.phone,
-            "submitted_city": body.city,
-            "public_submission_id": body.submission_id,
-            "destination": customer_city,
-            "items": items,
-            "products": products,
-            "priority": "Normal",
-            "status": "To Send",
-            "expected_ship_date": None,
-            "vehicle_id": "",
-            "invoice_id": "",
-            "invoice_number": "",
-            "notes": body.notes or "",
-            "source": "public_customer_order",
-            "customer_match_method": match_method,
-        }
-        try:
-            record = await insert("orders", order_data)
-        except DuplicateKeyError:
-            existing_submission = await db.orders.find_one(
-                {"public_submission_id": body.submission_id},
-                {"_id": 0, "reference": 1},
-            )
-            if not existing_submission:
-                raise
-            return {"ok": True, "reference": existing_submission["reference"]}
-        await emit_workflow_event("order.created", record)
-        return {"ok": True, "reference": record["reference"]}
-    finally:
-        active_company_id.reset(scope_token)
-
-
 @api.get("/orders")
 async def get_orders(
     include_archived: bool = False,
@@ -17156,13 +16738,9 @@ async def get_orders(
         projection = {
             "_id": 0, "id": 1, "reference": 1, "invoice_id": 1, "invoice_number": 1,
             "customer_id": 1, "customer_name": 1, "customer_address": 1, "customer_phone": 1,
-            "customer_email": 1, "submitted_customer_name": 1,
-            "submitted_customer_shop_name": 1,
-            "submitted_customer_phone": 1, "submitted_city": 1,
-            "destination": 1, "items": 1, "products": 1,
+            "customer_email": 1, "destination": 1, "items": 1, "products": 1,
             "priority": 1, "status": 1, "expected_ship_date": 1, "vehicle_id": 1,
-            "notes": 1, "created_at": 1, "archived": 1, "source": 1,
-            "customer_match_method": 1,
+            "notes": 1, "created_at": 1, "archived": 1,
         }
         cursor = db.orders.aggregate([
             {"$match": query},
@@ -17267,11 +16845,6 @@ async def edit_order(oid: str, body: OrderIn, user=Depends(get_current_user)):
             d["customer_address"] = c.get("address", "")
             d["customer_phone"] = c.get("phone", "")
             d["customer_email"] = c.get("email", "")
-            if (
-                existing.get("source") == "public_customer_order"
-                and d.get("customer_id") != existing.get("customer_id")
-            ):
-                d["customer_match_method"] = "manually_assigned"
     if d.get("invoice_id"):
         invoice = await db.invoices.find_one({"id": d["invoice_id"]}, {"_id": 0})
         if not invoice:
@@ -18176,23 +17749,6 @@ async def initialize_multi_company():
     await base_db.warehouse_report_share_links.create_index(
         "token_hash", unique=True, name="warehouse_report_share_token_once",
     )
-    await base_db.customer_order_share_links.create_index(
-        "id", unique=True, name="customer_order_share_once",
-    )
-    await base_db.customer_order_share_links.create_index(
-        "token_hash", unique=True, name="customer_order_share_token_once",
-    )
-    await base_db.orders.create_index(
-        "public_submission_id",
-        unique=True,
-        sparse=True,
-        name="public_customer_order_submission_once",
-    )
-    await base_db.public_customer_order_rate_limits.create_index(
-        "expires_at",
-        expireAfterSeconds=0,
-        name="public_customer_order_rate_limit_expiry",
-    )
     await ensure_performance_indexes(base_db)
 
     for company_id in ("iqfoam-manufactoring", "iqfoam-whole-sallers"):
@@ -18448,18 +18004,6 @@ async def initialize_empty_company(company_id):
     )
     await company_db.warehouse_report_share_links.create_index(
         "token_hash", unique=True, name="warehouse_report_share_token_once",
-    )
-    await company_db.customer_order_share_links.create_index(
-        "id", unique=True, name="customer_order_share_once",
-    )
-    await company_db.customer_order_share_links.create_index(
-        "token_hash", unique=True, name="customer_order_share_token_once",
-    )
-    await company_db.orders.create_index(
-        "public_submission_id",
-        unique=True,
-        sparse=True,
-        name="public_customer_order_submission_once",
     )
     await company_db.vehicle_licence_discs.create_index(
         [("vehicle_id", 1), ("expiry_date", 1)],

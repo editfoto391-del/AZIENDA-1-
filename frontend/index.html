@@ -5,7 +5,6 @@
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
         <meta name="theme-color" content="#000000" />
         <meta name="referrer" content="no-referrer" />
-        <meta name="robots" content="noindex, nofollow" />
         <meta name="description" content="A product of emergent.sh" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -84,12 +83,6 @@
             posthog.init("phc_DbsPb39SRc8z3EiQ6Dhj6ikv4H4rTKcht9d4sZSesceP", {
                 api_host: "https://ap.emergent.sh",
                 person_profiles: "identified_only", // or 'always' to create profiles for anonymous users as well,
-                before_send: function (event) {
-                    var currentUrl = event && event.properties && event.properties.$current_url;
-                    if ((currentUrl || window.location.href).indexOf("/customer-order") !== -1) return null;
-                    return event;
-                },
-                disable_session_recording: window.location.pathname.indexOf("/customer-order") === 0,
                 session_recording: {
                     recordCrossOriginIframes: true,
                     capturePerformance: false,

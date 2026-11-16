@@ -14,7 +14,6 @@ const AuthCallback = lazy(() => import("@/pages/AuthCallback"));
 const Login = lazy(() => import("@/pages/Login"));
 const SharedInvoice = lazy(() => import("@/pages/SharedInvoice"));
 const SharedWarehouseReport = lazy(() => import("@/pages/SharedWarehouseReport"));
-const CustomerOrder = lazy(() => import("@/pages/CustomerOrder"));
 const Dashboard = lazy(pageLoaders["/"]);
 const Customers = lazy(pageLoaders["/customers"]);
 const Suppliers = lazy(pageLoaders["/suppliers"]);
@@ -346,7 +345,6 @@ function AppRouter() {
           <Route path="/worker-access/:token" element={<Suspense fallback={<RouteLoading />}><Login /></Suspense>} />
           <Route path="/shared-invoice/:token" element={<SharedInvoiceErrorBoundary><Suspense fallback={<RouteLoading />}><SharedInvoice /></Suspense></SharedInvoiceErrorBoundary>} />
           <Route path="/shared-warehouse-report/:token" element={<Suspense fallback={<RouteLoading />}><SharedWarehouseReport /></Suspense>} />
-          <Route path="/customer-order" element={<Suspense fallback={<RouteLoading />}><CustomerOrder /></Suspense>} />
           <Route element={<Protected><Layout /></Protected>}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/customers" element={<Customers />} />

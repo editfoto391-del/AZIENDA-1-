@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from pydantic import ValidationError
 
 import server
 
@@ -34,78 +33,6 @@ def _install_interface_settings(monkeypatch):
 
     monkeypatch.setattr(server, "log_audit", no_audit)
     return collection
-
-
-def _install_global_ui_settings(monkeypatch):
-    collection = MemoryCollection()
-    monkeypatch.setattr(server, "base_db", SimpleNamespace(global_ui_settings=collection))
-
-    async def no_audit(*args, **kwargs):
-        return None
-
-    monkeypatch.setattr(server, "log_audit", no_audit)
-    return collection
-
-
-def test_client_order_link_visibility_defaults_to_shown_for_all_profiles(monkeypatch):
-    _install_global_ui_settings(monkeypatch)
-
-    default = asyncio.run(server.get_global_ui_settings({"_active_company_id": "superiqfoam"}))
-    other_profile = asyncio.run(server.get_global_ui_settings({
-        "_active_company_id": "iqfoam-manufactoring",
-    }))
-
-    assert default == {"client_order_link_visible": True}
-    assert other_profile == default
-
-
-def test_only_global_owner_can_hide_client_order_link_for_all_profiles(monkeypatch):
-    collection = _install_global_ui_settings(monkeypatch)
-    monkeypatch.setenv("ADMIN_EMAIL", "global-owner@example.test")
-    company_owner = {
-        "role": "owner",
-        "_active_role": "owner",
-        "email": "company-owner@example.test",
-    }
-
-    with pytest.raises(HTTPException) as denied:
-        asyncio.run(server.update_client_order_link_visibility(
-            server.ClientOrderLinkVisibilityIn(visible=False),
-            company_owner,
-        ))
-
-    assert denied.value.status_code == 403
-    assert collection.documents == {}
-
-
-def test_global_owner_can_toggle_client_order_link_visibility_across_profiles(monkeypatch):
-    collection = _install_global_ui_settings(monkeypatch)
-    monkeypatch.setenv("ADMIN_EMAIL", "global-owner@example.test")
-    global_owner = {
-        "role": "owner",
-        "email": "global-owner@example.test",
-        "is_worker": False,
-    }
-
-    updated = asyncio.run(server.update_client_order_link_visibility(
-        server.ClientOrderLinkVisibilityIn(visible=False),
-        global_owner,
-    ))
-    first_profile = asyncio.run(server.get_global_ui_settings({
-        "_active_company_id": "superiqfoam",
-    }))
-    second_profile = asyncio.run(server.get_global_ui_settings({
-        "_active_company_id": "iqfoam-manufactoring",
-    }))
-
-    assert updated == {"client_order_link_visible": False}
-    assert first_profile == second_profile == updated
-    assert collection.documents["singleton"]["client_order_link_visible"] is False
-
-
-def test_client_order_link_visibility_requires_a_boolean():
-    with pytest.raises(ValidationError):
-        server.ClientOrderLinkVisibilityIn(visible="false")
 
 
 def test_interface_settings_default_to_the_original_menu():
