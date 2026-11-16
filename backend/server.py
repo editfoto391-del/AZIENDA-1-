@@ -17639,12 +17639,28 @@ async def attendance_summary(user=Depends(get_current_user)):
 # ---------------- Seeding ----------------
 async def create_company_unique_index(collection, keys, **options):
     legacy_keys = [(keys, 1)] if isinstance(keys, str) else list(keys)
-    if not legacy_keys or legacy_keys[0][0] != "company_id":
-        for index_name, index in (await collection.index_information()).items():
-            if index_name != "_id_" and index.get("unique") and index.get("key") == legacy_keys:
+    if options.pop("sparse", False):
+        indexed_field = legacy_keys[-1][0]
+        options["partialFilterExpression"] = {indexed_field: {"$type": "string"}}
+    company_keys = (
+        legacy_keys if legacy_keys and legacy_keys[0][0] == "company_id"
+        else [("company_id", 1), *legacy_keys]
+    )
+    for index_name, index in (await collection.index_information()).items():
+        if index_name == "_id_" or not index.get("unique"):
+            continue
+        existing_keys = index.get("key")
+        if existing_keys == legacy_keys and legacy_keys != company_keys:
+            await collection.drop_index(index_name)
+        elif existing_keys == company_keys:
+            options_match = (
+                bool(index.get("sparse")) == bool(options.get("sparse"))
+                and index.get("partialFilterExpression") == options.get("partialFilterExpression")
+            )
+            name_matches = not options.get("name") or index_name == options["name"]
+            if not options_match or not name_matches:
                 await collection.drop_index(index_name)
-        keys = [("company_id", 1), *legacy_keys]
-    await collection.create_index(keys, **options)
+    await collection.create_index(company_keys, **options)
 
 
 async def seed():
@@ -17956,15 +17972,18 @@ async def ensure_performance_indexes(database):
 
     async def create_collection_indexes(collection_name, definitions):
         async with semaphore:
+            if collection_name == "grvs":
+                await create_company_unique_index(
+                    database.grvs,
+                    "source_buying_id",
+                    unique=True,
+                    partialFilterExpression={"source_buying_id": {"$type": "string"}},
+                    name="grv_source_buying_once",
+                )
             await database[collection_name].create_indexes([
                 IndexModel([("company_id", 1), ("id", 1)]),
                 *(
                     [IndexModel([("company_id", 1), ("grv_number", 1)], unique=True)]
-                    if collection_name == "grvs" else []
-                ),
-                *(
-                    [IndexModel([("company_id", 1), ("source_buying_id", 1)], unique=True, sparse=True,
-                                name="grv_source_buying_once")]
                     if collection_name == "grvs" else []
                 ),
                 *(

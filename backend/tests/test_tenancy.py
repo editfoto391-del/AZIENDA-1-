@@ -154,7 +154,40 @@ def test_company_unique_index_replaces_legacy_global_index():
     assert collection.dropped == ["source_key_1"]
     assert collection.created == [(
         [("company_id", 1), ("source_key", 1)],
-        {"unique": True, "sparse": True},
+        {"unique": True, "partialFilterExpression": {"source_key": {"$type": "string"}}},
+    )]
+
+
+def test_company_unique_index_replaces_sparse_compound_index():
+    class IndexCollection:
+        def __init__(self):
+            self.dropped = []
+            self.created = []
+
+        async def index_information(self):
+            return {
+                "company_id_1_idempotency_key_1": {
+                    "key": [("company_id", 1), ("idempotency_key", 1)],
+                    "unique": True,
+                    "sparse": True,
+                },
+            }
+
+        async def drop_index(self, name):
+            self.dropped.append(name)
+
+        async def create_index(self, keys, **options):
+            self.created.append((keys, options))
+
+    collection = IndexCollection()
+    asyncio.run(server.create_company_unique_index(
+        collection, "idempotency_key", unique=True, sparse=True,
+    ))
+
+    assert collection.dropped == ["company_id_1_idempotency_key_1"]
+    assert collection.created == [(
+        [("company_id", 1), ("idempotency_key", 1)],
+        {"unique": True, "partialFilterExpression": {"idempotency_key": {"$type": "string"}}},
     )]
 
 
