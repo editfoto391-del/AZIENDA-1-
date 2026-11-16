@@ -116,6 +116,36 @@ def test_new_invoice_records_submitted_preparer_and_authenticated_user_and_deliv
     assert invoice["total"] == 950
 
 
+def test_imraan_invoice_uses_freeform_description_and_fixed_zone():
+    token = server.active_company_id.set(server.IMRAAN_PLASTICS_COMPANY_ID)
+    try:
+        body = server.InvoiceIn(
+            customer_name="Synthetic Customer",
+            zone=2,
+            items=[{
+                "qty": 2,
+                "description": "Custom plastic packaging",
+                "unit_price": 65,
+                "price_override": True,
+            }],
+            made_by="Synthetic User",
+        )
+        invoice = asyncio.run(server._prepare_invoice(
+            body,
+            user={"id": "test-user", "name": "Synthetic User"},
+        ))
+        asyncio.run(server.validate_for_issue(invoice))
+    finally:
+        server.active_company_id.reset(token)
+
+    assert invoice["zone"] == 1
+    assert invoice["items"][0]["category"] == ""
+    assert invoice["items"][0]["size"] == ""
+    assert invoice["items"][0]["description"] == "Custom plastic packaging"
+    assert invoice["items"][0]["unit_price"] == 65
+    assert invoice["total"] == 130
+
+
 def test_new_invoice_requires_a_manually_submitted_preparer():
     body = server.InvoiceIn(
         customer_name="Synthetic Customer",

@@ -5,7 +5,7 @@ import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, newKey, STATUS_META, today } from "@/lib/format";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty, Textarea } from "@/components/common";
 import { useAuth } from "@/context/AuthContext";
-import { usesUnifiedPriceList } from "@/lib/company";
+import { usesPriceZones } from "@/lib/company";
 import { Users, Search, Plus, Pencil, Eye, Trash2 } from "lucide-react";
 import { PAYMENT_METHODS, RECEIVING_OPTIONS } from "@/lib/paymentMethods";
 
@@ -25,7 +25,7 @@ const mostUsedZone = (invoices, fallback) => {
 
 export default function Customers() {
   const { user } = useAuth();
-  const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
+  const priceZonesEnabled = usesPriceZones(user?.company_id);
   const [list, setList] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -266,14 +266,14 @@ export default function Customers() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                <th className="px-4 py-3 font-semibold">Name</th><th className="px-4 font-semibold">Client Number</th><th className="px-4 font-semibold">Phone</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold">Terms</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
+                <th className="px-4 py-3 font-semibold">Name</th><th className="px-4 font-semibold">Client Number</th><th className="px-4 font-semibold">Phone</th>{priceZonesEnabled && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold">Terms</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{list.map((c) => (
                 <tr key={c.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`customer-row-${c.id}`}>
                   <td className="px-4 py-3 font-semibold text-slate-800">{c.name}</td>
                   <td className="px-4 text-slate-500">{c.client_number || "-"}</td>
                   <td className="px-4 text-slate-500">{c.phone || "-"}</td>
-                  {!unifiedPriceList && <td className="px-4"><Badge cls="bg-blue-50 text-blue-700 border-blue-200">Zone {c.default_zone}</Badge></td>}
+                  {priceZonesEnabled && <td className="px-4"><Badge cls="bg-blue-50 text-blue-700 border-blue-200">Zone {c.default_zone}</Badge></td>}
                   <td className="px-4 text-slate-500">{c.payment_terms}</td>
                   <td className="px-4 text-center"><Badge cls={c.active ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-slate-100 text-slate-500 border-slate-200"}>{c.active ? "Active" : "Inactive"}</Badge></td>
                   <td className="px-4 text-right whitespace-nowrap">
@@ -311,13 +311,12 @@ export default function Customers() {
               <Input label="City" value={modal.city || ""} onChange={(e) => setModal({ ...modal, city: e.target.value })} data-testid="customer-city-input" />
             </div>
             <Input label="Notes" value={modal.notes || ""} onChange={(e) => setModal({ ...modal, notes: e.target.value })} data-testid="customer-notes-input" />
-            {!unifiedPriceList && <div className="grid grid-cols-2 gap-3">
+            {priceZonesEnabled && <div className="grid grid-cols-2 gap-3">
               <Select label="Default Price Zone" value={modal.default_zone} onChange={(e) => setModal({ ...modal, default_zone: Number(e.target.value) })}>
                 <option value={1}>Zone 1</option><option value={2}>Zone 2</option>
               </Select>
             </div>}
-            <div className={`grid ${unifiedPriceList ? "grid-cols-1" : "grid-cols-2"} gap-3`}>
-              {!unifiedPriceList && null}
+            <div className={`grid ${priceZonesEnabled ? "grid-cols-2" : "grid-cols-1"} gap-3`}>
               <Select label="Payment Terms" value={modal.payment_terms} onChange={(e) => setModal({ ...modal, payment_terms: e.target.value })}>
                 {["Due on Delivery", "Cash on Delivery", "7 Days", "14 Days", "30 Days", "Custom Terms"].map((t) => <option key={t}>{t}</option>)}
               </Select>
@@ -432,8 +431,8 @@ export default function Customers() {
         {profile && (
           <div className="space-y-5">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-              <div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-slate-400">Zone</p><p className="font-bold text-slate-800">Zone {unifiedPriceList ? 1 : profile.c.default_zone}</p></div>
-              <div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-slate-400">Most Used Zone</p><p className="font-bold text-slate-800">{mostUsedZone(profile.invoices, profile.c.default_zone)}</p></div>
+              {priceZonesEnabled && <><div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-slate-400">Zone</p><p className="font-bold text-slate-800">Zone {profile.c.default_zone}</p></div>
+              <div className="rounded-lg bg-slate-50 p-3"><p className="text-xs text-slate-400">Most Used Zone</p><p className="font-bold text-slate-800">{mostUsedZone(profile.invoices, profile.c.default_zone)}</p></div></>}
               <div className="rounded-lg bg-blue-50 p-3"><p className="text-xs text-slate-400">Total Invoiced</p><p className="font-mono font-bold text-slate-800">{fmtMoney(profile.total_invoiced)}</p></div>
               <div className="rounded-lg bg-red-50 p-3"><p className="text-xs text-slate-400">Outstanding</p><p className="font-mono font-bold text-red-600" data-testid="customer-outstanding">{fmtMoney(profile.invoices_outstanding)}</p></div>
               <div className="rounded-lg bg-orange-50 p-3"><p className="break-words text-xs text-slate-400">BLN FROM EXPRESS WEBSITE</p><p className="font-mono font-bold text-orange-700">{fmtMoney(profile.other_balance)}</p></div>

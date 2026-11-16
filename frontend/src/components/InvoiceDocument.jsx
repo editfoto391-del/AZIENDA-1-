@@ -73,7 +73,7 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
           <p className="leading-5 text-slate-800">{[inv.customer_name, shipTo].filter(Boolean).join(" — ")}</p>
         </div>
         <div className="justify-self-end w-[280px] text-[13px]">
-            {[["Invoice Date:", fmtDate(inv.date)], ["Due Date:", fmtDate(inv.due_date)], ["Price Zone:", `Zone ${inv.zone}`], ["Payment Terms:", inv.payment_terms], ["Reference:", inv.reference]].filter(([k, v]) => v && (k !== "Price Zone:" || !settings.unified_price_list) && !(inv.opening_balance && k === "Reference:")).map(([k, v]) => (
+            {[["Invoice Date:", fmtDate(inv.date)], ["Due Date:", fmtDate(inv.due_date)], ["Price Zone:", `Zone ${inv.zone}`], ["Payment Terms:", inv.payment_terms], ["Reference:", inv.reference]].filter(([k, v]) => v && (k !== "Price Zone:" || (settings.price_zones_enabled ?? !settings.unified_price_list)) && !(inv.opening_balance && k === "Reference:")).map(([k, v]) => (
             <div key={k} className="flex justify-between leading-5"><span className="font-semibold">{k}</span><span className="text-slate-800">{v}</span></div>))}
         </div>
       </div>
@@ -96,10 +96,10 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
         </div>
       </div>}
       {rows.length > 0 && <table className="w-full mt-3 border-collapse border border-slate-300 text-[13px]">
-        <thead style={{ display: "table-header-group" }}><tr className="bg-slate-800 text-left text-white">{["#", "Category", "Size", "Qty", "Unit Price", "Total"].map((h, i) => <th key={h} className={`px-2 py-2 font-bold ${i >= 3 ? "text-right" : ""}`}>{h}</th>)}</tr></thead>
+        <thead style={{ display: "table-header-group" }}><tr className="bg-slate-800 text-left text-white">{["#", settings.freeform_invoice_items ? "Product / Service" : "Category", ...(!settings.freeform_invoice_items ? ["Size"] : []), "Qty", "Unit Price", "Total"].map((h, i) => <th key={h} className={`px-2 py-2 font-bold ${i >= (settings.freeform_invoice_items ? 2 : 3) ? "text-right" : ""}`}>{h}</th>)}</tr></thead>
         <tbody>{rows.map((it, i) => (
           <tr key={i} className={`border-t border-slate-200 ${i % 2 ? "bg-slate-50" : "bg-white"}`} style={{ breakInside: "avoid", pageBreakInside: "avoid" }}>
-            <td className="px-2 py-2 text-slate-500">{i + 1}</td><td className="px-2 py-2 font-semibold">{it.category || it.description}</td><td className="px-2 py-2">{it.size || "—"}</td>
+            <td className="px-2 py-2 text-slate-500">{i + 1}</td><td className="px-2 py-2 font-semibold">{it.category || it.description}</td>{!settings.freeform_invoice_items && <td className="px-2 py-2">{it.size || "—"}</td>}
             <td className="px-2 py-2 text-right tabular-nums">{it.qty}</td><td className="px-2 py-2 text-right tabular-nums">{fmtMoney(it.unit_price)}</td><td className="px-2 py-2 text-right font-bold tabular-nums">{fmtMoney((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
           </tr>))}</tbody>
       </table>}

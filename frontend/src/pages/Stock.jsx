@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { api, apiError } from "@/lib/api";
 import { fmtDateTime, fmtMoney } from "@/lib/format";
-import { companyProfileName, usesUnifiedPriceList } from "@/lib/company";
+import { companyProfileName, usesPriceZones, usesUnifiedPriceList } from "@/lib/company";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
 import { Boxes, Plus, ArrowUpDown, History, Undo2, Trash2, Search, X, ChevronDown, ChevronUp, Download } from "lucide-react";
@@ -33,6 +33,7 @@ export default function Stock() {
   const isSuperIqFoam = user?.company_id === "superiqfoam";
   const reduceMotion = useReducedMotion();
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
+  const priceZonesEnabled = usesPriceZones(user?.company_id);
   const [list, setList] = useState(null);
   const [prices, setPrices] = useState([]);
   const [costDrafts, setCostDrafts] = useState({});
@@ -141,7 +142,7 @@ export default function Stock() {
     if (stock.product === "Simple") priceCategory = unifiedPriceList ? "Simple" : "Standard";
     if (stock.product === "Candy") priceCategory = "Ribbon Black";
     return prices.find((item) =>
-      item.zone === (unifiedPriceList ? 1 : zone)
+      item.zone === (priceZonesEnabled ? zone : 1)
       && normalizeStockLabel(item.category) === normalizeStockLabel(priceCategory)
       && normalizeStockLabel(item.size) === normalizeStockLabel(stock.size)
       && item.active
@@ -368,7 +369,7 @@ export default function Stock() {
                     return (
                       <div className="col-span-2 bg-white rounded-md p-3 border border-slate-300 border-2">
                         <label htmlFor="stock-value-zone" className="block text-xs text-slate-600 font-semibold">Total Stock Value</label>
-                        {!unifiedPriceList && (
+                        {priceZonesEnabled && (
                           <select id="stock-value-zone" value={valueZone} onChange={(event) => setValueZone(Number(event.target.value))}
                             className="mt-1 mb-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs" data-testid="stock-value-zone">
                             <option value={1}>Zone 1</option>
@@ -392,7 +393,7 @@ export default function Stock() {
           <div className="overflow-x-auto">
             <table className={`w-full text-sm ${canViewStockCosts ? "min-w-[1180px]" : "min-w-[900px]"}`}>
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                <th className="sticky left-0 z-20 bg-slate-50 px-3 py-3 font-semibold">Adjust</th><th className="px-4 py-3 font-semibold">Size</th><th className="px-4 font-semibold">Product</th><th className="px-4 font-semibold text-right">Other</th><th className="px-4 font-semibold text-right">Invoiced</th><th className="px-4 font-semibold text-right">Current Stock</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Cost (R)</th>}{unifiedPriceList ? <><th className="px-4 font-semibold text-right">Selling Price</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Stock Value</th>}</> : <><th className="px-4 font-semibold text-right">Sell Zone 1</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Stock Value Zone 1</th>}<th className="px-4 font-semibold text-right">Sell Zone 2</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Stock Value Zone 2</th>}</>}<th className="sticky right-0 z-20 bg-slate-50 px-4 font-semibold text-right">Actions</th>
+                <th className="sticky left-0 z-20 bg-slate-50 px-3 py-3 font-semibold">Adjust</th><th className="px-4 py-3 font-semibold">Size</th><th className="px-4 font-semibold">Product</th><th className="px-4 font-semibold text-right">Other</th><th className="px-4 font-semibold text-right">Invoiced</th><th className="px-4 font-semibold text-right">Current Stock</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Cost (R)</th>}{unifiedPriceList || !priceZonesEnabled ? <><th className="px-4 font-semibold text-right">Selling Price</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Stock Value</th>}</> : <><th className="px-4 font-semibold text-right">Sell Zone 1</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Stock Value Zone 1</th>}<th className="px-4 font-semibold text-right">Sell Zone 2</th>{canViewStockCosts && <th className="px-4 font-semibold text-right">Stock Value Zone 2</th>}</>}<th className="sticky right-0 z-20 bg-slate-50 px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{filteredList.map((s) => (
                 <tr key={s.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`stock-row-${s.id}`}>
@@ -410,7 +411,7 @@ export default function Stock() {
                       <button type="button" onClick={() => saveCost(s)} disabled={busy} className="text-primary hover:underline text-xs font-semibold disabled:opacity-50" data-testid={`save-stock-cost-${s.id}`}>Save</button>
                     </div>
                   </td>}
-                  {unifiedPriceList
+                  {unifiedPriceList || !priceZonesEnabled
                     ? <><td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td>{canViewStockCosts && <td className="px-4 text-right font-mono" data-testid={`stock-value-${s.id}`}>{getStockValue(s, 1)}</td>}</>
                     : <><td className="px-4 text-right font-mono">{getSellingPrice(s, 1)}</td>{canViewStockCosts && <td className="px-4 text-right font-mono" data-testid={`stock-value-zone-1-${s.id}`}>{getStockValue(s, 1)}</td>}<td className="px-4 text-right font-mono">{getSellingPrice(s, 2)}</td>{canViewStockCosts && <td className="px-4 text-right font-mono" data-testid={`stock-value-zone-2-${s.id}`}>{getStockValue(s, 2)}</td>}</>}
                   <td className="sticky right-0 z-10 bg-white px-4 text-right whitespace-nowrap">
@@ -459,7 +460,7 @@ export default function Stock() {
             <Input label="Minimum Stock" type="number" value={addModal.threshold} onChange={(e) => setAddModal({ ...addModal, threshold: Number(e.target.value) })} data-testid="stock-threshold-input" />
             <Input label="Selling Price (R) *" type="number" min="0" step="0.01" value={addModal.selling_price} onChange={(e) => setAddModal({ ...addModal, selling_price: e.target.value })} data-testid="stock-price-input" />
           </div>
-          {!unifiedPriceList && <Select label="Price zone" value={addModal.zone} onChange={(e) => setAddModal({ ...addModal, zone: Number(e.target.value) })}><option value={1}>Zone 1</option><option value={2}>Zone 2</option></Select>}
+          {priceZonesEnabled && <Select label="Price zone" value={addModal.zone} onChange={(e) => setAddModal({ ...addModal, zone: Number(e.target.value) })}><option value={1}>Zone 1</option><option value={2}>Zone 2</option></Select>}
           <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setAddModal(null)}>Cancel</Btn><Btn disabled={busy} onClick={saveStock} data-testid="save-stock-btn">Add</Btn></div>
         </div>}
       </Modal>

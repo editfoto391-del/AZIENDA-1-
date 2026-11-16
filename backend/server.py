@@ -41,7 +41,7 @@ from grv_math import (
     validate_grv_line_quantities,
 )
 from smart_production_planner import build_smart_production_plan
-from tenancy import DEFAULT_COMPANY_ID, GLOBAL_COLLECTIONS, ScopedDatabase, active_company_id, active_mongo_session, tenant_database, uses_unified_price_list
+from tenancy import DEFAULT_COMPANY_ID, GLOBAL_COLLECTIONS, ScopedDatabase, active_company_id, active_mongo_session, tenant_database, uses_freeform_invoice_items, uses_price_zones, uses_unified_price_list
 from attendance_math import summarize_attendance_records
 from workflow_engine import (
     ACTION_DEFINITIONS,
@@ -4785,6 +4785,8 @@ async def get_customer_last_invoice_zone(
     express: bool = False,
     user=Depends(get_current_user),
 ):
+    if not uses_price_zones(active_company_id.get()):
+        return {"zone": None}
     if not await db.customers.find_one({"id": cid}, {"_id": 1}):
         raise HTTPException(404, "Customer not found")
     query = {
@@ -4805,7 +4807,7 @@ async def get_customer_last_invoice_zone(
 @api.post("/customers")
 async def add_customer(body: CustomerIn, user=Depends(get_current_user)):
     data = body.model_dump()
-    if uses_unified_price_list(active_company_id.get()):
+    if not uses_price_zones(active_company_id.get()):
         data["default_zone"] = 1
     record = await insert("customers", data)
     await emit_workflow_event("customer.created", record)
@@ -4817,7 +4819,7 @@ async def edit_customer(cid: str, body: CustomerIn, user=Depends(get_current_use
     for field in ("other_balance", "other_balance_express"):
         if field not in body.model_fields_set:
             data.pop(field, None)
-    if uses_unified_price_list(active_company_id.get()):
+    if not uses_price_zones(active_company_id.get()):
         data["default_zone"] = 1
     record = await update_doc("customers", cid, data)
     await emit_workflow_event("customer.updated", record)
@@ -5142,7 +5144,7 @@ def price_category_queries(category):
     )
 
 async def resolve_price(zone, category, size):
-    if uses_unified_price_list(active_company_id.get()):
+    if not uses_price_zones(active_company_id.get()):
         zone = 1
     if is_manual_only(category, size):
         return {"found": True, "price": None, "needs_config": True, "reason": "Ribbon 1370x150 always requires manual price entry and administrator confirmation"}
@@ -6050,7 +6052,7 @@ async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
         inv.pop("idempotency_key", None)
     if inv.get("opening_balance") is None or inv.get("opening_balance") is False:
         inv.pop("opening_balance", None)
-    if uses_unified_price_list(active_company_id.get()):
+    if not uses_price_zones(active_company_id.get()):
         inv["zone"] = 1
     if any(inv.get(field, 0) < 0 for field in ("discount", "extra_charges", "delivery_fee", "tax_rate")):
         raise HTTPException(400, "Discount, additional charges, delivery fee and tax rate cannot be negative")
@@ -6128,7 +6130,7 @@ async def validate_invoice_item_price_edits(body, existing, user):
     else:
         return
     restricted_role = "Workers"
-    zone = 1 if uses_unified_price_list(active_company_id.get()) else body.zone
+    zone = 1 if not uses_price_zones(active_company_id.get()) else body.zone
     previous_items = {}
     for item in (existing or {}).get("items", []):
         previous_items.setdefault(invoice_item_price_key(item, zone), []).append(item)
@@ -8052,7 +8054,7 @@ async def add_stock(body: StockIn, user=Depends(get_current_user)):
             category = "Standard"
         elif category == "Candy":
             category = "Ribbon Black"
-        price_zone = 1 if unified else zone
+        price_zone = 1 if not uses_price_zones(active_company_id.get()) else zone
         existing_price = await db.prices.find_one(
             {"zone": price_zone, "category": category, "size": data["size"]}, {"_id": 0})
     stock = await insert("stock", data)
@@ -10781,9 +10783,9 @@ async def get_intercompany_request_invoice(request_id: str, user=Depends(get_cur
             "tax_number", "banking_details",
         )
     }
-    settings["unified_price_list"] = uses_unified_price_list(
-        request["supplying_company_id"],
-    )
+    settings["unified_price_list"] = uses_unified_price_list(request["supplying_company_id"])
+    settings["price_zones_enabled"] = uses_price_zones(request["supplying_company_id"])
+    settings["freeform_invoice_items"] = uses_freeform_invoice_items(request["supplying_company_id"])
     customer = await supplier_db.customers.find_one(
         {
             "id": invoice.get("customer_id"),
@@ -11485,7 +11487,14 @@ async def get_settings(user=Depends(get_current_user)):
     extra = {"city_distances": seed_data.CITY_DISTANCES_KM, "diesel_price": None, "diesel_price_date": "", "diesel_updated_at": "",
              "avg_speed_kmh": 60, "offload_minutes_per_stop": 45, "piece_weights_kg": {},
              "unified_price_list": uses_unified_price_list(active_company_id.get())}
-    return {**seed_data.DEFAULT_SETTINGS, **extra, **(s or {})}
+    return {
+        **seed_data.DEFAULT_SETTINGS,
+        **extra,
+        **(s or {}),
+        "unified_price_list": uses_unified_price_list(active_company_id.get()),
+        "price_zones_enabled": uses_price_zones(active_company_id.get()),
+        "freeform_invoice_items": uses_freeform_invoice_items(active_company_id.get()),
+    }
 
 def require_primary_owner(user):
     if canonical_email(user.get("email")) != canonical_email(os.environ["ADMIN_EMAIL"]):

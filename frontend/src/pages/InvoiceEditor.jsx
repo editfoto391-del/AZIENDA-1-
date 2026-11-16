@@ -10,6 +10,8 @@ import {
   defaultInvoicePaymentTerms,
   includePreviousInvoiceBalanceByDefault,
   invoiceCustomerBalanceLabels,
+  usesFreeformInvoiceItems,
+  usesPriceZones,
   usesUnifiedPriceList,
 } from "@/lib/company";
 import { PAYMENT_METHODS } from "@/lib/paymentMethods";
@@ -91,6 +93,9 @@ export default function InvoiceEditor({ express = false }) {
   const { user } = useAuth();
   const isInvoiceOwner = user?.is_owner || user?.is_company_owner || user?.role === "owner";
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
+  const priceZonesEnabled = usesPriceZones(user?.company_id);
+  const freeformInvoiceItems = usesFreeformInvoiceItems(user?.company_id);
+  const makeEmptyItem = () => emptyItem(freeformInvoiceItems ? "" : undefined);
   const { id } = useParams();
   const nav = useNavigate();
   const invoicesPath = express ? "/express-invoices" : "/invoices";
@@ -108,7 +113,7 @@ export default function InvoiceEditor({ express = false }) {
   const [settings, setSettings] = useState({});
   const [inv, setInv] = useState({
     customer_id: "", customer_name: "", customer_phone: "", customer_city: "", date: today(), due_date: today(), zone: 1,
-    payment_terms: defaultInvoicePaymentTerms(user?.company_id), reference: "", notes: "", items: [emptyItem()],
+    payment_terms: defaultInvoicePaymentTerms(user?.company_id), reference: "", notes: "", items: [makeEmptyItem()],
     discount: 0, extra_charges: 0, delivery_fee: 0, made_by: "",
     client_number: "", assigned_driver_id: "", assigned_driver_name: "",
     idempotency_key: newKey(), tax_enabled: false, tax_rate: 15, status: "draft",
@@ -143,7 +148,7 @@ export default function InvoiceEditor({ express = false }) {
   const invoiceItemPriceLocked = user?.is_worker && !user?.can_edit_invoice_prices;
 
   const prepareForEdit = (invoice) => invoice.opening_balance
-    ? { ...invoice, opening_balance: false, reference: "", notes: "", items: [emptyItem()] }
+    ? { ...invoice, opening_balance: false, reference: "", notes: "", items: [makeEmptyItem()] }
     : invoice;
 
   const refreshInvoiceAudit = () => {
@@ -176,9 +181,13 @@ export default function InvoiceEditor({ express = false }) {
         nav(express ? "/invoices" : "/express-invoices", { replace: true });
         return;
       }
-      const loaded = { ...d, zone: unifiedPriceList ? 1 : d.zone, items: (d.items || []).map((item) => ({
+      const loaded = { ...d, zone: priceZonesEnabled ? d.zone : 1, items: (d.items || []).map((item) => ({
         ...item,
-        category: ["Standard", "Simple"].includes(item.category) ? "Simple/Mix color" : item.category,
+        category: freeformInvoiceItems ? "" : ["Standard", "Simple"].includes(item.category) ? "Simple/Mix color" : item.category,
+        size: freeformInvoiceItems ? "" : item.size,
+        description: freeformInvoiceItems
+          ? item.description || [item.category, item.size].filter(Boolean).join(" ")
+          : item.description,
       })) };
       setInv(loaded);
       setPayRecords(d.payment_records || []);
@@ -197,7 +206,7 @@ export default function InvoiceEditor({ express = false }) {
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, user?.can_edit_invoices_without_supervisor, isInvoiceOwner, express]);
+  }, [id, user?.can_edit_invoices_without_supervisor, isInvoiceOwner, express, priceZonesEnabled, freeformInvoiceItems]);
 
   useEffect(() => {
     if (!id || !inv.customer_id) return;
@@ -383,7 +392,7 @@ export default function InvoiceEditor({ express = false }) {
   };
 
   const sizesFor = (zone, cat) => {
-    return invoiceSizesFor(zone, cat, unifiedPriceList, prices, stockItems);
+    return invoiceSizesFor(zone, cat, unifiedPriceList, prices, stockItems, user?.company_id);
   };
 
   const lookupPrice = (zone, cat, size) => {
@@ -506,15 +515,15 @@ export default function InvoiceEditor({ express = false }) {
     setZoneFromLastInvoice(false);
     const lastZone = await lastInvoiceZoneForCustomer(c);
     if (lookupId !== zoneLookupRef.current) return;
-    const zone = unifiedPriceList ? 1 : lastZone.zone;
+    const zone = priceZonesEnabled ? lastZone.zone : 1;
     let items = inv.items;
     let selectedZone = zone;
-    if (!unifiedPriceList && zone !== inv.zone) {
+    if (priceZonesEnabled && zone !== inv.zone) {
       const next = repriceItems(inv.items, zone);
       if (confirmReprice(inv.items, next)) items = next;
       else selectedZone = inv.zone;
     }
-    setZoneFromLastInvoice(!unifiedPriceList && lastZone.fromLastInvoice && selectedZone === zone);
+    setZoneFromLastInvoice(priceZonesEnabled && lastZone.fromLastInvoice && selectedZone === zone);
     setInv({ ...inv, customer_id: cid, customer_name: c.name, customer_phone: c.phone || "", customer_city: c.city || "", client_number: c.client_number || "", payment_terms: user?.company_id === "superiqfoam" ? defaultInvoicePaymentTerms(user.company_id) : c.payment_terms, zone: selectedZone, items, destination: inv.destination || c.city || "" });
     if (!c.city) toast.info("This customer has no saved city. Please confirm the delivery destination.");
   };
@@ -538,17 +547,19 @@ export default function InvoiceEditor({ express = false }) {
       || customers.find((item) => item.name.trim().toLowerCase() === String(order.customer_name || "").trim().toLowerCase());
     const lastZone = await lastInvoiceZoneForCustomer(customer);
     if (lookupId !== zoneLookupRef.current) return;
-    const zone = unifiedPriceList ? 1 : Number(customer ? lastZone.zone : inv.zone);
+    const zone = priceZonesEnabled ? Number(customer ? lastZone.zone : inv.zone) : 1;
     const noteItems = orderLines(order).map((item) => ({
-      ...emptyItem(["Standard", "Simple"].includes(item.category) ? "Simple/Mix color" : item.category || ""),
+      ...makeEmptyItem(),
       qty: Number(item.qty) || 0,
-      category: ["Standard", "Simple"].includes(item.category) ? "Simple/Mix color" : item.category || "",
-      size: item.size || "",
-      description: item.description || "",
+      category: freeformInvoiceItems ? "" : ["Standard", "Simple"].includes(item.category) ? "Simple/Mix color" : item.category || "",
+      size: freeformInvoiceItems ? "" : item.size || "",
+      description: freeformInvoiceItems
+        ? item.description || [item.category, item.size].filter(Boolean).join(" ")
+        : item.description || "",
     }));
     const items = noteItems.length
       ? noteItems.map((item) => item.category ? repriceItems([item], zone)[0] : item)
-      : [emptyItem()];
+      : [makeEmptyItem()];
 
     setInv((current) => ({
       ...current,
@@ -562,7 +573,7 @@ export default function InvoiceEditor({ express = false }) {
       destination: order.destination || customer?.city || "",
       items,
     }));
-    setZoneFromLastInvoice(!unifiedPriceList && lastZone.fromLastInvoice);
+    setZoneFromLastInvoice(priceZonesEnabled && lastZone.fromLastInvoice);
     toast.success(`Loaded customer and products from delivery note ${order.reference}`);
   };
 
@@ -634,7 +645,7 @@ export default function InvoiceEditor({ express = false }) {
         opening: 0,
         threshold: 5,
         selling_price: price,
-        zone: unifiedPriceList ? 1 : inv.zone,
+        zone: priceZonesEnabled ? inv.zone : 1,
       });
       setPendingUnmatchedStock(null);
       window.dispatchEvent(new Event("erp:data-changed"));
@@ -692,7 +703,15 @@ export default function InvoiceEditor({ express = false }) {
     const enteredItems = inv.items.filter((item) => item.category?.trim() || item.size?.trim() || item.description?.trim());
     if (!enteredItems.length) { toast.error("Add at least one item"); return false; }
     if (enteredItems.some((item) => (Number(item.qty) || 0) <= 0)) { toast.error("Quantity must be positive"); return false; }
-    if (enteredItems.some((item) => (!!item.category?.trim() !== !!item.size?.trim()))) {
+    if (freeformInvoiceItems && enteredItems.some((item) => !item.description?.trim())) {
+      toast.error("Enter a description for every invoice item");
+      return false;
+    }
+    if (freeformInvoiceItems && status !== "draft" && enteredItems.some((item) => !(Number(item.unit_price) > 0))) {
+      toast.error("Enter a unit price for every invoice item before issuing");
+      return false;
+    }
+    if (!freeformInvoiceItems && enteredItems.some((item) => (!!item.category?.trim() !== !!item.size?.trim()))) {
       toast.error("Complete both the product category and size for every invoice line");
       return false;
     }
@@ -950,7 +969,7 @@ export default function InvoiceEditor({ express = false }) {
     if (inv.assigned_driver_name) L.push(`Assigned Driver: ${inv.assigned_driver_name}`);
     L.push(`Invoice Date: ${fmtDate(inv.date)}`);
     L.push(`Due Date: ${fmtDate(inv.due_date)}`);
-    if (!unifiedPriceList) L.push(`Price Zone: Zone ${inv.zone}`);
+    if (priceZonesEnabled) L.push(`Price Zone: Zone ${inv.zone}`);
     L.push(`Payment Terms: ${inv.payment_terms}`);
     if (isCod && inv.cod_amount_due != null && inv.cod_amount_due !== "") L.push(`Cash to collect: ${fmtMoney(Number(inv.cod_amount_due))}`);
     if (inv.destination) L.push(`Delivery To: ${inv.destination}`);
@@ -1202,7 +1221,7 @@ export default function InvoiceEditor({ express = false }) {
               <Card className="p-5"><div className="flex items-center justify-between mb-4"><h3 className="font-bold text-slate-800 font-display">2. Invoice Details</h3><span className="font-mono text-sm font-bold text-primary">{inv.number || nextNum || "DRAFT"}</span></div>
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-3"><Input label="Invoice Date" type="date" value={inv.date} onChange={(e) => setInv({ ...inv, date: e.target.value })} /><Input label="Due Date" type="date" value={inv.due_date} onChange={(e) => setInv({ ...inv, due_date: e.target.value })} /></div>
-                  <div className={`grid ${unifiedPriceList ? "grid-cols-1" : "grid-cols-2"} gap-3`}>{!unifiedPriceList && <div>
+                  <div className={`grid ${priceZonesEnabled ? "grid-cols-2" : "grid-cols-1"} gap-3`}>{priceZonesEnabled && <div>
                     <Select label="Price Zone" value={inv.zone} onChange={(e) => changeZone(Number(e.target.value))} data-testid="invoice-zone-select">
                       <option value={1}>Zone 1</option><option value={2}>Zone 2</option>
                     </Select>
@@ -1233,14 +1252,14 @@ export default function InvoiceEditor({ express = false }) {
             </div>
 
             {(!openingBalanceOnly || editing) && <Card className="p-5">
-              <h3 className="font-bold text-slate-800 mb-4 font-display">3. Products</h3>
-              {!locked && <div className="mb-4 max-w-xl">
+              <h3 className="font-bold text-slate-800 mb-4 font-display">{freeformInvoiceItems ? "3. Items" : "3. Products"}</h3>
+              {!locked && !freeformInvoiceItems && <div className="mb-4 max-w-xl">
                 <BarcodeScanner onScan={scanInvoiceProduct} disabled={busy} dedupeWindowMs={0} label="Scan product to add it at the current price" />
               </div>}
               <div className="overflow-x-auto -mx-5 px-5">
                 <table className="w-full text-sm min-w-[780px]">
                   <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-border bg-slate-50">
-                    <th className="px-2 pb-2 pt-2 font-semibold w-10">#</th><th className="px-2 pb-2 pt-2 font-semibold w-20">Qty</th><th className="px-2 pb-2 pt-2 font-semibold">Product / Category</th><th className="px-2 pb-2 pt-2 font-semibold">Size / Unit</th><th className="px-2 pb-2 pt-2 font-semibold w-32">Unit Price (R)</th><th className="px-2 pb-2 pt-2 font-semibold text-right w-28">Line Total</th><th className="w-10"></th>
+                    <th className="px-2 pb-2 pt-2 font-semibold w-10">#</th><th className="px-2 pb-2 pt-2 font-semibold w-20">Qty</th><th className="px-2 pb-2 pt-2 font-semibold">{freeformInvoiceItems ? "Description" : "Product / Category"}</th>{!freeformInvoiceItems && <th className="px-2 pb-2 pt-2 font-semibold">Size / Unit</th>}<th className="px-2 pb-2 pt-2 font-semibold w-32">Unit Price (R)</th><th className="px-2 pb-2 pt-2 font-semibold text-right w-28">Line Total</th><th className="w-10"></th>
                   </tr></thead>
                   <tbody>{invoiceItems.map((it, idx) => (
                     <tr key={idx} className={`border-b border-border/50 align-middle ${idx % 2 ? "bg-slate-50/70" : "bg-white"}`} data-testid={`item-row-${idx}`}>
@@ -1249,8 +1268,11 @@ export default function InvoiceEditor({ express = false }) {
                         <input type="number" min="1" value={it.qty} onChange={(e) => updateItem(idx, { qty: e.target.value })} data-testid={`item-qty-${idx}`}
                           className="w-16 rounded-md border border-input bg-white px-2 py-2 text-center text-sm font-medium focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
                       </td>
-                      <td className="px-2 py-2" colSpan={!it.category && it.description ? 2 : 1}>
-                        {!it.category && it.description ? (
+                      <td className="px-2 py-2" colSpan={!freeformInvoiceItems && !it.category && it.description ? 2 : 1}>
+                        {freeformInvoiceItems ? (
+                          <input value={it.description} placeholder="Enter item or service description" onChange={(e) => updateItem(idx, { category: "", size: "", description: e.target.value })} data-testid={`item-desc-${idx}`}
+                            className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
+                        ) : !it.category && it.description ? (
                           <input value={it.description} onChange={(e) => updateItem(idx, { description: e.target.value })} data-testid={`item-desc-${idx}`}
                             className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
                         ) : (
@@ -1260,7 +1282,7 @@ export default function InvoiceEditor({ express = false }) {
                         <datalist id={`invoice-category-options-${idx}`}>{categoriesFor(inv.zone).map((category) => <option key={category} value={category} />)}</datalist>
                         </>)}
                       </td>
-                      {!(!it.category && it.description) && <td className="px-2 py-2">
+                      {!freeformInvoiceItems && !(!it.category && it.description) && <td className="px-2 py-2">
                         <input list={`invoice-size-options-${idx}`} value={it.size} placeholder="Select size" onChange={(e) => onCatSize(idx, { size: e.target.value })} data-testid={`item-size-${idx}`}
                           className="w-full min-w-[110px] rounded-md border border-input bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
                         <datalist id={`invoice-size-options-${idx}`}>{sizesFor(inv.zone, it.category).map((size) => <option key={size} value={size} />)}</datalist>
@@ -1282,7 +1304,7 @@ export default function InvoiceEditor({ express = false }) {
                     </tr>))}</tbody>
                 </table>
               </div>
-              <Btn variant="outline" className="mt-4" onClick={() => setInv({ ...inv, items: [...inv.items, emptyItem()] })} data-testid="add-item-btn"><Plus size={16} /> Add Product</Btn>
+              <Btn variant="outline" className="mt-4" onClick={() => setInv({ ...inv, items: [...inv.items, makeEmptyItem()] })} data-testid="add-item-btn"><Plus size={16} /> {freeformInvoiceItems ? "Add Item" : "Add Product"}</Btn>
             </Card>}
           </fieldset>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">

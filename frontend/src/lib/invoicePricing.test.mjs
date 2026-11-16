@@ -84,6 +84,18 @@ test("category and size lists include canonical aliases without crossing zones",
   assert.deepEqual(invoiceSizesFor(2, "Simple/Mix color", true, prices, []), ["910x100"]);
 });
 
+test("Super IQ-Foam invoice sizes retain x50, x75 and x125 options", () => {
+  assert.deepEqual(
+    invoiceSizesFor(1, "Simple/Mix color", false, [], [], "superiqfoam"),
+    ["760x50", "760x75", "910x50", "910x75", "1070x50", "1070x75", "1370x50", "1370x75"],
+  );
+  assert.deepEqual(
+    invoiceSizesFor(1, "Strong Boy", false, [], [], "superiqfoam"),
+    ["760x125", "910x125", "1070x125", "1370x125"],
+  );
+  assert.deepEqual(invoiceSizesFor(1, "Strong Boy", false, [], [], "imraan-plastics"), []);
+});
+
 test("price lookup prioritizes canonical rows and resolves shared legacy aliases", () => {
   const legacy = { ...unifiedPrices[1], category: "Black fabric", price: 220 };
   assert.deepEqual(lookupInvoicePrice(1, "Black", "760x100", true, [legacy]), {

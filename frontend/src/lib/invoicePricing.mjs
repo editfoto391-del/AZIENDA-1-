@@ -116,8 +116,17 @@ export const invoiceCategoriesFor = (zone, unifiedPriceList, prices, stockItems)
   });
 };
 
-export const invoiceSizesFor = (zone, category, unifiedPriceList, prices, stockItems) => {
+const SUPER_IQ_FOAM_DEFAULT_SIZES = {
+  Standard: ["760x50", "760x75", "910x50", "910x75", "1070x50", "1070x75", "1370x50", "1370x75"],
+  "Strong Boy": ["760x125", "910x125", "1070x125", "1370x125"],
+  Candy: ["910x125"],
+};
+
+export const invoiceSizesFor = (zone, category, unifiedPriceList, prices, stockItems, companyId) => {
   const priceCategory = invoicePriceCategory(category, unifiedPriceList);
+  const defaultSizes = companyId === "superiqfoam"
+    ? SUPER_IQ_FOAM_DEFAULT_SIZES[priceCategory] || []
+    : [];
   const pricedSizes = prices
     .filter((price) => price.zone === zone
       && sameInvoicePriceCategory(price.category, category, unifiedPriceList)
@@ -126,7 +135,7 @@ export const invoiceSizesFor = (zone, category, unifiedPriceList, prices, stockI
   const stockedSizes = stockItems
     .filter((item) => sameInvoicePriceCategory(item.product, category, unifiedPriceList))
     .map((item) => item.size);
-  return [...new Set([...pricedSizes, ...stockedSizes])];
+  return [...new Set([...defaultSizes, ...pricedSizes, ...stockedSizes])];
 };
 
 export const lookupInvoicePrice = (zone, category, size, unifiedPriceList, prices) => {

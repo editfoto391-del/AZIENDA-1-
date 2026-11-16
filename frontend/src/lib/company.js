@@ -7,6 +7,11 @@ export const dedicatedCompanyDomain = () =>
 
 export const usesUnifiedPriceList = (companyId) => UNIFIED_PRICE_COMPANIES.has(companyId);
 
+export const usesPriceZones = (companyId) =>
+  !UNIFIED_PRICE_COMPANIES.has(companyId) && companyId !== "imraan-plastics";
+
+export const usesFreeformInvoiceItems = (companyId) => companyId === "imraan-plastics";
+
 export const includePreviousInvoiceBalanceByDefault = (companyId) => companyId !== "superiqfoam";
 
 export const defaultInvoicePaymentTerms = (companyId) =>

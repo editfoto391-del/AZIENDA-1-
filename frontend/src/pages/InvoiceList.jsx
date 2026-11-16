@@ -6,7 +6,7 @@ import { Eye, FileText, Search, Plus, Pencil, Trash2, Download, RotateCcw, Archi
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { usesUnifiedPriceList } from "@/lib/company";
+import { usesFreeformInvoiceItems, usesPriceZones } from "@/lib/company";
 import { resolveWhatsAppPhone } from "@/lib/whatsappPhone.mjs";
 import { InvoiceDocument } from "@/components/InvoiceDocument";
 import { elementToPdf } from "@/lib/pdf";
@@ -18,7 +18,8 @@ export default function InvoiceList({ express = false }) {
   const canManageInvoices = user?.is_admin || user?.role === "admin" || user?.is_owner
     || (user?.is_worker && user?.allowed_sections?.includes(express ? "express-invoices" : "invoices")
       && user?.write_permissions?.[express ? "express-invoices" : "invoices"]?.delete !== "deny");
-  const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
+  const priceZonesEnabled = usesPriceZones(user?.company_id);
+  const freeformInvoiceItems = usesFreeformInvoiceItems(user?.company_id);
   const [list, setList] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -309,7 +310,7 @@ export default function InvoiceList({ express = false }) {
         <Btn onClick={() => nav(`${listPath}/new`)} data-testid="new-invoice-btn"><Plus size={16} /> Create Invoice</Btn>
       </PageHeader>
 
-      <Card className={`p-4 mb-4 grid grid-cols-1 ${unifiedPriceList ? "sm:grid-cols-4" : "sm:grid-cols-5"} gap-3`}>
+      <Card className={`p-4 mb-4 grid grid-cols-1 ${priceZonesEnabled ? "sm:grid-cols-5" : "sm:grid-cols-4"} gap-3`}>
         <div className="relative sm:col-span-2">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
           <input data-testid="invoice-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search number or customer..."
@@ -320,7 +321,7 @@ export default function InvoiceList({ express = false }) {
           {Object.keys(STATUS_META).map((s) => <option key={s} value={s}>{STATUS_META[s].label}</option>)}
         </select>
         <Input label="Invoice date" type="date" value={invoiceDate} onChange={(e) => { setInvoiceDate(e.target.value); setPage(1); }} data-testid="invoice-date-filter" />
-        {!unifiedPriceList && <select value={zone} onChange={(e) => { setZone(e.target.value); setPage(1); }} className="rounded-lg border border-input px-3 py-2.5 text-sm">
+        {priceZonesEnabled && <select value={zone} onChange={(e) => { setZone(e.target.value); setPage(1); }} className="rounded-lg border border-input px-3 py-2.5 text-sm">
           <option value="all">All Zones</option><option value="1">Zone 1</option><option value="2">Zone 2</option>
         </select>}
         {canAccessInvoiceArchive && <label className="flex items-center gap-2 text-sm text-slate-600">
@@ -341,7 +342,7 @@ export default function InvoiceList({ express = false }) {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
-                {canManageInvoices && <th className="px-3 py-3 w-8"><input type="checkbox" checked={sel.length > 0 && sel.length === list.filter((i) => showArchived ? i.archived : !i.archived && i.status === "draft").length} onChange={(e) => setSel(e.target.checked ? list.filter((i) => showArchived ? i.archived : !i.archived && i.status === "draft").map((i) => i.id) : [])} data-testid="select-all-invoices" /></th>}<th className="px-4 py-3 font-semibold">Invoice</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">Date</th><th className="px-4 font-semibold">Due</th>{!unifiedPriceList && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold text-right">Total</th><th className="px-4 font-semibold text-right">Paid</th><th className="px-4 font-semibold text-right">Balance</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
+                {canManageInvoices && <th className="px-3 py-3 w-8"><input type="checkbox" checked={sel.length > 0 && sel.length === list.filter((i) => showArchived ? i.archived : !i.archived && i.status === "draft").length} onChange={(e) => setSel(e.target.checked ? list.filter((i) => showArchived ? i.archived : !i.archived && i.status === "draft").map((i) => i.id) : [])} data-testid="select-all-invoices" /></th>}<th className="px-4 py-3 font-semibold">Invoice</th><th className="px-4 font-semibold">Customer</th><th className="px-4 font-semibold">Date</th><th className="px-4 font-semibold">Due</th>{priceZonesEnabled && <th className="px-4 font-semibold">Zone</th>}<th className="px-4 font-semibold text-right">Total</th><th className="px-4 font-semibold text-right">Paid</th><th className="px-4 font-semibold text-right">Balance</th><th className="px-4 font-semibold text-center">Status</th><th className="px-4 font-semibold text-right">Actions</th>
               </tr></thead>
               <tbody>{list.map((i) => (
                 <tr key={i.id} className="border-b border-border/60 hover:bg-slate-50 cursor-pointer" onClick={() => i.archived ? view(i.id) : nav(`${listPath}/${i.id}`)} data-testid={`invoice-row-${i.id}`}>
@@ -350,7 +351,7 @@ export default function InvoiceList({ express = false }) {
                   <td className="px-4 text-slate-600">{i.customer_name}{i.customer_deleted && <Badge cls="ml-2 border-red-200 bg-red-50 text-red-700">Deleted customer</Badge>}</td>
                   <td className="px-4 text-slate-500">{fmtDate(i.date)}</td>
                   <td className="px-4 text-slate-500">{fmtDate(i.due_date)}</td>
-                  {!unifiedPriceList && <td className="px-4"><Badge cls="bg-blue-50 text-blue-700 border-blue-200">Z{i.zone}</Badge></td>}
+                  {priceZonesEnabled && <td className="px-4"><Badge cls="bg-blue-50 text-blue-700 border-blue-200">Z{i.zone}</Badge></td>}
                   <td className="px-4 text-right font-mono text-slate-700">{fmtMoney(i.total)}</td>
                   <td className="px-4 text-right font-mono text-emerald-600">{fmtMoney(i.amount_paid)}</td>
                   <td className="px-4 text-right font-mono text-red-600">{fmtMoney(i.outstanding)}</td>
@@ -436,7 +437,7 @@ export default function InvoiceList({ express = false }) {
               ["Email", viewCustomer?.email],
               ["Issue Date", fmtDate(viewInvoice.date)],
               ["Due Date", fmtDate(viewInvoice.due_date)],
-              ...(!unifiedPriceList ? [["Price Zone", `Zone ${viewInvoice.zone}`]] : []),
+              ...(priceZonesEnabled ? [["Price Zone", `Zone ${viewInvoice.zone}`]] : []),
               ["Payment Terms", viewInvoice.payment_terms],
               ...(viewInvoice.payment_terms === "Cash on Delivery" ? [
                 ["Cash to collect", viewInvoice.cod_amount_due != null ? fmtMoney(viewInvoice.cod_amount_due) : "—"],
@@ -457,9 +458,9 @@ export default function InvoiceList({ express = false }) {
             <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Items</h4>
             {(viewInvoice.items || []).length ? <div className="overflow-x-auto rounded-lg border border-border">
               <table className="w-full text-sm">
-                <thead><tr className="bg-slate-50 text-left text-xs text-slate-500"><th className="px-3 py-2">Product / Description</th><th className="px-3 py-2">Size</th><th className="px-3 py-2 text-right">Quantity</th><th className="px-3 py-2 text-right">Unit Price</th><th className="px-3 py-2 text-right">Line Total</th></tr></thead>
+                <thead><tr className="bg-slate-50 text-left text-xs text-slate-500"><th className="px-3 py-2">{freeformInvoiceItems ? "Product / Service" : "Product / Description"}</th>{!freeformInvoiceItems && <th className="px-3 py-2">Size</th>}<th className="px-3 py-2 text-right">Quantity</th><th className="px-3 py-2 text-right">Unit Price</th><th className="px-3 py-2 text-right">Line Total</th></tr></thead>
                 <tbody>{viewInvoice.items.map((item, index) => <tr key={index} className="border-t border-border/70">
-                  <td className="px-3 py-2">{item.category || item.description || "Item"}</td><td className="px-3 py-2">{item.size || "-"}</td>
+                  <td className="px-3 py-2">{item.category || item.description || "Item"}</td>{!freeformInvoiceItems && <td className="px-3 py-2">{item.size || "-"}</td>}
                   <td className="px-3 py-2 text-right">{item.qty}</td><td className="px-3 py-2 text-right">{fmtMoney(item.unit_price)}</td>
                   <td className="px-3 py-2 text-right">{fmtMoney(item.line_total ?? (Number(item.qty || 0) * Number(item.unit_price || 0)))}</td>
                 </tr>)}</tbody>

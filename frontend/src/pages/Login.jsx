@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
-import { Building2, Factory, Store, Package, Layers, ArrowLeft, LockKeyhole } from "lucide-react";
+import { Building2, Factory, Store, Package, Cylinder, Layers, ArrowLeft, LockKeyhole } from "lucide-react";
 import { Navigate, useLocation, useParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { companyProfileName, dedicatedCompanyDomain } from "@/lib/company";
 
 const PROFILE_ICONS = [Building2, Factory, Store, Package];
+const PROFILE_ICONS_BY_ID = { "imraan-plastics": Cylinder };
 const PROFILE_TONES = [
   "bg-emerald-100 text-emerald-900 border-emerald-200",
   "bg-lime-100 text-lime-950 border-lime-200",
@@ -121,7 +122,7 @@ export default function Login() {
             <>
               {profiles.length > 0 && <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-6 lg:grid-cols-4">
                 {profiles.map((profile, index) => {
-                  const Icon = PROFILE_ICONS[index] || Building2;
+                  const Icon = PROFILE_ICONS_BY_ID[profile.id] || PROFILE_ICONS[index] || Building2;
                   return <button key={profile.id} type="button" onClick={() => chooseProfile(profile)} data-testid={`company-profile-${profile.id}`}
                     className="group flex flex-row items-center gap-4 rounded-xl border border-white/10 bg-white/[0.035] px-5 py-4 text-left transition-all duration-300 hover:-translate-y-1 hover:border-emerald-100/30 hover:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-emerald-100/40 sm:flex-col sm:gap-4 sm:border-0 sm:bg-transparent sm:px-3 sm:py-3 sm:text-center sm:hover:bg-transparent motion-reduce:transform-none motion-reduce:transition-none">
                     <span className={`flex h-16 w-16 shrink-0 items-center justify-center rounded-full border shadow-[0_8px_24px_rgba(0,0,0,0.16)] transition-transform duration-300 group-hover:scale-105 sm:h-24 sm:w-24 ${PROFILE_TONES[index] || PROFILE_TONES[0]} motion-reduce:transition-none`}>

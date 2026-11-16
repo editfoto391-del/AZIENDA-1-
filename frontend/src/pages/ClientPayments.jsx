@@ -4,7 +4,7 @@ import { CreditCard, Download, Eye, ReceiptText, Search, Wallet } from "lucide-r
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtMoney, newKey, STATUS_META, today } from "@/lib/format";
 import { Badge, Btn, Card, Empty, Input, Modal, PageHeader, Select, Textarea } from "@/components/common";
-import { usesUnifiedPriceList } from "@/lib/company";
+import { usesPriceZones } from "@/lib/company";
 import { downloadCustomerBalancePdf } from "@/lib/customerBalancePdf.mjs";
 import { PAYMENT_METHODS, RECEIVING_OPTIONS } from "@/lib/paymentMethods";
 import { useAuth } from "@/context/AuthContext";
@@ -27,7 +27,7 @@ const toCents = (amount) => {
 
 export default function ClientPayments({ express = false }) {
   const { user } = useAuth();
-  const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
+  const priceZonesEnabled = usesPriceZones(user?.company_id);
   const [customers, setCustomers] = useState([]);
   const [invoices, setInvoices] = useState([]);
   const [query, setQuery] = useState("");
@@ -376,7 +376,7 @@ export default function ClientPayments({ express = false }) {
                 <tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border">
                   <th className="px-4 py-3 font-semibold">Client</th>
                   <th className="px-4 py-3 font-semibold">Phone</th>
-                  {!unifiedPriceList && <th className="px-4 py-3 font-semibold">Zone</th>}
+                  {priceZonesEnabled && <th className="px-4 py-3 font-semibold">Zone</th>}
                   <th className="px-4 py-3 font-semibold">Payment Terms</th>
                   <th className="px-4 py-3 font-semibold text-right">Outstanding</th>
                   <th className="px-4 py-3 font-semibold text-right">Details</th>
@@ -387,7 +387,7 @@ export default function ClientPayments({ express = false }) {
                   <tr key={customer.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`client-balance-row-${customer.id}`}>
                     <td className="px-4 py-3 font-semibold text-slate-800">{customer.name}{customer.customer_deleted && <Badge cls="ml-2 border-red-200 bg-red-50 text-red-700">Deleted customer</Badge>}</td>
                     <td className="px-4 py-3 text-slate-500">{customer.phone || "—"}</td>
-                    {!unifiedPriceList && <td className="px-4 py-3"><Badge cls="bg-blue-50 text-blue-700 border-blue-200">Zone {customer.default_zone}</Badge></td>}
+                    {priceZonesEnabled && <td className="px-4 py-3"><Badge cls="bg-blue-50 text-blue-700 border-blue-200">Zone {customer.default_zone}</Badge></td>}
                     <td className="px-4 py-3 text-slate-500">{customer.payment_terms || "—"}</td>
                     <td className="px-4 py-3 text-right font-mono font-semibold text-red-600">{fmtMoney((balanceCentsByCustomer[customer.id] || 0) / 100)}</td>
                     <td className="px-4 py-3 text-right">
@@ -421,18 +421,18 @@ export default function ClientPayments({ express = false }) {
         ) : (
           <div className="space-y-5">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-              <div className="rounded-lg bg-slate-50 p-3">
+              {priceZonesEnabled && <div className="rounded-lg bg-slate-50 p-3">
                 <p className="text-xs text-slate-400">Zone</p>
-                <p className="font-bold text-slate-800">{unifiedPriceList ? "Zone 1" : `Zone ${profile.customer.default_zone || 1}`}</p>
-              </div>
+                <p className="font-bold text-slate-800">{`Zone ${profile.customer.default_zone || 1}`}</p>
+              </div>}
               {profile.customer.customer_deleted && <div className="rounded-lg border border-red-200 bg-red-50 p-3 sm:col-span-3">
                 <p className="text-sm font-semibold text-red-700">Deleted customer</p>
                 <p className="mt-1 text-xs text-red-600">Invoices and payments are retained as financial history.</p>
               </div>}
-              <div className="rounded-lg bg-violet-50 p-3">
+              {priceZonesEnabled && <div className="rounded-lg bg-violet-50 p-3">
                 <p className="text-xs text-slate-400">Most Used Zone</p>
                 <p className="font-bold text-slate-800">{mostUsedZone(profile.summary.invoices, profile.customer.default_zone)}</p>
-              </div>
+              </div>}
               <div className="rounded-lg bg-blue-50 p-3">
                 <p className="text-xs text-slate-400">Total Invoiced</p>
                 <p className="font-mono font-bold text-slate-800">{fmtMoney(profile.summary.total_invoiced)}</p>

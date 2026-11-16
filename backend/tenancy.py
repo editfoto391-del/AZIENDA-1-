@@ -4,12 +4,22 @@ from copy import deepcopy
 
 DEFAULT_COMPANY_ID = "superiqfoam"
 UNIFIED_PRICE_COMPANIES = frozenset({"iqfoam-manufactoring", "iqfoam-whole-sallers"})
+FREEFORM_INVOICE_COMPANIES = frozenset({"imraan-plastics"})
 active_company_id = ContextVar("active_company_id", default=None)
 active_mongo_session = ContextVar("active_mongo_session", default=None)
 
 
 def uses_unified_price_list(company_id):
     return company_id in UNIFIED_PRICE_COMPANIES
+
+
+def uses_price_zones(company_id):
+    return company_id not in UNIFIED_PRICE_COMPANIES | FREEFORM_INVOICE_COMPANIES
+
+
+def uses_freeform_invoice_items(company_id):
+    return company_id in FREEFORM_INVOICE_COMPANIES
+
 
 GLOBAL_COLLECTIONS = {
     "users",

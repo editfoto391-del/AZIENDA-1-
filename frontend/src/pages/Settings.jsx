@@ -5,7 +5,7 @@ import { fmtMoney, fmtDateTime } from "@/lib/format";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader } from "@/components/common";
 import { Building2, Receipt, Tag, Truck, Save, Pencil, Plus, ShieldCheck, Fuel, MapPin, Smartphone, Trash2, UserPlus, CirclePause, CirclePlay, KeyRound, Database, RotateCcw, Search, X } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
-import { usesUnifiedPriceList } from "@/lib/company";
+import { usesFreeformInvoiceItems, usesUnifiedPriceList } from "@/lib/company";
 import shop2shopQr from "@/assets/shop2shop-n29rxh.png";
 
 const TABS = [
@@ -208,6 +208,7 @@ export default function Settings() {
   const { user } = useAuth();
   const canManageCompanySettings = Boolean(user?.is_owner || user?.is_company_owner);
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
+  const freeformInvoiceItems = usesFreeformInvoiceItems(user?.company_id);
   const [tab, setTab] = useState("company");
   const [s, setS] = useState(null);
   const [dieselPrice, setDieselPrice] = useState("");
@@ -244,13 +245,14 @@ export default function Settings() {
 
   const visibleTabs = TABS.filter((item) =>
     (canManageCompanySettings || !["company", "invoice", "profiles"].includes(item.k))
+    && (item.k !== "prices" || !freeformInvoiceItems)
     && (item.k !== "diesel" || user?.is_admin)
     && (item.k !== "access" || user?.is_owner)
     && (item.k !== "backups" || user?.is_primary_owner)
   );
   useEffect(() => {
     if (!visibleTabs.some((item) => item.k === tab)) setTab(visibleTabs[0]?.k || "company");
-  }, [tab, canManageCompanySettings, user?.is_admin, user?.is_owner, user?.is_primary_owner]);
+  }, [tab, canManageCompanySettings, freeformInvoiceItems, user?.is_admin, user?.is_owner, user?.is_primary_owner]);
   useEffect(() => {
     let active = true;
     setS(null);
