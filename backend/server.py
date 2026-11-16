@@ -11501,11 +11501,7 @@ def require_primary_owner(user):
         raise HTTPException(403, "Primary owner access required")
 
 def backup_database_names():
-    return [base_db.name, *(
-        f"{base_db.name}__{profile['id']}"
-        for profile in COMPANY_PROFILES
-        if profile["id"] != DEFAULT_COMPANY_ID
-    )]
+    return [base_db.name]
 
 def backup_runtime_status():
     configuration = backup_configuration()
@@ -17641,6 +17637,16 @@ async def attendance_summary(user=Depends(get_current_user)):
     return summarize_attendance_records(recs, emps, week, month, today_str())
 
 # ---------------- Seeding ----------------
+async def create_company_unique_index(collection, keys, **options):
+    legacy_keys = [(keys, 1)] if isinstance(keys, str) else list(keys)
+    if not legacy_keys or legacy_keys[0][0] != "company_id":
+        for index_name, index in (await collection.index_information()).items():
+            if index_name != "_id_" and index.get("unique") and index.get("key") == legacy_keys:
+                await collection.drop_index(index_name)
+        keys = [("company_id", 1), *legacy_keys]
+    await collection.create_index(keys, **options)
+
+
 async def seed():
     admin_email = canonical_email(os.environ["ADMIN_EMAIL"])
     admin_pw = os.environ["ADMIN_PASSWORD"]
@@ -17711,12 +17717,12 @@ async def seed():
                            ("monthly_business_purchase_occurrences", "source_key", {"unique": True}),
                            ("attendance", [("employee_id", 1), ("date", 1)], {"unique": True}),
                            ("piece_production", [("employee_id", 1), ("date", 1)], {"unique": True}),
-                           ("prices", [("zone", 1), ("category", 1), ("size", 1)], {"unique": True}),
-                           ("audit_log", [("entity", 1), ("entity_id", 1)], {})):
+                           ("prices", [("zone", 1), ("category", 1), ("size", 1)], {"unique": True})):
         try:
-            await db[coll].create_index(keys, **kw)
+            await create_company_unique_index(db[coll], keys, **kw)
         except Exception as e:
             logging.warning(f"Index on {coll} not created: {e}")
+    await db.audit_log.create_index([("company_id", 1), ("entity", 1), ("entity_id", 1)])
 
 async def initialize_multi_company():
     for profile in COMPANY_PROFILES:
@@ -17778,24 +17784,27 @@ async def initialize_multi_company():
         await base_db[collection_name].create_index("company_id")
     for collection_name in ("invoices", "payments", "expenses"):
         await base_db[collection_name].create_index([("company_id", 1), ("date", 1)])
-    await base_db.invoices.create_index(
-        [("company_id", 1), ("idempotency_key", 1)],
+    await create_company_unique_index(
+        base_db.invoices,
+        "idempotency_key",
         unique=True,
         partialFilterExpression={"idempotency_key": {"$type": "string"}},
         name="invoice_submission_once",
     )
-    await base_db.invoice_share_links.create_index(
-        "invoice_id", unique=True, name="invoice_share_once",
+    await create_company_unique_index(
+        base_db.invoice_share_links, "invoice_id", unique=True, name="invoice_share_once",
     )
-    await base_db.invoice_share_links.create_index(
-        "token_hash", unique=True, name="invoice_share_token_once",
+    await create_company_unique_index(
+        base_db.invoice_share_links, "token_hash", unique=True, name="invoice_share_token_once",
     )
-    await base_db.warehouse_report_share_links.create_index(
+    await create_company_unique_index(
+        base_db.warehouse_report_share_links,
         [("warehouse_id", 1), ("warehouse_report_id", 1)],
         unique=True,
         name="warehouse_report_share_once",
     )
-    await base_db.warehouse_report_share_links.create_index(
+    await create_company_unique_index(
+        base_db.warehouse_report_share_links,
         "token_hash", unique=True, name="warehouse_report_share_token_once",
     )
     await ensure_performance_indexes(base_db)
@@ -17804,21 +17813,21 @@ async def initialize_multi_company():
         if profile["id"] != DEFAULT_COMPANY_ID:
             await initialize_empty_company(profile["id"])
 
-    await base_db.product_identifications.create_index("product_id", unique=True)
+    await create_company_unique_index(base_db.product_identifications, "product_id", unique=True)
     await base_db.product_identifications.create_index(
         [("company_id", 1), ("stock_id", 1)], unique=True
     )
-    await base_db.product_identifications.create_index("ean13", unique=True, sparse=True)
-    await base_db.product_identifications.create_index("sku", unique=True, sparse=True)
+    await create_company_unique_index(base_db.product_identifications, "ean13", unique=True, sparse=True)
+    await create_company_unique_index(base_db.product_identifications, "sku", unique=True, sparse=True)
     await base_db.product_identifications.create_index(
         [("company_id", 1), ("category", 1), ("active", 1)]
     )
     await base_db.product_identifications.create_index(
         [("company_id", 1), ("density", 1), ("active", 1)]
     )
-    await base_db.product_identifications.create_index("qr_payload", unique=True)
-    await base_db.product_identifications.create_index("data_matrix_payload", unique=True)
-    await base_db.product_scans.create_index("scan_id", unique=True, sparse=True)
+    await create_company_unique_index(base_db.product_identifications, "qr_payload", unique=True)
+    await create_company_unique_index(base_db.product_identifications, "data_matrix_payload", unique=True)
+    await create_company_unique_index(base_db.product_scans, "scan_id", unique=True, sparse=True)
     await base_db.product_scans.create_index([("company_id", 1), ("scanned_at", -1)])
     await base_db.product_scans.create_index([("company_id", 1), ("product_id", 1)])
     for profile in COMPANY_PROFILES:
@@ -17954,7 +17963,7 @@ async def ensure_performance_indexes(database):
                     if collection_name == "grvs" else []
                 ),
                 *(
-                    [IndexModel([("source_buying_id", 1)], unique=True, sparse=True,
+                    [IndexModel([("company_id", 1), ("source_buying_id", 1)], unique=True, sparse=True,
                                 name="grv_source_buying_once")]
                     if collection_name == "grvs" else []
                 ),
@@ -18024,11 +18033,14 @@ async def initialize_empty_company(company_id):
                                 ("monthly_business_purchase_occurrences", "source_key", {"unique": True}),
                                 ("attendance", [("employee_id", 1), ("date", 1)], {"unique": True}),
                                 ("piece_production", [("employee_id", 1), ("date", 1)], {"unique": True}),
-                                ("prices", [("zone", 1), ("category", 1), ("size", 1)], {"unique": True}),
-                                ("audit_log", [("entity", 1), ("entity_id", 1)], {})):
-        await company_db[coll].create_index(keys, **options)
+                                ("prices", [("zone", 1), ("category", 1), ("size", 1)], {"unique": True})):
+        await create_company_unique_index(company_db[coll], keys, **options)
+    await company_db.audit_log.create_index(
+        [("company_id", 1), ("entity", 1), ("entity_id", 1)]
+    )
     if company_id == MANUFACTURING_COMPANY_ID:
-        await company_db.production_block_records.create_index(
+        await create_company_unique_index(
+            company_db.production_block_records,
             "request_id",
             unique=True,
             partialFilterExpression={"request_id": {"$type": "string"}},
@@ -18036,41 +18048,51 @@ async def initialize_empty_company(company_id):
         )
     for coll in ("invoices", "payments", "expenses"):
         await company_db[coll].create_index([("company_id", 1), ("date", 1)])
-    await company_db.invoices.create_index(
+    await create_company_unique_index(
+        company_db.invoices,
         "idempotency_key",
         unique=True,
         partialFilterExpression={"idempotency_key": {"$type": "string"}},
         name="invoice_submission_once",
     )
-    await company_db.invoice_share_links.create_index(
+    await create_company_unique_index(
+        company_db.invoice_share_links,
         "invoice_id", unique=True, name="invoice_share_once",
     )
-    await company_db.invoice_share_links.create_index(
+    await create_company_unique_index(
+        company_db.invoice_share_links,
         "token_hash", unique=True, name="invoice_share_token_once",
     )
-    await company_db.warehouse_report_share_links.create_index(
+    await create_company_unique_index(
+        company_db.warehouse_report_share_links,
         [("warehouse_id", 1), ("warehouse_report_id", 1)],
         unique=True,
         name="warehouse_report_share_once",
     )
-    await company_db.warehouse_report_share_links.create_index(
+    await create_company_unique_index(
+        company_db.warehouse_report_share_links,
         "token_hash", unique=True, name="warehouse_report_share_token_once",
     )
-    await company_db.vehicle_licence_discs.create_index(
+    await create_company_unique_index(
+        company_db.vehicle_licence_discs,
         [("vehicle_id", 1), ("expiry_date", 1)],
         unique=True,
         name="vehicle_licence_expiry_once",
     )
-    await company_db.vehicles.create_index(
+    await create_company_unique_index(
+        company_db.vehicles,
         "assigned_driver_id", unique=True, sparse=True, name="vehicle_driver_assignment_once",
     )
-    await company_db.intercompany_prices.create_index(
+    await create_company_unique_index(
+        company_db.intercompany_prices,
         "stock_id", unique=True, name="intercompany_price_stock_once",
     )
-    await company_db.intercompany_customer_mappings.create_index(
+    await create_company_unique_index(
+        company_db.intercompany_customer_mappings,
         "requesting_company_id", unique=True, name="intercompany_customer_mapping_once",
     )
-    await company_db.salary_payments.create_index(
+    await create_company_unique_index(
+        company_db.salary_payments,
         [("employee_id", 1), ("payroll_key", 1)],
         unique=True,
         name="salary_payment_once",
@@ -18084,7 +18106,11 @@ async def initialize_empty_company(company_id):
 @app.on_event("startup")
 async def on_startup():
     global backup_scheduler_task, fleet_notification_scheduler_task
-    await seed()
+    startup_company = active_company_id.set(DEFAULT_COMPANY_ID)
+    try:
+        await seed()
+    finally:
+        active_company_id.reset(startup_company)
     await initialize_multi_company()
     await initialize_workflow_indexes()
     await base_db.notifications.create_index(

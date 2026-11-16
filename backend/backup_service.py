@@ -591,17 +591,12 @@ async def restore_snapshot_to_copy(
         raise ValueError("Invalid backup selection")
     if not configuration["configured"]:
         raise RuntimeError("External backup storage is not configured")
+    if not database_names or base_database_name not in database_names:
+        raise ValueError("The configured base database is missing")
 
     object_key = f"{configuration['prefix']}/{snapshot_key_value}"
     restore_id = uuid.uuid4().hex[:12]
     restored_base_name = f"{base_database_name[:14]}__rec_{restore_id}"
-    restored_names = {}
-    for database_name in database_names:
-        if database_name == base_database_name:
-            restored_names[database_name] = restored_base_name
-        else:
-            suffix = database_name.removeprefix(f"{base_database_name}__")
-            restored_names[database_name] = f"{restored_base_name}__{suffix}"
 
     s3 = _s3_client(configuration)
     with tempfile.TemporaryDirectory(prefix="erp-restore-") as temp_dir:
@@ -625,7 +620,21 @@ async def restore_snapshot_to_copy(
             raise RuntimeError("Backup archive checksum verification failed")
 
         with zipfile.ZipFile(archive_path) as archive:
-            manifest = _read_manifest(archive, database_names)
+            manifest = _read_manifest(archive)
+            restored_names = {}
+            for entry in manifest["databases"]:
+                database_name = entry["name"]
+                if database_name == base_database_name:
+                    restored_names[database_name] = restored_base_name
+                elif re.fullmatch(
+                    rf"{re.escape(base_database_name)}__[A-Za-z0-9_-]+",
+                    database_name,
+                ):
+                    suffix = database_name.removeprefix(f"{base_database_name}__")
+                    restored_names[database_name] = f"{restored_base_name}__{suffix}"
+                else:
+                    raise RuntimeError("Backup contains an unexpected database name")
+
             for index, entry in enumerate(manifest["databases"]):
                 source_database = entry["name"]
                 archive_name = entry.get("archive")

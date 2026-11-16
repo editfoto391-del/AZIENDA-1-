@@ -1,5 +1,8 @@
+import asyncio
+
 import pytest
 
+import server
 from tenancy import (
     DEFAULT_COMPANY_ID,
     ScopedCollection,
@@ -21,11 +24,15 @@ class FakeDatabase:
     name = "iqfoam"
 
     def __getitem__(self, name):
-        return (self.name, name)
+        return FakeCollection()
 
 
 class FakeClient:
+    def __init__(self):
+        self.requested_databases = []
+
     def __getitem__(self, name):
+        self.requested_databases.append(name)
         database = FakeDatabase()
         database.name = name
         return database
@@ -39,6 +46,15 @@ def test_reads_are_scoped_to_the_active_company():
         assert args[0] == {"$and": [{"id": "customer-1"}, {"company_id": "iqfoam-manufactoring"}]}
     finally:
         active_company_id.reset(token)
+
+
+def test_missing_active_company_fails_closed_to_the_default_profile():
+    collection = ScopedCollection(FakeCollection(), company_scoped=True)
+    _, args, _ = collection.find_one({"id": "customer-1"})
+
+    assert args[0] == {
+        "$and": [{"id": "customer-1"}, {"company_id": DEFAULT_COMPANY_ID}]
+    }
 
 
 def test_insert_and_upsert_are_stamped_with_active_company():
@@ -89,11 +105,61 @@ def test_cross_company_write_is_rejected():
         active_company_id.reset(token)
 
 
-def test_existing_database_remains_superiqfoam_and_others_are_separate():
+def test_all_company_profiles_use_the_shared_database():
     client = FakeClient()
     base = FakeDatabase()
-    assert tenant_database(client, base, DEFAULT_COMPANY_ID) is base
-    assert tenant_database(client, base, "iqfoam-manufactoring").name == "iqfoam__iqfoam-manufactoring"
+    assert tenant_database(client, base, None).name == base.name
+    assert tenant_database(client, base, DEFAULT_COMPANY_ID).name == base.name
+    assert tenant_database(client, base, "iqfoam-manufactoring").name == base.name
+    assert client.requested_databases == []
+
+
+def test_tenant_database_pins_company_scope_on_the_shared_database():
+    base = FakeDatabase()
+    database = tenant_database(FakeClient(), base, "iqfoam-manufactoring")
+    token = active_company_id.set(DEFAULT_COMPANY_ID)
+    try:
+        _, args, _ = database.customers.find_one({"id": "customer-1"})
+    finally:
+        active_company_id.reset(token)
+
+    assert args[0] == {
+        "$and": [{"id": "customer-1"}, {"company_id": "iqfoam-manufactoring"}]
+    }
+
+
+def test_company_unique_index_replaces_legacy_global_index():
+    class IndexCollection:
+        def __init__(self):
+            self.dropped = []
+            self.created = []
+
+        async def index_information(self):
+            return {
+                "_id_": {"key": [("_id", 1)], "unique": True},
+                "source_key_1": {"key": [("source_key", 1)], "unique": True},
+            }
+
+        async def drop_index(self, name):
+            self.dropped.append(name)
+
+        async def create_index(self, keys, **options):
+            self.created.append((keys, options))
+
+    collection = IndexCollection()
+    asyncio.run(server.create_company_unique_index(
+        collection, "source_key", unique=True, sparse=True,
+    ))
+
+    assert collection.dropped == ["source_key_1"]
+    assert collection.created == [(
+        [("company_id", 1), ("source_key", 1)],
+        {"unique": True, "sparse": True},
+    )]
+
+
+def test_backups_only_request_the_authorized_shared_database():
+    assert server.backup_database_names() == [server.base_db.name]
 
 
 def test_only_iqfoam_profiles_use_the_unified_price_list():

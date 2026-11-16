@@ -139,25 +139,24 @@ class Client:
 
 def scoped_databases():
     company_ids = ("superiqfoam", "iqfoam-manufactoring", "iqfoam-whole-sallers")
-    databases = {
-        "base": Database("base", "superiqfoam", customers=[
+    customers = [
             {"id": "customer-super", "company_id": "superiqfoam", "name": "Super IQ", "phone": "0821234567"},
-        ], invoices=[{
+        ]
+    invoices = [{
             "id": "invoice-super", "company_id": "superiqfoam",
             "invoice_type": "standard", "created_at": "2026-03-01",
-        }]),
-    }
+        }]
     for company_id in company_ids[1:]:
-        databases[f"base__{company_id}"] = Database(
-            f"base__{company_id}",
-            company_id,
-            customers=[{"id": f"customer-{company_id}", "company_id": company_id, "name": company_id}],
-            invoices=[{
+        customers.append({
+            "id": f"customer-{company_id}", "company_id": company_id, "name": company_id,
+        })
+        invoices.append({
                 "id": f"invoice-{company_id}", "company_id": company_id,
                 "invoice_type": "standard", "created_at": "2026-03-01",
-            }],
-        )
-    return databases
+            })
+    return {
+        "base": Database("base", "superiqfoam", customers=customers, invoices=invoices),
+    }
 
 
 @pytest.mark.parametrize(

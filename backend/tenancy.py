@@ -42,9 +42,7 @@ UPDATE_METHODS = {"update_one", "update_many", "find_one_and_update"}
 
 
 def tenant_database(client, base_database, company_id):
-    if not company_id or company_id == DEFAULT_COMPANY_ID:
-        return base_database
-    return client[f"{base_database.name}__{company_id}"]
+    return ScopedDatabase(client, base_database, company_id or DEFAULT_COMPANY_ID)
 
 
 def _scope_filter(query, company_id):
@@ -77,9 +75,10 @@ def _stamp_update(update, company_id):
 
 
 class ScopedCollection:
-    def __init__(self, collection, company_scoped):
+    def __init__(self, collection, company_scoped, company_id=None):
         self._collection = collection
         self._company_scoped = company_scoped
+        self._company_id = company_id
 
     def __getattr__(self, method_name):
         method = getattr(self._collection, method_name)
@@ -92,9 +91,7 @@ class ScopedCollection:
             session = active_mongo_session.get()
             if session is not None:
                 kwargs.setdefault("session", session)
-            company_id = active_company_id.get()
-            if not company_id:
-                return method(*args, **kwargs)
+            company_id = self._company_id or active_company_id.get() or DEFAULT_COMPANY_ID
             args = list(args)
             kwargs = dict(kwargs)
 
@@ -149,15 +146,26 @@ class ScopedCollection:
 
 
 class ScopedDatabase:
-    def __init__(self, client, base_database):
+    def __init__(self, client, base_database, company_id=None):
         self._client = client
         self._base_database = base_database
+        self._company_id = company_id
 
     def __getitem__(self, collection_name):
         company_scoped = collection_name not in GLOBAL_COLLECTIONS
-        company_id = active_company_id.get()
-        database = tenant_database(self._client, self._base_database, company_id)
-        return ScopedCollection(database[collection_name], company_scoped)
+        return ScopedCollection(
+            self._base_database[collection_name],
+            company_scoped,
+            self._company_id,
+        )
 
     def __getattr__(self, collection_name):
         return self[collection_name]
+
+    @property
+    def name(self):
+        return self._base_database.name
+
+    @property
+    def client(self):
+        return self._client

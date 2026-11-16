@@ -21,8 +21,14 @@ COMPANIES = {
     "superiqfoam": "SUPERIQFOAM",
     "iqfoam-manufactoring": "IQFOAM MANUFACTURING",
     "iqfoam-whole-sallers": "IQFOAM WHOLESALERS",
+    "imraan-plastics": "IMRAAN PLASTICS",
 }
-SKU_PREFIXES = {"superiqfoam": "SFO", "iqfoam-manufactoring": "MFG", "iqfoam-whole-sallers": "WHL"}
+SKU_PREFIXES = {
+    "superiqfoam": "SFO",
+    "iqfoam-manufactoring": "MFG",
+    "iqfoam-whole-sallers": "WHL",
+    "imraan-plastics": "IMR",
+}
 DIMENSIONS_PATTERN = re.compile(r"^\d+(?:\.\d+)?\s*[x×]\s*\d+(?:\.\d+)?(?:\s*[x×]\s*\d+(?:\.\d+)?)?$", re.I)
 
 
@@ -61,11 +67,7 @@ def collect_audit(base_db):
     repeated_product_candidates = []
     company_summary = {}
     for company_id, company_name in COMPANIES.items():
-        database_name = (
-            base_db.name if company_id == "superiqfoam"
-            else f"{base_db.name}__{company_id}"
-        )
-        stock_records = list(base_db.client[database_name].stock.find({}, {"_id": 0}))
+        stock_records = list(base_db.stock.find({"company_id": company_id}, {"_id": 0}))
         stock_by_id = {item.get("id"): item for item in stock_records}
         company_identities = by_company.get(company_id, [])
         company_summary[company_id] = {

@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import io
 import json
 import zipfile
 from datetime import date
@@ -112,13 +114,22 @@ def test_snapshot_contains_each_company_database_and_uses_private_archive(monkey
         exceptions = type("Exceptions", (), {"ClientError": NotFoundError})
 
         def head_object(self, **kwargs):
+            if "path" in uploaded:
+                payload = Path(uploaded["path"]).read_bytes()
+                return {
+                    "Metadata": {"sha256": hashlib.sha256(payload).hexdigest()},
+                    "ContentLength": len(payload),
+                }
             raise NotFoundError()
 
-        def upload_file(self, path, bucket, key):
-            uploaded.update(bucket=bucket, key=key)
+        def upload_file(self, path, bucket, key, **_kwargs):
+            uploaded.update(bucket=bucket, key=key, path=path)
             with zipfile.ZipFile(path) as archive:
                 uploaded["manifest"] = json.loads(archive.read("manifest.json"))
                 uploaded["members"] = archive.namelist()
+
+        def download_file(self, _bucket, _key, destination):
+            Path(destination).write_bytes(Path(uploaded["path"]).read_bytes())
 
     async def fake_run_tool(*arguments):
         archive_arg = next(arg for arg in arguments if arg.startswith("--archive="))
@@ -129,6 +140,7 @@ def test_snapshot_contains_each_company_database_and_uses_private_archive(monkey
 
     monkeypatch.setattr(backup_service, "_s3_client", lambda _: FakeS3())
     monkeypatch.setattr(backup_service, "_run_tool", fake_run_tool)
+    monkeypatch.setattr(backup_service, "_excluded_collections", lambda *_: [])
     configuration = {"configured": True, "bucket": "private-backups", "prefix": "erp-backups"}
 
     result = asyncio.run(create_snapshot(
@@ -146,12 +158,15 @@ def test_snapshot_contains_each_company_database_and_uses_private_archive(monkey
     assert len(uploaded["members"]) == len(database_names) + 1
 
 
-def test_restore_creates_an_isolated_database_copy_without_drop(monkeypatch, tmp_path):
-    database_names = ["erp", "erp__manufactoring", "erp__wholesale"]
+@pytest.mark.parametrize(
+    "database_names",
+    [["erp"], ["erp", "erp__manufactoring", "erp__wholesale"]],
+)
+def test_restore_creates_an_isolated_database_copy_without_drop(monkeypatch, tmp_path, database_names):
     tool_calls = []
 
     class FakeS3:
-        def download_file(self, bucket, key, destination):
+        def __init__(self):
             manifest = {
                 "format_version": 1,
                 "databases": [
@@ -159,10 +174,21 @@ def test_restore_creates_an_isolated_database_copy_without_drop(monkeypatch, tmp
                     for index, database_name in enumerate(database_names)
                 ],
             }
-            with zipfile.ZipFile(destination, "w") as archive:
+            data = io.BytesIO()
+            with zipfile.ZipFile(data, "w") as archive:
                 archive.writestr("manifest.json", json.dumps(manifest))
                 for index in range(len(database_names)):
                     archive.writestr(f"database-{index}.archive.gz", b"dump")
+            self.payload = data.getvalue()
+
+        def head_object(self, **_kwargs):
+            return {
+                "Metadata": {"sha256": hashlib.sha256(self.payload).hexdigest()},
+                "ContentLength": len(self.payload),
+            }
+
+        def download_file(self, _bucket, _key, destination):
+            Path(destination).write_bytes(self.payload)
 
     async def fake_run_tool(*arguments):
         tool_calls.append(arguments)
@@ -171,6 +197,7 @@ def test_restore_creates_an_isolated_database_copy_without_drop(monkeypatch, tmp
 
     monkeypatch.setattr(backup_service, "_s3_client", lambda _: FakeS3())
     monkeypatch.setattr(backup_service, "_run_tool", fake_run_tool)
+    monkeypatch.setattr(backup_service, "_verify_restored_databases", lambda *_: None)
     configuration = {
         "configured": True,
         "bucket": "private-backups",
@@ -179,7 +206,7 @@ def test_restore_creates_an_isolated_database_copy_without_drop(monkeypatch, tmp
 
     result = asyncio.run(restore_snapshot_to_copy(
         mongo_url="mongodb://backup-user:private%21@localhost/erp",
-        database_names=database_names,
+        database_names=["erp"],
         configuration=configuration,
         snapshot_key_value="monthly/2026-09.zip",
         base_database_name="erp",
@@ -187,7 +214,11 @@ def test_restore_creates_an_isolated_database_copy_without_drop(monkeypatch, tmp
 
     assert result["source_key"] == "monthly/2026-09.zip"
     assert result["databases"]["erp"].startswith("erp__rec_")
-    assert result["databases"]["erp__manufactoring"].startswith(result["databases"]["erp"])
+    assert all(
+        restored.startswith(result["databases"]["erp"])
+        for source, restored in result["databases"].items()
+        if source != "erp"
+    )
     assert len(set(result["databases"].values())) == len(database_names)
     assert all(not any(argument == "--drop" for argument in call) for call in tool_calls)
     targets = [

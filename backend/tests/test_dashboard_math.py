@@ -123,14 +123,19 @@ def test_stock_batch_query_respects_each_active_company(monkeypatch):
         "iqfoam-manufactoring": 2,
         "iqfoam-whole-sallers": 3,
     }
-    databases = {
-        "base": Database("base", "superiqfoam", company_amounts["superiqfoam"]),
-        **{
-            f"base__{company_id}": Database(f"base__{company_id}", company_id, amount)
-            for company_id, amount in company_amounts.items()
-            if company_id != "superiqfoam"
-        },
-    }
+    base = Database("base", "superiqfoam", company_amounts["superiqfoam"])
+    for company_id, amount in company_amounts.items():
+        if company_id == "superiqfoam":
+            continue
+        base.stock.documents.append({
+            "id": f"stock-{company_id}", "company_id": company_id,
+            "product": company_id, "opening": 10,
+        })
+        base.stock_movements.documents.append({
+            "stock_id": f"stock-{company_id}", "company_id": company_id,
+            "type": "purchase", "quantity": amount, "created_at": "2026-10-28",
+        })
+    databases = {"base": base}
     monkeypatch.setattr(server, "db", server.ScopedDatabase(Client(databases), databases["base"]))
 
     for company_id, amount in company_amounts.items():
