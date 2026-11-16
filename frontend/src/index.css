@@ -346,20 +346,6 @@ main table:not(.border-slate-300):not(.border-slate-800) tbody tr:hover {
     padding-right: max(0.75rem, env(safe-area-inset-right));
   }
 
-  .app-page-enter,
-  .app-page-enter > * {
-    min-width: 0;
-    max-width: 100%;
-  }
-
-  .app-page-enter .grid.grid-cols-2 {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .app-page-enter .grid > * {
-    min-width: 0;
-  }
-
   table {
     display: block;
     max-width: 100%;
