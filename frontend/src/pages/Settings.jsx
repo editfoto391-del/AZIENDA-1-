@@ -10,12 +10,12 @@ import shop2shopQr from "@/assets/shop2shop-n29rxh.png";
 
 const TABS = [
   { k: "company", l: "Company", icon: Building2 },
-  { k: "invoice", l: "Invoice & Tax", icon: Receipt },
+  { k: "invoice", l: "Invoice and Tax", icon: Receipt },
   { k: "prices", l: "Price List and Products", icon: Tag },
   { k: "drivers", l: "Drivers", icon: Truck },
   { k: "diesel", l: "Diesel", icon: Fuel },
   { k: "access", l: "Access", icon: ShieldCheck },
-  { k: "profiles", l: "Password and Credentials", icon: KeyRound },
+  { k: "profiles", l: "Credentials", icon: KeyRound },
   { k: "backups", l: "Backups", icon: Database },
 ];
 
@@ -206,6 +206,7 @@ function BackupSummary({ status, info }) {
 
 export default function Settings() {
   const { user } = useAuth();
+  const canManageCompanySettings = Boolean(user?.is_owner || user?.is_company_owner);
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const [tab, setTab] = useState("company");
   const [s, setS] = useState(null);
@@ -241,11 +242,35 @@ export default function Settings() {
   const [verified, setVerified] = useState({});
   const [recoveryCopy, setRecoveryCopy] = useState(null);
 
-  const load = () => {
-    api.get("/settings").then((settings) => { setS(settings); setDieselPrice(settings.diesel_price == null ? "" : String(settings.diesel_price)); });
-    api.get("/prices").then(setPrices); api.get("/drivers").then(setDrivers);
-  };
-  useEffect(() => { load(); }, []);
+  const visibleTabs = TABS.filter((item) =>
+    (canManageCompanySettings || !["company", "invoice", "profiles"].includes(item.k))
+    && (item.k !== "diesel" || user?.is_admin)
+    && (item.k !== "access" || user?.is_owner)
+    && (item.k !== "backups" || user?.is_primary_owner)
+  );
+  useEffect(() => {
+    if (!visibleTabs.some((item) => item.k === tab)) setTab(visibleTabs[0]?.k || "company");
+  }, [tab, canManageCompanySettings, user?.is_admin, user?.is_owner, user?.is_primary_owner]);
+  useEffect(() => {
+    let active = true;
+    setS(null);
+    setPrices([]);
+    setDrivers([]);
+    Promise.all([
+      api.getUncached("/settings"),
+      api.getUncached("/prices"),
+      api.getUncached("/drivers"),
+    ]).then(([settings, loadedPrices, loadedDrivers]) => {
+      if (!active) return;
+      setS(settings);
+      setDieselPrice(settings.diesel_price == null ? "" : String(settings.diesel_price));
+      setPrices(loadedPrices);
+      setDrivers(loadedDrivers);
+    }).catch((error) => {
+      if (active) toast.error(apiError(error));
+    });
+    return () => { active = false; };
+  }, [user?.company_id]);
   useEffect(() => {
     if (tab !== "access" || !user?.is_owner) return;
     setAccessLoading(true);
@@ -505,7 +530,14 @@ export default function Settings() {
     } catch (e) { toast.error(apiError(e)); }
   };
 
-  if (!s) return <div className="text-slate-400">Loading...</div>;
+  if (!s) {
+    return (
+      <div>
+        <PageHeader title="Settings" subtitle="Configure your business" />
+        <p className="text-sm text-slate-500" role="status">Loading company settings...</p>
+      </div>
+    );
+  }
   const showShop2Shop = /super/i.test(s.company_name || "") && /iq\s*[- ]?foam/i.test(s.company_name || "");
   const zonePrices = prices.filter((p) => p.zone === (unifiedPriceList ? 1 : zone));
   const unpricedZonePrices = zonePrices.filter((price) => price.price == null || price.confirmed === false);
@@ -520,7 +552,7 @@ export default function Settings() {
     <div>
       <PageHeader title="Settings" subtitle="Configure your business" />
       <div className="flex gap-2 mb-6 overflow-x-auto no-print">
-        {TABS.filter((t) => (t.k !== "diesel" || user?.is_admin) && (t.k !== "access" || user?.is_owner) && (t.k !== "profiles" || user?.is_owner || user?.is_company_owner) && (t.k !== "backups" || user?.is_primary_owner)).map((t) => (
+        {visibleTabs.map((t) => (
           <button key={t.k} onClick={() => setTab(t.k)} data-testid={`settings-tab-${t.k}`}
             className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold whitespace-nowrap ${tab === t.k ? "bg-primary text-white" : "bg-white border border-border text-slate-600"}`}>
             <t.icon size={16} /> {t.l}
@@ -528,7 +560,7 @@ export default function Settings() {
         ))}
       </div>
 
-      {tab === "company" && (
+      {tab === "company" && canManageCompanySettings && (
         <Card className="p-6 max-w-2xl space-y-4">
           <Input label="Company Name" value={s.company_name} onChange={(e) => setS({ ...s, company_name: e.target.value })} data-testid="company-name-input" />
           <Input label="Address" value={s.address} onChange={(e) => setS({ ...s, address: e.target.value })} />
@@ -547,7 +579,7 @@ export default function Settings() {
         </Card>
       )}
 
-      {tab === "invoice" && (
+      {tab === "invoice" && canManageCompanySettings && (
         <Card className="p-6 max-w-2xl space-y-4">
           <Input label="Invoice Prefix" value={s.invoice_prefix} onChange={(e) => setS({ ...s, invoice_prefix: e.target.value })} />
           <Select label="Default Payment Terms" value={s.default_payment_terms} onChange={(e) => setS({ ...s, default_payment_terms: e.target.value })}>
@@ -684,7 +716,7 @@ export default function Settings() {
               <div>
                 <h3 className="font-bold text-slate-800 font-display">Historical backups</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  Daily copies are kept for 30 days and one monthly copy for 12 months. Backups cover invoices, payments and customers of all three companies. Invoice PDFs are rebuilt from this data.
+                  Daily copies are kept for 30 days and one monthly copy for 12 months. Backups cover invoices, payments and customers of all company profiles. Invoice PDFs are rebuilt from this data.
                 </p>
               </div>
               <div className="flex gap-2">
@@ -750,7 +782,7 @@ export default function Settings() {
         </div>
       )}
 
-      {tab === "profiles" && (user?.is_owner || user?.is_company_owner) && (
+      {tab === "profiles" && canManageCompanySettings && (
         <div className="space-y-4 max-w-3xl" data-testid="profile-credentials-tab">
           <p className="text-sm text-slate-500">Passwords are stored securely and cannot be viewed. Check whether a supervisor password is configured and replace it here when needed.</p>
           <Card className="p-5 space-y-4" data-testid="supervisor-password-settings">

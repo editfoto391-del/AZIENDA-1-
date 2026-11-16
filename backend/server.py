@@ -107,10 +107,12 @@ COMPANY_PROFILES = [
     {"id": "superiqfoam", "name": "SUPERIQFOAM", "username": "SUPERIQFOAM"},
     {"id": "iqfoam-manufactoring", "name": "IQFOAM MANUFACTURING", "username": "IQFOAM MANUFACTORING"},
     {"id": "iqfoam-whole-sallers", "name": "IQFOAM WHOLESALERS", "username": "IQFOAM WHOLESALERS"},
+    {"id": "imraan-plastics", "name": "IMRAAN PLASTICS", "username": "IMRAAN PLASTICS"},
 ]
 
 WHOLESALERS_COMPANY_ID = "iqfoam-whole-sallers"
 MANUFACTURING_COMPANY_ID = "iqfoam-manufactoring"
+IMRAAN_PLASTICS_COMPANY_ID = "imraan-plastics"
 WAREHOUSE_IDS = {"A", "B", "C"}
 WORKER_SUPERVISOR_ACTION_SECTIONS = {
     "invoice_edit": {"invoices"},
@@ -171,9 +173,26 @@ COMPANY_INVOICE_DETAILS = {
         "address": "13 Manchester Rd, Northdale, Pietermaritzburg, 3201",
         "telephone": "+27 60 400 8600",
     },
+    IMRAAN_PLASTICS_COMPANY_ID: {
+        "company_name": "IMRAAN PLASTICS",
+        "address": "20 Cross Road, Eastwood, Pietermaritzburg",
+        "telephone": "",
+        "invoice_prefix": "IMP",
+        "product_categories": [],
+        "departments": [],
+    },
 }
 
 def company_role(user, company_id):
+    if (
+        user.get("profile_id") == IMRAAN_PLASTICS_COMPANY_ID
+        and not is_global_owner_account(user)
+    ):
+        if company_id == IMRAAN_PLASTICS_COMPANY_ID:
+            return (user.get("company_roles") or {}).get(company_id)
+        if company_id == DEFAULT_COMPANY_ID:
+            return "user"
+        return None
     if user.get("role") == "owner":
         return "owner"
     if not user.get("is_worker") and any(
@@ -207,6 +226,11 @@ def invoice_for_user(invoice, user):
 
 
 def allowed_company_ids(user):
+    if (
+        user.get("profile_id") == IMRAAN_PLASTICS_COMPANY_ID
+        and not is_global_owner_account(user)
+    ):
+        return [IMRAAN_PLASTICS_COMPANY_ID, DEFAULT_COMPANY_ID]
     if user.get("role") == "owner" or (
         not user.get("is_worker")
         and any(role == "owner" for role in (user.get("company_roles") or {}).values())
@@ -1314,7 +1338,13 @@ def require_profile_owner(user):
         raise HTTPException(403, "Company owner access required")
 
 def require_settings_owner(user):
-    if user.get("is_worker") or user.get("_active_role") != "owner":
+    if (
+        user.get("is_worker")
+        or (
+            not is_global_owner_account(user)
+            and user.get("_active_role") != "owner"
+        )
+    ):
         raise HTTPException(403, "Settings access requires company owner access")
 
 def is_company_admin(user):
@@ -11479,7 +11509,7 @@ def backup_runtime_status():
         "storage_provider": "S3-compatible object storage",
         "schedule": "Daily at 02:00 Africa/Johannesburg",
         "retention": "Daily snapshots for 30 days; monthly snapshots for 12 months",
-        "scope": "Invoices, payments and customers of all three companies (invoice PDFs are generated from this data)",
+        "scope": "Invoices, payments and customers of all company profiles (invoice PDFs are generated from this data)",
     }
 
 def backup_schedule_info():
@@ -17761,8 +17791,9 @@ async def initialize_multi_company():
     )
     await ensure_performance_indexes(base_db)
 
-    for company_id in ("iqfoam-manufactoring", "iqfoam-whole-sallers"):
-        await initialize_empty_company(company_id)
+    for profile in COMPANY_PROFILES:
+        if profile["id"] != DEFAULT_COMPANY_ID:
+            await initialize_empty_company(profile["id"])
 
     await base_db.product_identifications.create_index("product_id", unique=True)
     await base_db.product_identifications.create_index(
@@ -17824,6 +17855,7 @@ async def initialize_company_profile_users():
     profiles = [
         ("iqfoam-manufactoring", "IQFOAM MANUFACTORING", "manufactoring@profiles.invalid", "INITIAL_MANUFACTURING_PASSWORD"),
         ("iqfoam-whole-sallers", "IQFOAM WHOLESALERS", "wholesallers@profiles.invalid", "INITIAL_WHOLESALER_PASSWORD"),
+        (IMRAAN_PLASTICS_COMPANY_ID, "IMRAAN PLASTICS", "imraan-plastics@profiles.invalid", "INITIAL_IMRAAN_PLASTICS_PASSWORD"),
     ]
     for company_id, username, email, env_name in profiles:
         initial_password = os.environ.get(env_name)
@@ -17940,7 +17972,7 @@ async def initialize_empty_company(company_id):
              "address": "", "telephone": ""},
             {"$set": invoice_details},
         )
-    if uses_unified_price_list(company_id):
+    if company_id != IMRAAN_PLASTICS_COMPANY_ID and uses_unified_price_list(company_id):
         settings = await company_db.settings.find_one({"id": "singleton"}, {"_id": 0}) or {}
         if settings.get("unified_price_list_version") != 2:
             for price in seed_data.IQFOAM_UNIFIED_PRICES:
@@ -17971,7 +18003,7 @@ async def initialize_empty_company(company_id):
                 "company_id": company_id, "created_at": now_iso(),
             })
             stock_keys.add(key)
-    else:
+    elif company_id != IMRAAN_PLASTICS_COMPANY_ID:
         for price in seed_data.PRICES:
             key = {k: price[k] for k in ("zone", "category", "size")}
             if not await company_db.prices.find_one(key):

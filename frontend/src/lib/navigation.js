@@ -13,7 +13,7 @@ export const NAV_GROUPS = [
     { to: "/customers", label: "Customers", icon: ContactRound, section: "customers" },
     { to: "/orders", label: "Orders", icon: ShoppingBag, section: "orders" },
     { to: "/invoices", label: "Invoice", icon: ReceiptText, section: "invoices" },
-    { to: "/client-payments", label: "Clients payment and balances", icon: HandCoins, section: "client-payments" },
+    { to: "/client-payments", label: "Clients balances and payments", icon: HandCoins, section: "client-payments" },
   ] },
   { id: "express", label: "Express Websites - Old Invoices and Payments", collapsible: true, items: [
     { to: "/express-invoices", label: "Express Website Invoices", icon: ReceiptText, section: "express-invoices" },
@@ -54,14 +54,42 @@ export const NAV_GROUPS = [
   ] },
 ];
 
+const IMRAAN_PLASTICS_SECTIONS = new Set([
+  "dashboard",
+  "invoices",
+  "stock",
+  "expenses",
+  "daily-report",
+  "orders",
+  "customers",
+  "grv",
+  "suppliers",
+  "attendance",
+  "client-payments",
+  "fleet",
+  "settings",
+]);
+
+export function isSectionAvailableForCompany(companyId, section) {
+  return companyId !== "imraan-plastics" || IMRAAN_PLASTICS_SECTIONS.has(section);
+}
+
+export function navigationGroupsForCompany(companyId) {
+  return NAV_GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter((item) =>
+      (!group.companyId || group.companyId === companyId)
+      && (!group.companyIds || group.companyIds.includes(companyId))
+      && (!item.companyId || item.companyId === companyId)
+      && isSectionAvailableForCompany(companyId, item.section)
+    ),
+  })).filter((group) => group.items.length);
+}
+
 export function navigationLinksForCompany(companyId) {
-  const links = NAV_GROUPS.flatMap((group) => {
-    if ((group.companyId && group.companyId !== companyId)
-      || (group.companyIds && !group.companyIds.includes(companyId))) return [];
-    return group.items
+  const links = navigationGroupsForCompany(companyId).flatMap((group) =>
+    group.items
       .filter((item) => !item.globalOwnerOnly)
-      .filter((item) => !item.companyId || item.companyId === companyId)
-      .map((item) => ({ path: item.to, label: item.label, section: item.section }));
-  });
+      .map((item) => ({ path: item.to, label: item.label, section: item.section })));
   return [...new Map(links.map((link) => [link.path, link])).values()];
 }

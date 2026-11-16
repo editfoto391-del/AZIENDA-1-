@@ -33,12 +33,14 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
     !(!it.category && !it.size && it.description?.trim().toLowerCase() === "opening balance"));
   const shipTo = inv.destination || customer.city || customer.address || "";
   const companyName = companyDisplayName(settings.company_name || COMPANY.name);
+  const isSuperIqFoam = /super/i.test(companyName) && /iq\s*[- ]?foam/i.test(companyName);
+  const companyAddress = settings.address || (isSuperIqFoam ? COMPANY.address.join(", ") : "");
+  const companyTelephone = settings.telephone || (isSuperIqFoam ? COMPANY.phones : "");
   const customerBalanceLabels = invoiceCustomerBalanceLabels(companyName);
   const previousInvoicesBalance = previousInvoices.reduce(
     (total, invoice) => total + (Number(invoice.outstanding) || 0),
     0,
   );
-  const isSuperIqFoam = /super/i.test(companyName) && /iq\s*[- ]?foam/i.test(companyName);
   const invoiceBrand = /wholesale/i.test(companyName) ? { blue: "IQ FOAM", black: "WHOLESALERS" } :
     /manufactur|manufactor/i.test(companyName) ? { blue: "IQ FOAM", black: "MANUFACTURING" } :
       /super/i.test(companyName) && /iq\s*[- ]?foam/i.test(companyName) ? { blue: "SUPER", black: "IQFOAM" } :
@@ -55,8 +57,8 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
       <div className="flex justify-between items-start mt-3">
         <div className="leading-5 text-slate-800">
           <p className="font-bold text-slate-950">{companyName}</p>
-          <p className="whitespace-pre-line">{settings.address || COMPANY.address.join(", ")}</p>
-          <p>Tel: {settings.telephone || COMPANY.phones}</p>
+          {companyAddress && <p className="whitespace-pre-line">{companyAddress}</p>}
+          {companyTelephone && <p>Tel: {companyTelephone}</p>}
           {settings.email && <p>Email: {settings.email}</p>}
           {settings.tax_number && <p>VAT No: {settings.tax_number}</p>}
         </div>

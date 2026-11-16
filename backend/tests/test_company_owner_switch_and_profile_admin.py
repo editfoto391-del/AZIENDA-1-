@@ -76,6 +76,160 @@ class Database:
         return self.collections[name]
 
 
+def test_imraan_plastics_profile_has_correct_invoice_details_and_separate_company_id():
+    profile = next(
+        profile for profile in server.COMPANY_PROFILES
+        if profile["id"] == "imraan-plastics"
+    )
+
+    assert profile["name"] == "IMRAAN PLASTICS"
+    assert profile["username"] == "IMRAAN PLASTICS"
+    assert server.COMPANY_INVOICE_DETAILS[profile["id"]] == {
+        "company_name": "IMRAAN PLASTICS",
+        "address": "20 Cross Road, Eastwood, Pietermaritzburg",
+        "telephone": "",
+        "invoice_prefix": "IMP",
+        "product_categories": [],
+        "departments": [],
+    }
+
+
+def test_imraan_plastics_profile_account_can_access_superiqfoam_read_only(monkeypatch):
+    profile_account = {
+        "id": "imraan-admin",
+        "profile_id": server.IMRAAN_PLASTICS_COMPANY_ID,
+        "role": "user",
+        "company_roles": {server.IMRAAN_PLASTICS_COMPANY_ID: "admin"},
+    }
+    assert server.allowed_company_ids(profile_account) == [
+        server.IMRAAN_PLASTICS_COMPANY_ID,
+        server.DEFAULT_COMPANY_ID,
+    ]
+    assert server.company_role(profile_account, server.IMRAAN_PLASTICS_COMPANY_ID) == "admin"
+    assert server.company_role(profile_account, server.DEFAULT_COMPANY_ID) == "user"
+    assert server.company_role(profile_account, server.MANUFACTURING_COMPANY_ID) is None
+
+    read_request = make_request("GET", "/api/stock")
+    server.enforce_superiqfoam_read_only(
+        read_request,
+        {**profile_account, "_active_company_id": server.DEFAULT_COMPANY_ID},
+    )
+    with pytest.raises(HTTPException) as error:
+        server.enforce_superiqfoam_read_only(
+            make_request("POST", "/api/customers"),
+            {**profile_account, "_active_company_id": server.DEFAULT_COMPANY_ID},
+        )
+
+    assert error.value.status_code == 403
+
+    companies = Collection([
+        {"id": server.DEFAULT_COMPANY_ID, "active": True},
+        {"id": server.IMRAAN_PLASTICS_COMPANY_ID, "active": True},
+        {"id": server.MANUFACTURING_COMPANY_ID, "active": True},
+    ])
+    monkeypatch.setattr(server, "base_db", Database(
+        companies=companies,
+        user_sessions=Collection(),
+    ))
+    monkeypatch.setattr(server, "make_token", lambda *args: "test-token")
+    monkeypatch.setattr(server, "public_user", lambda user: {"company_id": user["_active_company_id"]})
+
+    async def verify_company_switch():
+        result = await server.switch_company(
+            server.SwitchCompanyIn(company_id=server.DEFAULT_COMPANY_ID),
+            {**profile_account, "_session_id": "imraan-session"},
+        )
+        assert result == {
+            "token": "test-token",
+            "user": {"company_id": server.DEFAULT_COMPANY_ID},
+        }
+        with pytest.raises(HTTPException) as unavailable_company:
+            await server.switch_company(
+                server.SwitchCompanyIn(company_id=server.MANUFACTURING_COMPANY_ID),
+                {**profile_account, "_session_id": "imraan-session"},
+            )
+        assert unavailable_company.value.status_code == 403
+
+    asyncio.run(verify_company_switch())
+
+
+def test_global_owner_can_switch_to_and_modify_imraan_plastics(monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAIL", "global-owner@example.com")
+    global_owner = {
+        "id": "global-owner",
+        "email": "global-owner@example.com",
+        "role": "owner",
+        "profile_id": server.IMRAAN_PLASTICS_COMPANY_ID,
+        "company_roles": {},
+        "_session_id": "global-owner-session",
+    }
+    assert server.company_role(global_owner, server.IMRAAN_PLASTICS_COMPANY_ID) == "owner"
+    assert server.allowed_company_ids(global_owner) == [
+        profile["id"] for profile in server.COMPANY_PROFILES
+    ]
+
+    monkeypatch.setattr(server, "base_db", Database(
+        companies=Collection([
+            {"id": server.IMRAAN_PLASTICS_COMPANY_ID, "active": True},
+        ]),
+        user_sessions=Collection(),
+    ))
+    monkeypatch.setattr(server, "make_token", lambda *args: "test-token")
+    monkeypatch.setattr(server, "public_user", lambda user: {"company_id": user["_active_company_id"]})
+
+    async def verify():
+        result = await server.switch_company(
+            server.SwitchCompanyIn(company_id=server.IMRAAN_PLASTICS_COMPANY_ID),
+            global_owner,
+        )
+        assert result == {
+            "token": "test-token",
+            "user": {"company_id": server.IMRAAN_PLASTICS_COMPANY_ID},
+        }
+
+    asyncio.run(verify())
+    server.enforce_superiqfoam_read_only(
+        make_request("POST", "/api/customers"),
+        {**global_owner, "_active_company_id": server.IMRAAN_PLASTICS_COMPANY_ID},
+    )
+
+
+def test_settings_are_owner_only_and_saved_for_the_active_company(monkeypatch):
+    settings = Collection([{"id": "singleton", "company_name": "IMRAAN PLASTICS"}])
+    monkeypatch.setattr(server, "db", Database(settings=settings))
+    audit_events = []
+
+    async def record_audit(*args, **kwargs):
+        audit_events.append((args, kwargs))
+
+    monkeypatch.setattr(server, "log_audit", record_audit)
+    monkeypatch.setenv("ADMIN_EMAIL", "global-owner@example.com")
+    global_owner = {
+        "id": "global-owner",
+        "email": "global-owner@example.com",
+        "role": "owner",
+        "_active_role": "user",
+    }
+
+    server.require_settings_owner(global_owner)
+    with pytest.raises(HTTPException) as error:
+        server.require_settings_owner({"role": "user", "_active_role": "admin"})
+    assert error.value.status_code == 403
+
+    token = server.active_company_id.set(server.IMRAAN_PLASTICS_COMPANY_ID)
+    try:
+        result = asyncio.run(server.update_settings(
+            {"company_name": "IMRAAN PLASTICS LIMITED"},
+            {**global_owner, "_active_role": "owner"},
+        ))
+    finally:
+        server.active_company_id.reset(token)
+
+    assert result["company_name"] == "IMRAAN PLASTICS LIMITED"
+    assert settings.documents[0]["company_name"] == "IMRAAN PLASTICS LIMITED"
+    assert audit_events
+
+
 def make_request(method, path):
     return Request({
         "type": "http",

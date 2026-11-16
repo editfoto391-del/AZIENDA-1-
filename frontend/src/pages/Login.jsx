@@ -1,15 +1,16 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
-import { Building2, Factory, Store, Layers, ArrowLeft, LockKeyhole } from "lucide-react";
+import { Building2, Factory, Store, Package, Layers, ArrowLeft, LockKeyhole } from "lucide-react";
 import { Navigate, useLocation, useParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { companyProfileName, dedicatedCompanyDomain } from "@/lib/company";
 
-const PROFILE_ICONS = [Building2, Factory, Store];
+const PROFILE_ICONS = [Building2, Factory, Store, Package];
 const PROFILE_TONES = [
   "bg-emerald-100 text-emerald-900 border-emerald-200",
   "bg-lime-100 text-lime-950 border-lime-200",
   "bg-amber-100 text-amber-950 border-amber-200",
+  "bg-sky-100 text-sky-950 border-sky-200",
 ];
 
 export default function Login() {
@@ -94,7 +95,7 @@ export default function Login() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-[hsl(var(--navy))] px-4 py-8">
-      <div className="w-full max-w-3xl profile-screen-enter">
+      <div className="w-full max-w-5xl profile-screen-enter">
         <div className="flex items-center gap-3 justify-center mb-4">
           <div className="h-12 w-12 rounded-lg border border-emerald-100/20 bg-[hsl(158_28%_15%)] flex items-center justify-center">
             <Layers className="text-emerald-100" size={24} />
@@ -118,7 +119,7 @@ export default function Login() {
           {err && <div className="mx-auto mt-4 max-w-md rounded-md border border-red-200/40 bg-red-950/30 px-3 py-2 text-sm text-red-100" data-testid="login-error">{err}</div>}
           {loadingProfiles ? <p className="mt-8 text-sm text-emerald-50/60">Loading company profiles...</p> : (
             <>
-              {profiles.length > 0 && <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3 sm:gap-6">
+              {profiles.length > 0 && <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 sm:gap-6 lg:grid-cols-4">
                 {profiles.map((profile, index) => {
                   const Icon = PROFILE_ICONS[index] || Building2;
                   return <button key={profile.id} type="button" onClick={() => chooseProfile(profile)} data-testid={`company-profile-${profile.id}`}
@@ -128,7 +129,7 @@ export default function Login() {
                       <Icon size={36} strokeWidth={1.4} className="hidden sm:block" />
                     </span>
                     <span className="min-w-0">
-                      <span className="block text-sm font-semibold tracking-wide text-white sm:mt-1">{companyProfileName(profile.id)}</span>
+                      <span className="block whitespace-nowrap text-sm font-semibold tracking-wide text-white sm:mt-1">{companyProfileName(profile.id)}</span>
                       <span className="mt-1 block text-xs text-emerald-50/50 sm:hidden">Select workspace</span>
                     </span>
                   </button>;

@@ -11,7 +11,7 @@ import { api, apiError } from "@/lib/api";
 import { preloadPage } from "@/lib/pageLoaders";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { companyBrandName, companyProfileName, dedicatedCompanyDomain } from "@/lib/company";
-import { NAV_GROUPS } from "@/lib/navigation";
+import { isSectionAvailableForCompany, navigationGroupsForCompany } from "@/lib/navigation";
 
 function SidebarContent({ onNav, companyName, companyId, user, interfaceConfig }) {
   const reduceMotion = useReducedMotion();
@@ -24,11 +24,10 @@ function SidebarContent({ onNav, companyName, companyId, user, interfaceConfig }
   }[id] || `${id}-navigation`);
   const hiddenSections = new Set(interfaceConfig?.hidden_sections || []);
   const groupOrder = interfaceConfig?.group_order || [];
-  const navGroups = NAV_GROUPS.map((group) => ({
+  const navGroups = navigationGroupsForCompany(companyId).map((group) => ({
     ...group,
     items: group.items.filter((item) =>
-      (!item.companyId || item.companyId === companyId)
-      && (item.section !== "settings" || (!user?.is_worker && user?.role !== "admin"))
+      (item.section !== "settings" || (!user?.is_worker && user?.role !== "admin"))
       && (!user?.is_worker || !item.warehouseId || (user.warehouse_ids || []).includes(item.warehouseId))
       && (!item.globalOwnerOnly || (user?.is_primary_owner && user?.is_owner && !user?.is_worker))
       && (!user?.is_worker || user.allowed_sections?.includes(item.section))
@@ -53,6 +52,7 @@ function SidebarContent({ onNav, companyName, companyId, user, interfaceConfig }
     });
   const customItems = (interfaceConfig?.custom_sections || [])
     .filter((item) => !hiddenSections.has(`custom:${item.id}`))
+    .filter((item) => isSectionAvailableForCompany(companyId, `custom:${item.id}`))
     .filter((item) => !user?.is_worker || user.allowed_sections?.includes(item.access_section))
     .map((item) => ({
       to: item.path,
@@ -79,6 +79,15 @@ function SidebarContent({ onNav, companyName, companyId, user, interfaceConfig }
         {navGroups.map((group) => {
           const expanded = !!openGroups[group.id];
           const groupNavId = navigationId(group.id);
+          const headingColor = group.id === "sales" && companyId === "imraan-plastics"
+            ? "text-[#39ff14] drop-shadow-[0_0_6px_rgba(57,255,20,0.65)]"
+            : group.id === "finance-team" && companyId === "imraan-plastics"
+              ? "text-[#ffff00] drop-shadow-[0_0_6px_rgba(255,255,0,0.65)]"
+              : group.id === "purchasing" && companyId === "imraan-plastics"
+                ? "text-[#ff4d4d] drop-shadow-[0_0_6px_rgba(255,77,77,0.75)]"
+              : group.collapsible
+                ? "text-[#ffff00] drop-shadow-[0_0_6px_rgba(255,255,0,0.65)]"
+                : "text-emerald-100/45";
           const items = group.items.map((n) => (
             user?.is_worker
               && !user.allowed_sections?.includes(n.accessSection || n.section)
@@ -106,13 +115,13 @@ function SidebarContent({ onNav, companyName, companyId, user, interfaceConfig }
                 aria-expanded={expanded}
                 aria-controls={groupNavId}
                 data-testid={`${groupNavId}-toggle`}
-                className="flex w-full items-center justify-between px-3 pt-3 pb-1 text-left text-[9px] font-bold uppercase tracking-[0.14em] text-yellow-300 hover:text-yellow-200"
+                className={`flex w-full items-center justify-between px-3 pt-3 pb-1 text-left text-[9px] font-bold uppercase tracking-[0.14em] ${headingColor} hover:brightness-110`}
               >
                 <span>{group.label}</span>
                 <ChevronDown size={13} className={`shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`} />
               </button>
             ) : (
-              <p className="px-3 pt-3 pb-1 text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-100/45">{group.label}</p>
+              <p className={`px-3 pt-3 pb-1 text-[10px] font-bold uppercase tracking-[0.14em] ${headingColor}`}>{group.label}</p>
             )}
             {group.collapsible ? (
               <AnimatePresence initial={false}>

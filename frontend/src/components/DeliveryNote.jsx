@@ -27,14 +27,17 @@ export const DeliveryNote = forwardRef(function DeliveryNote({ order, signature 
   const total = lines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
   const prod = (c) => (ur ? UR_PRODUCTS[c] || c : c);
   const companyName = companyDisplayName(settings.company_name || COMPANY.name);
+  const isSuperIqFoam = /super/i.test(companyName) && /iq\s*[- ]?foam/i.test(companyName);
+  const companyAddress = settings.address || (isSuperIqFoam ? COMPANY.address.join(", ") : "");
+  const companyTelephone = settings.telephone || (isSuperIqFoam ? COMPANY.phones : "");
   const cell = "border border-slate-800 px-3 py-3";
   return (
     <div ref={ref} dir={ur ? "rtl" : "ltr"} lang={lang} className="bg-white text-slate-950 mx-auto p-8 text-[16px] leading-7" style={{ width: 794, minHeight: 1123, boxSizing: "border-box", fontFamily: ur ? "'Noto Nastaliq Urdu','Jameel Noori Nastaleeq',Tahoma,sans-serif" : "Arial, sans-serif" }} data-testid="delivery-note">
       <div className="flex justify-between items-start">
         <div>
           <p className="text-[30px] font-extrabold leading-tight" dir="ltr">{companyName}</p>
-          <p className="whitespace-pre-line text-[16px] leading-7" dir="ltr">{settings.address || COMPANY.address.join(", ")}</p>
-          <p className="text-[16px] leading-7" dir="ltr">{settings.telephone || COMPANY.phones}</p>
+          {companyAddress && <p className="whitespace-pre-line text-[16px] leading-7" dir="ltr">{companyAddress}</p>}
+          {companyTelephone && <p className="text-[16px] leading-7" dir="ltr">{companyTelephone}</p>}
         </div>
         <div className={ur ? "text-left" : "text-right"}>
           <p className="text-[30px] font-bold leading-tight mb-3">{t.title}</p>

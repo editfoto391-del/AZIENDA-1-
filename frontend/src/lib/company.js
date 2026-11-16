@@ -15,16 +15,19 @@ export const defaultInvoicePaymentTerms = (companyId) =>
 export const companyBrandName = (companyId) => ({
   "iqfoam-whole-sallers": "IQ FOAM WHOLESALERS",
   "iqfoam-manufactoring": "IQ FOAM MANUFACTURING",
+  "imraan-plastics": "IMRAAN PLASTICS",
 }[companyId] || "SUPER IQ-FOAM");
 
 export const companyProfileName = (companyId) => ({
   "iqfoam-whole-sallers": "IQFOAM WHOLESALERS",
   "iqfoam-manufactoring": "IQFOAM MANUFACTURING",
+  "imraan-plastics": "IMRAAN PLASTICS",
 }[companyId] || "SUPERIQFOAM");
 
 export const companyDailyReportName = (companyId) => ({
   "iqfoam-whole-sallers": "IQFOAM WHOLESALERS",
   "iqfoam-manufactoring": "IQFOAM MANUFACTURING",
+  "imraan-plastics": "IMRAAN PLASTICS",
 }[companyId] || "SUPER IQ-FOAM");
 
 export const companyDisplayName = (name) => {
