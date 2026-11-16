@@ -72,7 +72,7 @@ export default function Stock() {
   const stockCategories = uniqueStockCategories(list || [], STOCK_CATEGORY);
   const getCanonicalStock = () => canonicalStock;
   const filteredList = canonicalStock.filter((item) =>
-    (!category || normalizedStockLabel(canonicalStockProduct(item.product)) === normalizedStockLabel(canonicalStockProduct(category)))
+    (!category || normalizeStockLabel(canonicalStockProduct(item.product)) === normalizeStockLabel(canonicalStockProduct(category)))
     && (!stockSearch.trim() || `${item.product} ${item.size}`.toLowerCase().includes(stockSearch.trim().toLowerCase()))
   );
   const getRangeReportQuantity = (group, size) => {
@@ -107,7 +107,7 @@ export default function Stock() {
   const getTotalsByCategory = () => {
     const totals = {};
     getCanonicalStock().forEach((s) => {
-      const key = normalizedStockLabel(canonicalStockProduct(s.product));
+      const key = normalizeStockLabel(canonicalStockProduct(s.product));
       totals[key] = (totals[key] || 0) + Number(s.current || 0);
     });
     return totals;
@@ -142,8 +142,8 @@ export default function Stock() {
     if (stock.product === "Candy") priceCategory = "Ribbon Black";
     return prices.find((item) =>
       item.zone === (unifiedPriceList ? 1 : zone)
-      && normalizedStockLabel(item.category) === normalizedStockLabel(priceCategory)
-      && normalizedStockLabel(item.size) === normalizedStockLabel(stock.size)
+      && normalizeStockLabel(item.category) === normalizeStockLabel(priceCategory)
+      && normalizeStockLabel(item.size) === normalizeStockLabel(stock.size)
       && item.active
     );
   };
@@ -343,7 +343,7 @@ export default function Stock() {
               ) : (
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
                   {stockCategories.map((cat) => {
-                    const total = getTotalsByCategory()[normalizedStockLabel(canonicalStockProduct(cat))] || 0;
+                    const total = getTotalsByCategory()[normalizeStockLabel(canonicalStockProduct(cat))] || 0;
                     return total > 0 ? (
                       <div key={cat} className="bg-white rounded-md p-3 border border-slate-200">
                         <p className="text-xs text-slate-500 font-semibold">{cat}</p>
@@ -357,11 +357,11 @@ export default function Stock() {
                   </div>
                   <div className="bg-white rounded-md p-3 border border-slate-200">
                     <p className="text-xs text-slate-500 font-semibold">Ribbon Total</p>
-                    <p className="text-lg font-mono font-bold text-slate-800">{(getTotalsByCategory()[normalizedStockLabel(canonicalStockProduct("Ribbon Pink"))] || 0) + (getTotalsByCategory()[normalizedStockLabel(canonicalStockProduct("Ribbon Black"))] || 0)}</p>
+                    <p className="text-lg font-mono font-bold text-slate-800">{(getTotalsByCategory()[normalizeStockLabel(canonicalStockProduct("Ribbon Pink"))] || 0) + (getTotalsByCategory()[normalizeStockLabel(canonicalStockProduct("Ribbon Black"))] || 0)}</p>
                   </div>
                   <div className="bg-white rounded-md p-3 border border-slate-200">
                     <p className="text-xs text-slate-500 font-semibold">Strong Boy Total</p>
-                    <p className="text-lg font-mono font-bold text-slate-800">{getTotalsByCategory()[normalizedStockLabel(canonicalStockProduct("Strong Boy"))] || 0}</p>
+                    <p className="text-lg font-mono font-bold text-slate-800">{getTotalsByCategory()[normalizeStockLabel(canonicalStockProduct("Strong Boy"))] || 0}</p>
                   </div>
                   {canViewStockCosts && (() => {
                     const value = getStockValueTotal(valueZone);
