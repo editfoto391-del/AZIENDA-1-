@@ -2,6 +2,8 @@
 
 GRV is the official receiving workflow for new supplier deliveries. Create a standard draft linked to an open purchase order (or a standalone GRV), record actual/accepted/rejected/damaged quantities, then confirm it after inspection. Quick GRV is a standalone scanner workflow: choose a supplier and receiver, scan product labels to match stock sizes, then enter quantities and optional unit costs before saving and confirming.
 
+GRV price fields accept either a comma or a point as the decimal separator. A custom VAT percentage can be entered on each GRV; the draft preview and voucher PDF show the accepted-goods subtotal, VAT amount, and total including VAT. VAT is stored on the GRV and does not change stock unit costs.
+
 On confirmation, accepted quantities are grouped by stock item and posted once to the existing stock movement ledger with the GRV number, received date, warehouse, and weighted unit cost. The purchase order's received quantities are updated using the actual delivered quantities, including rejected goods. Duplicate GRV confirmations are guarded by unique movement keys and a receipt marker on the purchase order.
 
 For selling-product GRVs, each line can record its purchase unit cost and intended sale price. On SUPERIQFOAM, sale prices are entered separately for Zones 1 and 2; other companies use one sale price. Confirming the GRV creates or updates the matching active, confirmed price-list entry for accepted products. Existing price-list access restrictions apply; a worker must have a company owner confirm a GRV that changes the price list. Reversing a GRV reverses stock but does not roll back its price-list changes.

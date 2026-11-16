@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { fmtMoney, fmtDate, fmtDateTime, STATUS_META } from "@/lib/format";
+import { fmtMoney, fmtDate, fmtDateTime, STATUS_META, documentFilename } from "@/lib/format";
 import { Card, Btn, Input, Badge, PageHeader, Empty, Modal } from "@/components/common";
 import { Eye, FileText, Search, Plus, Pencil, Trash2, Download, RotateCcw, Archive, MessageCircle, Link2Off } from "lucide-react";
 import { toast } from "sonner";
@@ -8,6 +8,8 @@ import { api, apiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { usesUnifiedPriceList } from "@/lib/company";
 import { resolveWhatsAppPhone } from "@/lib/whatsappPhone.mjs";
+import { InvoiceDocument } from "@/components/InvoiceDocument";
+import { elementToPdf } from "@/lib/pdf";
 
 export default function InvoiceList({ express = false }) {
   const { user } = useAuth();
@@ -37,7 +39,12 @@ export default function InvoiceList({ express = false }) {
   const [permanentDeleteRequest, setPermanentDeleteRequest] = useState(null);
   const [viewCustomer, setViewCustomer] = useState(null);
   const [whatsappDraft, setWhatsappDraft] = useState(null);
+  const [pdfDownload, setPdfDownload] = useState(null);
+  const [pdfBusyId, setPdfBusyId] = useState("");
   const detailRequest = useRef(0);
+  const pdfDocumentRef = useRef(null);
+  const pdfBusyRef = useRef(false);
+  const pdfDownloadStartedRef = useRef("");
   const listPath = express ? "/express-invoices" : "/invoices";
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -112,6 +119,56 @@ export default function InvoiceList({ express = false }) {
       if (detailRequest.current === requestId) setViewLoading(false);
     }
   };
+
+  const downloadInvoicePdf = async (event, invoiceRow) => {
+    event.stopPropagation();
+    if (pdfBusyRef.current) return;
+    pdfBusyRef.current = true;
+    pdfDownloadStartedRef.current = "";
+    setPdfBusyId(invoiceRow.id);
+    try {
+      const [invoice, settings] = await Promise.all([
+        api.getUncached(`/invoices/${invoiceRow.id}`),
+        api.get("/settings"),
+      ]);
+      let customer = {
+        phone: invoice.customer_phone || "",
+        city: invoice.customer_city || "",
+        address: invoice.customer_address || "",
+      };
+      if (invoice.customer_id && !invoice.customer_deleted) {
+        customer = { ...customer, ...await api.getUncached(`/customers/${invoice.customer_id}`) };
+      }
+      setPdfDownload({ invoice, settings, customer });
+    } catch (error) {
+      pdfBusyRef.current = false;
+      setPdfBusyId("");
+      toast.error(`Could not prepare invoice PDF: ${apiError(error)}`);
+    }
+  };
+
+  useEffect(() => {
+    if (!pdfDownload || !pdfDocumentRef.current) return;
+    if (pdfDownloadStartedRef.current === pdfDownload.invoice.id) return;
+    pdfDownloadStartedRef.current = pdfDownload.invoice.id;
+    const download = async () => {
+      try {
+        const { invoice } = pdfDownload;
+        await elementToPdf(
+          pdfDocumentRef.current,
+          `${documentFilename("Invoice", invoice.customer_name || "Customer", invoice.number || "Draft")}.pdf`,
+        );
+        setPdfDownload(null);
+      } catch (error) {
+        toast.error(`Could not generate the invoice PDF: ${error.message}`);
+        setPdfDownload(null);
+      } finally {
+        pdfBusyRef.current = false;
+        setPdfBusyId("");
+      }
+    };
+    download();
+  }, [pdfDownload]);
 
   const toggle = (id) => setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
   const removeMany = async (ids) => {
@@ -311,7 +368,7 @@ export default function InvoiceList({ express = false }) {
                       </>
                     ) : i.status !== "void" && (
                       <>
-                      <button onClick={(e) => { e.stopPropagation(); nav(`${listPath}/${i.id}?pdf=1`); }} data-testid={`pdf-invoice-row-${i.id}`} title="Download PDF" className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-1.5 text-slate-600 hover:border-primary hover:text-primary transition-colors">
+                      <button onClick={(e) => downloadInvoicePdf(e, i)} disabled={!!pdfBusyId} data-testid={`pdf-invoice-row-${i.id}`} title="Download PDF" aria-label={`Download invoice ${i.number || "draft"} PDF`} className="inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-1.5 text-slate-600 hover:border-primary hover:text-primary transition-colors disabled:opacity-50">
                         <Download size={12} />
                       </button>
                       {i.status !== "draft" && i.status !== "void" && <button
@@ -486,6 +543,24 @@ export default function InvoiceList({ express = false }) {
           </div>
         </div>
       </Modal>
+      {pdfDownload && <div className="invoice-pdf-renderer" aria-hidden="true">
+        <InvoiceDocument
+          ref={pdfDocumentRef}
+          inv={pdfDownload.invoice}
+          totals={{
+            subtotal: Number(pdfDownload.invoice.subtotal) || 0,
+            tax: Number(pdfDownload.invoice.tax_amount) || 0,
+            total: Number(pdfDownload.invoice.total) || 0,
+            outstanding: Number(pdfDownload.invoice.outstanding) || 0,
+          }}
+          customer={pdfDownload.customer}
+          settings={pdfDownload.settings}
+          previousInvoices={pdfDownload.invoice.previous_invoices_pending || []}
+          customerBalanceBeforeInvoice={Number(pdfDownload.invoice.customer_balance_before_invoice) || 0}
+          showCustomerBalance={pdfDownload.invoice.include_previous_balance !== false
+            && pdfDownload.invoice.customer_balance_before_invoice != null}
+        />
+      </div>}
     </div>
   );
 }

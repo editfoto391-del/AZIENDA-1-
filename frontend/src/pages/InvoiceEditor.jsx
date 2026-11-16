@@ -123,6 +123,7 @@ export default function InvoiceEditor({ express = false }) {
   const [pendingNegativeStock, setPendingNegativeStock] = useState(null);
   const [pendingUnmatchedStock, setPendingUnmatchedStock] = useState(null);
   const [downloadIssuedDraft, setDownloadIssuedDraft] = useState(false);
+  const [pdfAutoDownload, setPdfAutoDownload] = useState(false);
   const docRef = useRef(null);
   const zoneLookupRef = useRef(0);
   const saveLockRef = useRef(false);
@@ -774,7 +775,13 @@ export default function InvoiceEditor({ express = false }) {
       const submitted = !id && status !== "draft";
       toast.success(submitted ? "INVOICE SUBMITTED" : status === "draft" ? "Saved as draft" : "Invoice saved");
       setPendingSave(null);
-      nav(submitted && !downloadAfterSave ? invoicesPath : `${invoicesPath}/${res.id}${downloadAfterSave ? "?pdf=1" : ""}`);
+      if (downloadAfterSave && submitted) {
+        setInv(res);
+        setPdfAutoDownload(true);
+        setDownloadIssuedDraft(true);
+      } else {
+        nav(submitted ? invoicesPath : `${invoicesPath}/${res.id}`);
+      }
       if (id) { setInv(res); setEditAuthorization(""); }
     } catch (e) {
       const detail = e.response?.data?.detail;
@@ -855,6 +862,7 @@ export default function InvoiceEditor({ express = false }) {
       }
       setInv(res);
       if (action === "download") {
+        setPdfAutoDownload(true);
         setDownloadIssuedDraft(true);
         toast.success("Invoice issued");
       } else {
@@ -1002,19 +1010,20 @@ export default function InvoiceEditor({ express = false }) {
     }
   };
 
-  const runPdfDownload = async (element, filename, successMessage, errorLabel, returnToInvoices = false) => {
+  const runPdfDownload = async (element, filename, successMessage, errorLabel, returnToInvoices = false, automatic = false) => {
     if (pdfBusyRef.current) return;
     pdfBusyRef.current = true;
     setPdfBusy(true);
     try {
       await elementToPdf(element, filename);
-      toast.success(successMessage);
+      if (successMessage) toast.success(successMessage);
       if (returnToInvoices) nav(invoicesPath);
     } catch (error) {
       toast.error(`${errorLabel}: ${error.message}`);
     } finally {
       pdfBusyRef.current = false;
       setPdfBusy(false);
+      if (automatic) setPdfAutoDownload(false);
     }
   };
   const downloadPDF = async () => {
@@ -1027,11 +1036,13 @@ export default function InvoiceEditor({ express = false }) {
       setPendingStockSubmit({ action: "download" });
       return;
     }
+    setPdfAutoDownload(true);
     return runPdfDownload(
       docRef.current,
       `${documentFilename("Invoice", inv.customer_name || "Customer", inv.number || "Draft")}.pdf`,
-      "Invoice PDF downloaded",
+      "",
       "Could not generate the invoice PDF",
+      false,
       true,
     );
   };
@@ -1081,7 +1092,15 @@ export default function InvoiceEditor({ express = false }) {
   useEffect(() => {
     if (id && inv.id === id && customers.length && sp.get("pdf") === "1") {
       setSp({}, { replace: true });
-      setTimeout(downloadPDF, 500);
+      setPdfAutoDownload(true);
+      runPdfDownload(
+        docRef.current,
+        `${documentFilename("Invoice", inv.customer_name || "Customer", inv.number || "Draft")}.pdf`,
+        "",
+        "Could not generate the invoice PDF",
+        false,
+        true,
+      );
     }
     if (id && inv.id === id && customers.length && sp.get("delivery-note") === "1") {
       setSp({}, { replace: true });
@@ -1091,24 +1110,23 @@ export default function InvoiceEditor({ express = false }) {
   }, [id, inv.id, customers.length, sp]);
   useEffect(() => {
     if (!downloadIssuedDraft || inv.status !== "issued") return;
-    const timeout = window.setTimeout(() => {
-      setDownloadIssuedDraft(false);
-      runPdfDownload(
-        docRef.current,
-        `${documentFilename("Invoice", inv.customer_name || "Customer", inv.number || "Draft")}.pdf`,
-        "Invoice PDF downloaded",
-        "Could not generate the invoice PDF",
-        true,
-      );
-    }, 0);
-    return () => window.clearTimeout(timeout);
+    setDownloadIssuedDraft(false);
+    runPdfDownload(
+      docRef.current,
+      `${documentFilename("Invoice", inv.customer_name || "Customer", inv.number || "Draft")}.pdf`,
+      "",
+      "Could not generate the invoice PDF",
+      false,
+      true,
+    );
   }, [downloadIssuedDraft, inv]);
   const printInvoice = () => { if (!printElement(docRef.current, inv.number || "Invoice")) toast.error("Allow pop-ups to print"); };
 
   const st = STATUS_META[inv.status] || STATUS_META.draft;
 
   return (
-    <div>
+    <div className={pdfAutoDownload ? "invoice-auto-download" : ""} aria-busy={pdfAutoDownload}>
+      {pdfAutoDownload && <p className="invoice-auto-download-status" role="status" data-testid="invoice-auto-download-status">Preparing invoice download…</p>}
       <div className="flex items-center justify-between mb-5 no-print">
         <button onClick={() => nav(invoicesPath)} className="flex items-center gap-2 text-sm font-semibold text-slate-500 hover:text-slate-800">
           <ArrowLeft size={16} /> Back to Invoices

@@ -116,6 +116,33 @@
   background: #eceef1;
 }
 
+.invoice-auto-download > :not(.invoice-auto-download-status) {
+  visibility: hidden;
+}
+
+.invoice-auto-download-status {
+  position: fixed;
+  top: 0.75rem;
+  left: 50%;
+  z-index: 100;
+  transform: translateX(-50%);
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.5rem;
+  background: hsl(var(--card));
+  padding: 0.5rem 0.875rem;
+  color: hsl(var(--foreground));
+  font-size: 0.875rem;
+  box-shadow: 0 4px 14px rgb(15 23 42 / 0.1);
+}
+
+.invoice-pdf-renderer {
+  position: fixed;
+  top: 0;
+  left: -10000px;
+  width: 794px;
+  pointer-events: none;
+}
+
 .liquid-glass-surface {
   background: rgba(255, 255, 255, 0.97);
   border-color: rgba(226, 232, 240, 0.9);
@@ -730,11 +757,11 @@ html.dark .erp-sidebar-decoration {
 }
 
 .dashboard-kpi-sparkline {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 52%;
-  height: 66%;
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 2rem;
+  margin-top: 0.5rem;
   overflow: visible;
   color: #8fa995;
   opacity: 0.24;

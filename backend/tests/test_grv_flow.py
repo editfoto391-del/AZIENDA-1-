@@ -227,11 +227,12 @@ async def _next_grv_reference(*args, **kwargs):
     return "GRV-2026-0001"
 
 
-def _grv(actual, *, sale_price_zone_1=None, sale_price_zone_2=None):
+def _grv(actual, *, sale_price_zone_1=None, sale_price_zone_2=None, vat_rate=0):
     return server.GRVIn(
         purchase_order_id="po-1",
         received_date="2026-10-29",
         received_by="Receiver",
+        vat_rate=vat_rate,
         items=[server.GRVLineIn(
             stock_id="stock-1",
             purchase_order_item_index=0,
@@ -243,13 +244,20 @@ def _grv(actual, *, sale_price_zone_1=None, sale_price_zone_2=None):
     )
 
 
+@pytest.mark.parametrize("vat_rate", [-0.01, 100.01])
+def test_grv_vat_rate_must_be_between_zero_and_one_hundred(vat_rate):
+    with pytest.raises(ValueError):
+        server.GRVIn(vat_rate=vat_rate)
+
+
 def test_partial_grvs_update_po_and_stock_once_without_creating_buyings(monkeypatch):
     fake_db = FakeDatabase()
     _install_fake_grv_dependencies(monkeypatch, fake_db)
     user = {"email": "receiver@example.test", "name": "Receiver", "_active_company_id": "test-company"}
 
     async def scenario():
-        first = await server.create_grv(_grv(40), user)
+        first = await server.create_grv(_grv(40, vat_rate=15), user)
+        assert first["vat_rate"] == 15
         first = await server.confirm_grv(first["id"], user)
         assert first["status"] == "partially_received"
         assert fake_db.purchase_orders.documents[0]["items"][0]["received_quantity"] == 40

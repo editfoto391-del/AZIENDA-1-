@@ -9,7 +9,7 @@ import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
 import { fmtDate, fmtMoney, today } from "@/lib/format";
 import { companyProfileName } from "@/lib/company";
-import { updateGrvReceivedQuantity } from "@/lib/grv.mjs";
+import { grvTotals, parseGrvDecimal, updateGrvReceivedQuantity } from "@/lib/grv.mjs";
 import { Badge, Btn, Card, Empty, Input, Modal, PageHeader, Select, Textarea } from "@/components/common";
 import BarcodeScanner from "@/components/BarcodeScanner";
 
@@ -53,10 +53,12 @@ const blankLine = () => ({
 const blankGRV = () => ({
   supplier_id: "", supplier_name: "", purchase_order_id: "",
   delivery_note_number: "", received_date: today(), received_by: "",
-  warehouse: "", notes: "", items: [blankLine()],
+  warehouse: "", notes: "", items: [blankLine()], vat_rate: 0,
   purpose: "selling", is_chemical: false,
 });
-const lineValue = (line) => (Number(line.accepted_quantity) || 0) * (Number(line.unit_cost) || 0);
+const lineValue = (line) => (Number(line.accepted_quantity) || 0)
+  * (Number.isFinite(parseGrvDecimal(line.unit_cost)) ? parseGrvDecimal(line.unit_cost) : 0);
+const savedGrvTotals = (grv) => grvTotals(grv.items || [], grv.vat_rate || 0);
 const stockItemLabel = (item) => [item.size, item.product].filter(Boolean).join(" ");
 const grvDeleteError = (message) => /product item delete from company inventory/i.test(message)
   ? "The GRV could not be deleted because Company Inventory could not be updated. Please contact an administrator."
@@ -200,8 +202,13 @@ async function downloadGRVPdf(grv, companyName, settings = {}) {
   y += 8;
   pdf.setFont("helvetica", "bold");
   pdf.setFontSize(10);
-  const total = (grv.items || []).reduce((sum, line) => sum + Number(line.total_value ?? lineValue(line)), 0);
-  addText(`Accepted goods value: ${fmtMoney(total)}`, right, y, { align: "right" });
+  const totals = savedGrvTotals(grv);
+  addText(`Accepted goods subtotal: ${fmtMoney(totals.subtotal)}`, right, y, { align: "right" });
+  y += 6;
+  addText(`VAT (${Number(grv.vat_rate || 0)}%): ${fmtMoney(totals.vatAmount)}`, right, y, { align: "right" });
+  y += 6;
+  pdf.setFont("helvetica", "bold");
+  addText(`Total including VAT: ${fmtMoney(totals.total)}`, right, y, { align: "right" });
   y += 9;
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(9);
@@ -313,8 +320,7 @@ export default function GRV() {
   }, [companyId, stockLoadKey]);
 
   const totalValue = useMemo(
-    () => (records || []).reduce((sum, grv) =>
-      sum + (grv.items || []).reduce((lineSum, line) => lineSum + Number(line.total_value || 0), 0), 0),
+    () => (records || []).reduce((sum, grv) => sum + savedGrvTotals(grv).total, 0),
     [records],
   );
   const selectableGRVs = useMemo(
@@ -538,8 +544,20 @@ export default function GRV() {
     event.preventDefault();
     if (saving || !draft) return;
     if (!draft.supplier_id && !draft.supplier_name.trim()) return toast.error("Choose a supplier");
+    const vatRate = parseGrvDecimal(draft.vat_rate);
+    if (!Number.isFinite(vatRate) || vatRate < 0 || vatRate > 100) {
+      return toast.error("VAT percentage must be between 0 and 100");
+    }
+    const decimalFields = draft.items.flatMap((line) => [
+      line.unit_cost,
+      line.sale_price_zone_1,
+      line.sale_price_zone_2,
+    ]);
+    if (decimalFields.some((value) => value !== "" && value != null && !Number.isFinite(parseGrvDecimal(value)))) {
+      return toast.error("Enter valid prices using a comma or a point for decimals");
+    }
     const raw = draft.purpose === "raw_material";
-    if (draft.items.some((line) => !Number(line.unit_cost)) && !window.confirm("Unit cost is missing on some lines. It is optional but recommended for accurate stock value. Save without it?")) return;
+    if (draft.items.some((line) => !parseGrvDecimal(line.unit_cost)) && !window.confirm("Unit cost is missing on some lines. It is optional but recommended for accurate stock value. Save without it?")) return;
     if (!draft.items.length) return toast.error("Add at least one product line");
     if (!raw && draft.items.some((line) => line.new_product
       ? !(line.product || "").trim() || !(line.size || "").trim()
@@ -551,17 +569,18 @@ export default function GRV() {
     try {
       const payload = {
         ...draft,
+        vat_rate: vatRate,
         items: draft.items.map((line) => ({
           ...line,
           actual_received_quantity: Number(line.actual_received_quantity || 0),
           accepted_quantity: Number(line.accepted_quantity || 0),
           rejected_quantity: Number(line.rejected_quantity || 0),
           damaged_quantity: Number(line.damaged_quantity || 0),
-          unit_cost: Number(line.unit_cost || 0),
+          unit_cost: parseGrvDecimal(line.unit_cost || 0),
           sale_price_zone_1: line.sale_price_zone_1 === "" || line.sale_price_zone_1 == null
-            ? null : Number(line.sale_price_zone_1),
+            ? null : parseGrvDecimal(line.sale_price_zone_1),
           sale_price_zone_2: line.sale_price_zone_2 === "" || line.sale_price_zone_2 == null
-            ? null : Number(line.sale_price_zone_2),
+            ? null : parseGrvDecimal(line.sale_price_zone_2),
         })),
       };
       if (draft.id) {
@@ -707,7 +726,7 @@ export default function GRV() {
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
           <div>
             <h2 className="font-semibold text-slate-800">GRV Register</h2>
-            <p className="text-xs text-slate-500">Accepted stock value in this view: {fmtMoney(totalValue)}</p>
+            <p className="text-xs text-slate-500">Accepted GRV value including VAT in this view: {fmtMoney(totalValue)}</p>
           </div>
           <div className="flex items-center gap-3">
             {canDeleteGRVs && selectedGRVIds.length > 0 && <Btn
@@ -749,11 +768,11 @@ export default function GRV() {
                 </th>}
                 <th className="px-4 py-3">GRV number</th><th className="px-4 py-3">Received date</th>
                 <th className="px-4 py-3">Supplier</th><th className="px-4 py-3">PO / delivery note</th>
-                <th className="px-4 py-3 text-right">Lines</th><th className="px-4 py-3 text-right">Accepted value</th>
+                <th className="px-4 py-3 text-right">Lines</th><th className="px-4 py-3 text-right">Accepted value incl. VAT</th>
                 <th className="px-4 py-3">Status</th><th className="sticky right-0 z-20 min-w-[240px] bg-slate-50 px-4 py-3 text-right">Actions</th>
               </tr></thead>
               <tbody>{records.map((grv) => {
-                const value = (grv.items || []).reduce((sum, line) => sum + Number(line.total_value || 0), 0);
+                const value = savedGrvTotals(grv).total;
                 const busy = workingId === grv.id;
                 const confirmed = ["completed", "partially_received", "discrepancy", "reversing"].includes(grv.status);
                 return (
@@ -831,6 +850,9 @@ export default function GRV() {
             <Input label="Delivery note number" value={draft.delivery_note_number} onChange={(event) => setDraft({ ...draft, delivery_note_number: event.target.value })} data-testid="grv-delivery-note" />
             <Input label={scanReceivingMode ? "Scanned by *" : "Received by"} value={draft.received_by} onChange={(event) => setDraft({ ...draft, received_by: event.target.value })} required={scanReceivingMode} data-testid="grv-received-by" />
             <Input label="Warehouse" value={draft.warehouse} onChange={(event) => setDraft({ ...draft, warehouse: event.target.value })} data-testid="grv-warehouse" />
+            <Input label="VAT (%)" type="text" inputMode="decimal" value={draft.vat_rate ?? 0}
+              onChange={(event) => setDraft({ ...draft, vat_rate: event.target.value })}
+              data-testid="grv-vat-rate" />
           </div>
 
           {scanReceivingMode && <div className="max-w-xl">
@@ -936,7 +958,7 @@ export default function GRV() {
                         data-testid={`grv-quick-quantity-${index}`} />
                     </td>
                     <td className="p-2">
-                      <input type="number" min="0" step="0.01" value={line.unit_cost}
+                      <input type="text" inputMode="decimal" value={line.unit_cost ?? ""}
                         onChange={(event) => updateLine(index, "unit_cost", event.target.value)}
                         aria-label={`Purchase price line ${index + 1}`}
                         className="w-28 rounded border border-input px-2 py-1.5 text-right font-mono"
@@ -944,7 +966,7 @@ export default function GRV() {
                     </td>
                     {draft.purpose !== "raw_material" && salePriceFields.map(([key, label]) => (
                       <td key={key} className="p-2">
-                        <input type="number" min="0" step="0.01" value={line[key] ?? ""}
+                        <input type="text" inputMode="decimal" value={line[key] ?? ""}
                           onChange={(event) => updateLine(index, key, event.target.value)}
                           aria-label={`${label} line ${index + 1}`}
                           className="w-28 rounded border border-input px-2 py-1.5 text-right font-mono"
@@ -969,15 +991,15 @@ export default function GRV() {
                       </td>
                     ))}
                     <td className="p-2">
-                      <input type="number" min="0" step="0.01" value={line.unit_cost}
-                        onChange={(event) => updateLine(index, "unit_cost", Number(event.target.value))}
+                      <input type="text" inputMode="decimal" value={line.unit_cost ?? ""}
+                        onChange={(event) => updateLine(index, "unit_cost", event.target.value)}
                         aria-label={`Purchase price line ${index + 1}`}
                         className="w-24 rounded border border-input px-2 py-1.5 text-right font-mono"
                         data-testid={`grv-unit-cost-${index}`} />
                     </td>
                     {draft.purpose !== "raw_material" && salePriceFields.map(([key, label]) => (
                       <td key={key} className="p-2">
-                        <input type="number" min="0" step="0.01" value={line[key] ?? ""}
+                        <input type="text" inputMode="decimal" value={line[key] ?? ""}
                           onChange={(event) => updateLine(index, key, event.target.value)}
                           aria-label={`${label} line ${index + 1}`}
                           className="w-24 rounded border border-input px-2 py-1.5 text-right font-mono"
@@ -992,6 +1014,14 @@ export default function GRV() {
             </table>
           </div>
           {!draft.purchase_order_id && <Btn type="button" variant="outline" onClick={() => setDraft({ ...draft, items: [...draft.items, blankLine()] })}><Plus size={14} /> Add product line</Btn>}
+          {(() => {
+            const totals = grvTotals(draft.items, draft.vat_rate);
+            return <div className="ml-auto max-w-sm space-y-1 rounded-md border border-border bg-slate-50 p-3 text-sm" data-testid="grv-total-preview">
+              <p className="flex justify-between gap-6"><span>Subtotal (accepted value)</span><span className="font-mono">{fmtMoney(totals.subtotal)}</span></p>
+              <p className="flex justify-between gap-6"><span>VAT ({draft.vat_rate || 0}%)</span><span className="font-mono">{fmtMoney(totals.vatAmount)}</span></p>
+              <p className="flex justify-between gap-6 border-t border-border pt-1 font-bold"><span>Total including VAT</span><span className="font-mono">{fmtMoney(totals.total)}</span></p>
+            </div>;
+          })()}
           <Textarea label="Notes / discrepancies" rows={3} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} data-testid="grv-notes" />
           <p className="rounded-md bg-blue-50 p-3 text-xs text-blue-800">This saves a draft only. Confirming posts accepted quantities to Stock and updates the linked purchase order once. A new product/category is created in Stock on confirmation and needs a selling price for each applicable zone to appear on invoices. Entered selling prices update the price list; a worker must have a company owner confirm a GRV that changes prices. Reversing a GRV does not revert those prices. Rejected and damaged quantities are excluded from available stock.</p>
           <div className="flex justify-end gap-2">
@@ -1032,10 +1062,11 @@ export default function GRV() {
                   <td className="px-3 py-2 text-right font-mono">{fmtMoney(line.total_value ?? lineValue(line))}</td>
                 </tr>
               ))}</tbody>
-              <tfoot><tr className="font-semibold">
-                <td colSpan={4} className="px-3 py-2 text-right">Total accepted value</td>
-                <td className="px-3 py-2 text-right font-mono">{fmtMoney((viewTarget.items || []).reduce((sum, line) => sum + Number(line.total_value ?? lineValue(line)), 0))}</td>
-              </tr></tfoot>
+              <tfoot>
+                <tr><td colSpan={4} className="px-3 py-2 text-right">Subtotal accepted value</td><td className="px-3 py-2 text-right font-mono">{fmtMoney(savedGrvTotals(viewTarget).subtotal)}</td></tr>
+                <tr><td colSpan={4} className="px-3 py-2 text-right">VAT ({Number(viewTarget.vat_rate || 0)}%)</td><td className="px-3 py-2 text-right font-mono">{fmtMoney(savedGrvTotals(viewTarget).vatAmount)}</td></tr>
+                <tr className="font-semibold"><td colSpan={4} className="px-3 py-2 text-right">Total including VAT</td><td className="px-3 py-2 text-right font-mono">{fmtMoney(savedGrvTotals(viewTarget).total)}</td></tr>
+              </tfoot>
             </table>
           </div>
           {viewTarget.notes && <p className="whitespace-pre-wrap text-sm text-slate-600">{viewTarget.notes}</p>}

@@ -12513,6 +12513,7 @@ class GRVLineIn(BaseModel):
 class GRVIn(BaseModel):
     purpose: str = "selling"
     is_chemical: bool = False
+    vat_rate: float = Field(default=0, ge=0, le=100)
     supplier_id: Optional[str] = ""
     supplier_name: Optional[str] = ""
     purchase_order_id: Optional[str] = ""
@@ -12522,6 +12523,13 @@ class GRVIn(BaseModel):
     warehouse: Optional[str] = ""
     notes: Optional[str] = ""
     items: List[GRVLineIn] = Field(default_factory=list)
+
+    @field_validator("vat_rate")
+    @classmethod
+    def vat_rate_is_finite(cls, value):
+        if not math.isfinite(value):
+            raise ValueError("VAT percentage must be finite")
+        return value
 
 class GRVDeleteIn(BaseModel):
     supervisor_password: Optional[str] = None
@@ -13598,6 +13606,7 @@ async def create_grv(body: GRVIn, user=Depends(get_current_user)):
         "warehouse": (body.warehouse or "").strip(),
         "notes": (body.notes or "").strip(),
         "items": items,
+        "vat_rate": body.vat_rate,
         "purpose": purpose,
         "is_chemical": bool(body.is_chemical) if purpose == "raw_material" else False,
         "status": "draft",
@@ -13652,6 +13661,7 @@ async def edit_grv(grv_id: str, body: GRVIn, user=Depends(get_current_user)):
         "warehouse": (body.warehouse or "").strip(),
         "notes": (body.notes or "").strip(),
         "items": items,
+        "vat_rate": body.vat_rate,
         "purpose": purpose,
         "is_chemical": bool(body.is_chemical) if purpose == "raw_material" else False,
         "edited_by": user["email"],

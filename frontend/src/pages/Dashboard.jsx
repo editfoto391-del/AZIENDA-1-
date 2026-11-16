@@ -138,12 +138,7 @@ function KPI({ title, value, icon: Icon, tint, onClick, comparison, sparkline = 
   return (
     <div className="transition-transform duration-150 ease-out hover:-translate-y-0.5 active:scale-[0.995]">
       <Card className="premium-card group p-5 cursor-pointer border-l-2 border-l-transparent hover:border-l-primary hover:shadow-md transition-all" onClick={onClick} data-testid={`kpi-${title.toLowerCase().replace(/\s/g, "-")}`}>
-        <svg className={`dashboard-kpi-sparkline dashboard-kpi-sparkline-${sparkline}`} viewBox="0 0 220 70" preserveAspectRatio="none" aria-hidden="true">
-          <path d={`${sparklinePath}L220 70H0Z`} />
-          <path className="dashboard-kpi-sparkline-glow" d={sparklinePath} />
-          <path d={sparklinePath} />
-        </svg>
-        <div className="flex items-start justify-between">
+        <div className="relative z-10 flex items-start justify-between">
           <div>
             <p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.13em]">{title}</p>
             <p className="text-2xl font-semibold text-slate-900 mt-2 font-mono tabular-nums">{value}</p>
@@ -153,6 +148,11 @@ function KPI({ title, value, icon: Icon, tint, onClick, comparison, sparkline = 
             <Icon size={19} strokeWidth={1.8} />
           </div>
         </div>
+        <svg className={`dashboard-kpi-sparkline dashboard-kpi-sparkline-${sparkline}`} viewBox="0 0 220 70" preserveAspectRatio="none" aria-hidden="true">
+          <path d={`${sparklinePath}L220 70H0Z`} />
+          <path className="dashboard-kpi-sparkline-glow" d={sparklinePath} />
+          <path d={sparklinePath} />
+        </svg>
       </Card>
     </div>
   );
@@ -193,7 +193,7 @@ function DashboardSkeleton() {
         <SkeletonBlock className="h-9 w-64 max-w-full" />
         <SkeletonBlock className="h-3 w-72 max-w-full" />
       </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">{cards(5)}</div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">{cards(5)}</div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">{cards(3)}</div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">{cards(5, "!p-3")}</div>
       <div className="luxury-card rounded-lg border border-border bg-white p-5">
@@ -992,7 +992,7 @@ export default function Dashboard() {
             <p className="mt-1 text-xs text-slate-500">{periodRange} <span className="text-slate-400">· Previous: {previousRange}</span></p>
           </div>
         </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-7">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3" data-testid="dashboard-financial-kpis">
           <KPI title="Total Invoiced" value={fmtMoney(periodProfit.total_invoiced)} comparison={comparison(periodProfit.total_invoiced, previousProfit.total_invoiced)} icon={Receipt} tint="bg-blue-50 text-blue-600" onClick={() => nav("/invoices")} sparkline="blue" />
           <KPI title="Payments Received · Revenue" value={fmtMoney(periodProfit.revenue)} comparison={comparison(periodProfit.revenue, previousProfit.revenue)} icon={TrendingUp} tint="bg-emerald-50 text-emerald-600" onClick={() => nav("/invoices")} sparkline="up" />
           <KPI title="Buyings" value={fmtMoney(periodProfit.buyings)} comparison={comparison(periodProfit.buyings, previousProfit.buyings)} icon={Boxes} tint="bg-violet-50 text-violet-600" onClick={() => nav("/buyings")} />
@@ -1036,7 +1036,7 @@ export default function Dashboard() {
 
       <section aria-labelledby="dashboard-operations-heading">
         <h2 id="dashboard-operations-heading" className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Period Activity &amp; Current Operations</h2>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
           {[[`Done ${periodLabel}`, d.completed_today, "/orders"],
             [`Orders to Send · ${periodLabel}`, d.orders_open_count, "/orders"], [`Urgent Orders · ${periodLabel}`, d.urgent_orders, "/orders"], ["Vehicles Free", `${d.vehicles_available}/${d.vehicles_total}`, "/fleet"],
             ["Maintenance Due", d.maintenance_due, "/fleet"]].map(([l, v, to]) => (
