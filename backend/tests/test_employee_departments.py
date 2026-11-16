@@ -85,3 +85,18 @@ def test_general_workers_are_restricted_to_iqfoam_wholesalers():
     with pytest.raises(HTTPException) as error:
         server.validate_employee_worker_type(employee, {"company_id": "superiqfoam"})
     assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize("category", [
+    "is_plastic_cleaning",
+    "is_machine_work",
+    "is_plastic_cutting",
+])
+def test_plastic_work_categories_are_restricted_to_iqfoam_wholesalers(category):
+    employee = server.EmployeeIn(name="Worker", **{category: True})
+
+    server.validate_employee_worker_type(employee, {"company_id": "iqfoam-whole-sallers"})
+
+    with pytest.raises(HTTPException) as error:
+        server.validate_employee_worker_type(employee, {"company_id": "superiqfoam"})
+    assert error.value.status_code == 400

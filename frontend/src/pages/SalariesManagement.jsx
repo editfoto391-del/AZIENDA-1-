@@ -162,6 +162,9 @@ function PayrollEmployeeCard({
             <div className="flex flex-wrap items-center gap-2">
               <h4 className="font-semibold text-slate-950">{employee.name}</h4>
               {employee.is_general_worker && <Badge cls="border-[#cae8dc] bg-[#eff9f4] text-[#34725c]">General Worker</Badge>}
+              {employee.is_plastic_cleaning && <Badge cls="border-cyan-200 bg-cyan-50 text-cyan-700">Plastic cleaning</Badge>}
+              {employee.is_machine_work && <Badge cls="border-indigo-200 bg-indigo-50 text-indigo-700">Machine work</Badge>}
+              {employee.is_plastic_cutting && <Badge cls="border-orange-200 bg-orange-50 text-orange-700">Plastic cutting</Badge>}
               <Badge cls={statusClass}>{statusLabel}</Badge>
             </div>
             <p className="mt-1 truncate text-xs text-slate-500">

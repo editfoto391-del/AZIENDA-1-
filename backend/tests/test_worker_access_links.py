@@ -133,9 +133,10 @@ def test_yellow_navigation_pages_require_their_individual_worker_sections():
         ("/api/company-inventory", "company-inventory", "stock"),
         ("/api/warehouses/A/reports", "warehouse-a", "warehouse-b"),
         ("/api/warehouses/chemical/logs", "chemical-usage-log", "chemicals-quantity"),
+        ("/api/production/monthly-chemical-sheet", "superiqfoam-monthly-sheet", "production"),
     )
     for path, granted_section, denied_section in cases:
-        company_id = "superiqfoam" if granted_section.startswith(("chemical-", "chemicals-")) else "iqfoam-manufactoring"
+        company_id = "superiqfoam" if granted_section.startswith(("chemical-", "chemicals-", "superiqfoam-")) else "iqfoam-manufactoring"
         worker = {
             "is_worker": True,
             "worker_allowed_sections": [granted_section],
@@ -146,6 +147,15 @@ def test_yellow_navigation_pages_require_their_individual_worker_sections():
         with pytest.raises(HTTPException) as denied:
             server.enforce_worker_api_access(request(path, "unused"), worker)
         assert denied.value.status_code == 403
+
+    server.enforce_worker_api_access(
+        request("/api/production/monthly-chemical-sheet", "unused"),
+        {
+            "is_worker": True,
+            "worker_allowed_sections": ["chemical-usage-log"],
+            "_active_company_id": "superiqfoam",
+        },
+    )
 
     chemical_usage_worker = {
         "is_worker": True,

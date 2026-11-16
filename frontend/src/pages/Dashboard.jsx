@@ -29,10 +29,9 @@ const WORKER_SECTION_OPTIONS = [
   ["customers", "Customers"], ["suppliers", "Suppliers"], ["buyings", "Buyings"],
   ["invoices", "Invoice"], ["express-invoices", "Express Website Invoices"],
   ["orders", "Orders"], ["intercompany", "Intercompany"],
-  ["stock", "Stock"], ["company-inventory", "Company Inventory"],
+  ["stock", "Stock"],   ["company-inventory", "Company Inventory"],
   ["production", "Production", ["superiqfoam"]],
-  ["chemicals-quantity", "Chemicals Quantity", ["superiqfoam"]],
-  ["chemical-usage-log", "Chemical Usage Log", ["superiqfoam"]],
+  ["superiqfoam-monthly-sheet", "Monthly Production & Chemical Balance", ["superiqfoam"]],
   ["warehouse-a", "Warehouse A", [MANUFACTURING_COMPANY_ID]],
   ["warehouse-b", "Warehouse B", [MANUFACTURING_COMPANY_ID]],
   ["warehouse-c", "Warehouse C", [MANUFACTURING_COMPANY_ID]],
@@ -65,8 +64,7 @@ const WORKER_SECTION_OPERATIONS = {
   stock: [["create", "Add stock"], ["update", "Adjust stock"], ["delete", "Delete stock item"]],
   "company-inventory": [["create", "Add product"], ["update", "Edit product"], ["delete", "Delete product"]],
   production: [["create", "Record production"], ["update", "Edit production"], ["delete", "Delete production record"]],
-  "chemicals-quantity": [["create", "Record quantity"], ["update", "Update quantity"], ["delete", "Delete quantity record"]],
-  "chemical-usage-log": [["create", "Record usage"], ["update", "Edit usage"], ["delete", "Delete usage record"]],
+  "superiqfoam-monthly-sheet": [],
   "warehouse-a": [["create", "Create report"], ["update", "Edit report"], ["delete", "Delete report"]],
   "warehouse-b": [["create", "Create report"], ["update", "Edit report"], ["delete", "Delete report"]],
   "warehouse-c": [["create", "Create report"], ["update", "Edit report"], ["delete", "Delete report"]],
@@ -256,18 +254,6 @@ export default function Dashboard() {
   const canManageWorkers = !!(
     user?.is_owner || user?.is_company_owner || user?.role === "owner"
   );
-
-  const [companyInventory, setCompanyInventory] = useState(null);
-  const [companyInventoryError, setCompanyInventoryError] = useState("");
-  const [companyInventoryReload, setCompanyInventoryReload] = useState(0);
-  useEffect(() => {
-    if (user?.is_worker && !user.allowed_sections?.includes("company-inventory")) return;
-    setCompanyInventory(null);
-    setCompanyInventoryError("");
-    api.getUncached("/company-inventory")
-      .then((items) => setCompanyInventory(items || []))
-      .catch((error) => setCompanyInventoryError(apiError(error)));
-  }, [user, companyInventoryReload]);
 
   useEffect(() => {
     if (!canManageWorkers) return;
@@ -463,8 +449,12 @@ export default function Dashboard() {
     const workerWarehouseIds = worker.warehouse_ids || [];
     if (legacySections.has("warehouses")) {
       workerWarehouseIds.forEach((id) => expandedSections.add(`warehouse-${id.toLowerCase()}`));
-      expandedSections.add(worker.company_id === "superiqfoam" ? "chemical-usage-log" : "warehouse-chemical");
-      expandedSections.add(worker.company_id === "superiqfoam" ? "chemicals-quantity" : "warehouse-chemical-inventory");
+      if (worker.company_id === "superiqfoam") {
+        expandedSections.add("superiqfoam-monthly-sheet");
+      } else {
+        expandedSections.add("warehouse-chemical");
+        expandedSections.add("warehouse-chemical-inventory");
+      }
     }
     const expandedSectionList = [...expandedSections].filter((section) => WORKER_SECTION_OPTIONS
       .some(([option, , companyIds]) => option === section && (!companyIds || companyIds.includes(worker.company_id))));
@@ -644,7 +634,7 @@ export default function Dashboard() {
         </div>
         {canManageWorkers && <Btn onClick={() => { setWorkerDraft({ name: "", username: "", email: "", worker_role: "", password: "", company_id: workerCompanyId || user?.company_id || "", allowed_sections: ["invoices"], stock_only: false, is_supervisor: false, warehouse_ids: [], supervisor_password_actions: [], is_admin: false, can_edit_invoice_prices: false, write_permissions: defaultWorkerWritePermissions(["invoices"]) }); setWorkerModalOpen(true); }} data-testid="add-worker-open"><UserPlus size={16} /> Add Worker</Btn>}
       </div>
-      <div className="dashboard-period-panel relative z-10 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-white/70 p-3" data-testid="dashboard-period-controls">
+      <div className="dashboard-period-panel relative z-10 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-white/70 p-2" data-testid="dashboard-period-controls">
         <div className="flex flex-wrap gap-1.5" role="group" aria-label="Dashboard date range">
           {[["today", "Today"], ["week", "This week"], ["month", "This month"]].map(([value, label]) => (
             <button
@@ -653,7 +643,7 @@ export default function Dashboard() {
               onClick={() => setPeriod(value)}
               aria-pressed={period === value}
               data-testid={`dashboard-period-${value}`}
-              className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${period === value ? "bg-primary text-white" : "text-slate-600 hover:bg-slate-100"}`}
+              className={`rounded-lg px-2.5 py-1.5 text-sm font-semibold transition-colors ${period === value ? "bg-primary text-white" : "text-slate-600 hover:bg-slate-100"}`}
             >
               {label}
             </button>
@@ -665,7 +655,7 @@ export default function Dashboard() {
               onChange={(event) => event.target.value && setPeriod(event.target.value)}
               data-testid="dashboard-period-select"
               aria-label="More dashboard periods"
-              className="rounded-lg border border-border bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+              className="rounded-lg border border-border bg-white px-2.5 py-1.5 text-sm text-slate-700 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
             >
               <option value="">More periods</option>
               <option value="year">This Year</option>
@@ -677,43 +667,35 @@ export default function Dashboard() {
           {period === "custom" && <>
             <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
               From <input type="date" value={customStart} onChange={(event) => setCustomStart(event.target.value)}
-                data-testid="dashboard-custom-start" className="rounded-lg border border-border bg-white px-2 py-2 text-sm" />
+                data-testid="dashboard-custom-start" className="rounded-lg border border-border bg-white px-2 py-1.5 text-sm" />
             </label>
             <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
               To <input type="date" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)}
-                data-testid="dashboard-custom-end" className="rounded-lg border border-border bg-white px-2 py-2 text-sm" />
+                data-testid="dashboard-custom-end" className="rounded-lg border border-border bg-white px-2 py-1.5 text-sm" />
             </label>
           </>}
           <button onClick={() => setCompareOpen(true)} data-testid="dashboard-compare-open"
-            className="rounded-lg border border-primary/30 bg-white px-3 py-2 text-sm font-semibold text-primary hover:bg-primary/5">
+            className="rounded-lg border border-primary/30 bg-white px-2.5 py-1.5 text-sm font-semibold text-primary hover:bg-primary/5">
             Compare periods
           </button>
         </div>
-        <p className="mt-2 w-full text-[11px] text-slate-500">
+        <p className="mt-1 w-full text-[11px] text-slate-500">
           The selected period filters financial results, orders, invoices, attendance, and scheduled deliveries. Stock, balances, and fleet availability show current values.
         </p>
       </div>
 
-      <Section title="Company Inventory" icon={Boxes} action={<button onClick={() => nav("/company-inventory")} className="text-xs font-semibold text-primary flex items-center gap-1" data-testid="dashboard-company-inventory-link">View <ArrowRight size={12} /></button>}>
-        {user?.is_worker && !user.allowed_sections?.includes("company-inventory") ? (
-          <p className="text-sm text-slate-500">Company Inventory requires Company Inventory access. Ask your administrator to update your permissions.</p>
-        ) : companyInventoryError ? (
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm text-red-700" role="alert">{companyInventoryError}</p>
-            <button type="button" onClick={() => setCompanyInventoryReload((value) => value + 1)} className="text-xs font-semibold text-primary" data-testid="dashboard-company-inventory-retry">Try again</button>
-          </div>
-        ) : companyInventory === null ? (
-          <p className="text-sm text-slate-400" role="status">Loading company inventory...</p>
-        ) : companyInventory.length === 0 ? empty("No company inventory items yet.") : (
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3" data-testid="dashboard-company-inventory">
-            {companyInventory.map((item) => (
-              <div key={item.id} className="flex justify-between rounded-lg border border-border px-3 py-2">
-                <span className="text-sm font-semibold text-slate-700">{item.name} <span className="text-slate-400 font-normal">· {item.category}{item.size ? ` ${item.size}` : ""}</span></span>
-                <span className="text-sm font-mono font-bold text-slate-700">{Number(item.total || 0).toLocaleString()} {item.unit}</span>
-              </div>))}
-          </div>
-        )}
-      </Section>
+      <Card className="premium-card !mt-4 p-5" data-testid="dashboard-quick-actions">
+        <h3 className="font-bold text-slate-800 mb-4 font-display">Quick Actions</h3>
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+          {QUICK.filter((q) => !(user?.company_id === MANUFACTURING_COMPANY_ID && q.to === "/production?add=1")).map((q) => (
+            <button key={q.label} onClick={() => nav(q.to)} data-testid={`quick-${q.label.toLowerCase().replace(/\s/g, "-")}`}
+              className="premium-button flex flex-col items-center gap-2 rounded-lg border border-border bg-white/70 p-4 hover:border-primary/50 hover:bg-accent/35 transition-colors">
+              <q.icon size={19} strokeWidth={1.8} className="text-primary" />
+              <span className="text-xs font-semibold text-slate-700 text-center">{q.label}</span>
+            </button>
+          ))}
+        </div>
+      </Card>
 
       {canManageWorkers && <Section title="Workers" icon={UserPlus} action={<div className="flex items-center gap-3">
         <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">Company
@@ -1045,20 +1027,6 @@ export default function Dashboard() {
             </button>))}
         </div>
       </section>
-
-      {/* Quick actions */}
-      <Card className="premium-card p-5">
-        <h3 className="font-bold text-slate-800 mb-4 font-display">Quick Actions</h3>
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
-          {QUICK.filter((q) => !(user?.company_id === MANUFACTURING_COMPANY_ID && q.to === "/production?add=1")).map((q) => (
-            <button key={q.label} onClick={() => nav(q.to)} data-testid={`quick-${q.label.toLowerCase().replace(/\s/g, "-")}`}
-              className="premium-button flex flex-col items-center gap-2 rounded-lg border border-border bg-white/70 p-4 hover:border-primary/50 hover:bg-accent/35 transition-colors">
-              <q.icon size={19} strokeWidth={1.8} className="text-primary" />
-              <span className="text-xs font-semibold text-slate-700 text-center">{q.label}</span>
-            </button>
-          ))}
-        </div>
-      </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Section title={`Orders to Send · ${periodLabel}`} icon={ClipboardList} action={<button onClick={() => nav("/orders")} className="text-xs font-semibold text-primary flex items-center gap-1" data-testid="dash-orders-view">View <ArrowRight size={12} /></button>}>

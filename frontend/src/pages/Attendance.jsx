@@ -591,6 +591,9 @@ export default function Attendance() {
                   <p className="flex flex-wrap items-center gap-2 font-semibold text-slate-800">
                     {e.name}
                     {e.is_general_worker && <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-600">General Worker</span>}
+                    {e.is_plastic_cleaning && <span className="rounded-full border border-cyan-200 bg-cyan-50 px-2 py-0.5 text-[10px] font-semibold text-cyan-700">Plastic cleaning</span>}
+                    {e.is_machine_work && <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">Machine work</span>}
+                    {e.is_plastic_cutting && <span className="rounded-full border border-orange-200 bg-orange-50 px-2 py-0.5 text-[10px] font-semibold text-orange-700">Plastic cutting</span>}
                   </p>
                   <p className="text-[11px] text-slate-400">Week {per?.week ?? 0} · Month {per?.month ?? 0} days</p>
                   {todayHours && <p className="text-[11px] font-medium text-slate-600" data-testid={`attendance-hours-${e.id}`}>
@@ -680,6 +683,35 @@ export default function Attendance() {
             />
             General worker
           </label>}
+          {isIqfoamWholesaler && <>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={!!empModal.is_plastic_cleaning}
+                onChange={(event) => setEmpModal({ ...empModal, is_plastic_cleaning: event.target.checked })}
+                data-testid="employee-plastic-cleaning"
+              />
+              Plastic cleaning
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={!!empModal.is_machine_work}
+                onChange={(event) => setEmpModal({ ...empModal, is_machine_work: event.target.checked })}
+                data-testid="employee-machine-work"
+              />
+              Machine work
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={!!empModal.is_plastic_cutting}
+                onChange={(event) => setEmpModal({ ...empModal, is_plastic_cutting: event.target.checked })}
+                data-testid="employee-plastic-cutting"
+              />
+              Plastic cutting
+            </label>
+          </>}
           <Select
             label="Department"
             value={isIqfoamWholesaler && empModal.is_general_worker && !empModal.department ? "__general_worker__" : empModal.department || ""}

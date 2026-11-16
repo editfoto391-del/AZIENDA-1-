@@ -22,7 +22,7 @@ import uuid, logging, jwt, bcrypt, math, asyncio
 import base64, hashlib, secrets
 from cryptography.fernet import Fernet, InvalidToken
 from pymongo import IndexModel, ReturnDocument
-from pymongo.errors import DuplicateKeyError, OperationFailure
+from pymongo.errors import BulkWriteError, DuplicateKeyError, OperationFailure
 
 import seed_data
 from production_recipes import PREDEFINED_BLOCK_RECIPES
@@ -87,6 +87,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 api = APIRouter(prefix="/api")
 backup_scheduler_task = None
 fleet_notification_scheduler_task = None
+legacy_migration_task = None
 
 
 def now_iso():
@@ -136,6 +137,7 @@ WORKER_SECTION_PREFIXES = {
     "intercompany": "intercompany",
     "stock": "stock",
     "company-inventory": "company-inventory",
+    "production/monthly-chemical-sheet": "superiqfoam-monthly-sheet",
     "production": "production",
     "simple-production": "production",
     "attendance": "attendance",
@@ -493,6 +495,7 @@ WORKER_SECTIONS = {
     "express-invoices", "express-client-payments", "intercompany", "company-inventory",
     "chemicals-quantity", "chemical-usage-log", "warehouse-a", "warehouse-b",
     "warehouse-c", "warehouse-chemical", "warehouse-chemical-inventory",
+    "superiqfoam-monthly-sheet",
 }
 
 def canonical_email(email):
@@ -791,6 +794,12 @@ def enforce_worker_api_access(request, user):
 
     section = worker_section_for_request(path, user)
     if section and section in allowed:
+        return
+    if (
+        section == "superiqfoam-monthly-sheet"
+        and user.get("_active_company_id") == DEFAULT_COMPANY_ID
+        and set(allowed) & {"chemicals-quantity", "chemical-usage-log"}
+    ):
         return
     raise HTTPException(403, "This worker account cannot access this section")
 
@@ -1219,6 +1228,8 @@ def validate_worker_company_sections(company_id, sections):
         raise HTTPException(400, "Warehouse access is only available in IQFOAM Manufacturing")
     if set(sections) & {"chemicals-quantity", "chemical-usage-log"} and company_id != "superiqfoam":
         raise HTTPException(400, "These chemical sections are only available in SUPERIQFOAM")
+    if "superiqfoam-monthly-sheet" in sections and company_id != "superiqfoam":
+        raise HTTPException(400, "The monthly chemical sheet is only available in SUPERIQFOAM")
 
 def worker_warehouse_ids(doc):
     ids = doc.get("worker_warehouse_ids")
@@ -3267,6 +3278,94 @@ class ChemicalLogIn(BaseModel):
         return value
 
 
+MONTHLY_SHEET_BLOCK_KEYS = {
+    "big_block", "big_blue_block", "medium_block", "small_block", "small_blue_block",
+}
+
+
+class MonthlySheetChemicalValues(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    ppg: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    tdi: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    t9: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    silicone: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    amine52: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    mcl: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+class MonthlySheetProductionBlockIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    quantity: Optional[int] = Field(default=None, ge=0)
+    weight_kg: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+class MonthlySheetWeekIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    big_block: MonthlySheetProductionBlockIn = Field(default_factory=MonthlySheetProductionBlockIn)
+    big_blue_block: MonthlySheetProductionBlockIn = Field(default_factory=MonthlySheetProductionBlockIn)
+    medium_block: MonthlySheetProductionBlockIn = Field(default_factory=MonthlySheetProductionBlockIn)
+    small_block: MonthlySheetProductionBlockIn = Field(default_factory=MonthlySheetProductionBlockIn)
+    small_blue_block: MonthlySheetProductionBlockIn = Field(default_factory=MonthlySheetProductionBlockIn)
+
+
+class MonthlySheetArrivalLineIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    line_index: int = Field(ge=0)
+    chemical_key: str = Field(pattern=r"^(ppg|tdi|t9|silicone|amine52|mcl)$")
+
+
+class MonthlySheetArrivalSourceIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    grv_id: str = Field(min_length=1, max_length=120)
+    lines: List[MonthlySheetArrivalLineIn] = Field(min_length=1)
+
+    @field_validator("lines")
+    @classmethod
+    def validate_unique_arrival_lines(cls, value):
+        indexes = [line.line_index for line in value]
+        if len(indexes) != len(set(indexes)):
+            raise ValueError("A GRV line can only be mapped once")
+        return value
+
+
+class MonthlyChemicalSheetIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    arrivals: MonthlySheetChemicalValues
+    arrival_sources: List[MonthlySheetArrivalSourceIn] = Field(default_factory=list)
+    minimums: MonthlySheetChemicalValues
+    formula_rates: Dict[str, MonthlySheetChemicalValues]
+    weeks: List[MonthlySheetWeekIn]
+
+    @field_validator("formula_rates")
+    @classmethod
+    def validate_formula_rate_blocks(cls, value):
+        if set(value) != MONTHLY_SHEET_BLOCK_KEYS:
+            raise ValueError("Formula rates must include each supported block type")
+        return value
+
+    @model_validator(mode="after")
+    def validate_month_weeks(self):
+        year, month = map(int, self.month.split("-"))
+        expected_weeks = len(calendar.Calendar(firstweekday=calendar.MONDAY).monthdayscalendar(year, month))
+        if len(self.weeks) != expected_weeks:
+            raise ValueError(f"The monthly sheet must contain exactly {expected_weeks} production weeks")
+        return self
+
+    @model_validator(mode="after")
+    def validate_unique_arrival_grvs(self):
+        grv_ids = [source.grv_id for source in self.arrival_sources]
+        if len(grv_ids) != len(set(grv_ids)):
+            raise ValueError("A GRV can only be added to the monthly sheet once")
+        return self
+
+
 CHEMICAL_COMPANY_IDS = {MANUFACTURING_COMPANY_ID, DEFAULT_COMPANY_ID}
 
 
@@ -3283,6 +3382,156 @@ def require_chemical_access(user):
         user.get("worker_allowed_sections", [])
     ):
         raise HTTPException(403, "This worker account cannot access the Chemical section")
+
+
+def require_superiqfoam_monthly_sheet_access(user):
+    if user.get("_active_company_id") != DEFAULT_COMPANY_ID:
+        raise HTTPException(403, "The monthly chemical sheet is only available in SUPERIQFOAM")
+    if worker_restrictions_apply(user) and (
+        not set(user.get("worker_allowed_sections", []))
+        .intersection({"superiqfoam-monthly-sheet", "chemicals-quantity", "chemical-usage-log"})
+    ):
+        raise HTTPException(403, "This worker account cannot access the monthly chemical sheet")
+
+
+@api.get("/production/monthly-chemical-sheet")
+async def get_monthly_chemical_sheet(month: str = Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+                                     user=Depends(get_current_user)):
+    require_superiqfoam_monthly_sheet_access(user)
+    sheet_id = f"monthly-chemical-sheet:{month}"
+    saved = await db.monthly_chemical_sheets.find_one({"id": sheet_id}, {"_id": 0})
+    if saved:
+        return saved
+    previous = await db.monthly_chemical_sheets.find(
+        {"month": {"$lt": month}}, {"_id": 0, "formula_rates": 1},
+    ).sort("month", -1).limit(1).to_list(1)
+    default_values = MonthlySheetChemicalValues().model_dump()
+    return {
+        "id": sheet_id,
+        "month": month,
+        "arrivals": default_values,
+        "minimums": default_values,
+        "formula_rates": (
+            previous[0].get("formula_rates")
+            if previous else {key: default_values for key in MONTHLY_SHEET_BLOCK_KEYS}
+        ),
+        "weeks": [
+            MonthlySheetWeekIn().model_dump()
+            for _ in calendar.Calendar(firstweekday=calendar.MONDAY).monthdayscalendar(
+                int(month[:4]), int(month[5:7]),
+            )
+        ],
+        "arrival_sources": [],
+    }
+
+
+@api.get("/production/monthly-chemical-sheet/grvs")
+async def get_monthly_chemical_sheet_grvs(
+    month: str = Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    user=Depends(get_current_user),
+):
+    require_superiqfoam_monthly_sheet_access(user)
+    start = f"{month}-01"
+    end = f"{month}-{calendar.monthrange(int(month[:4]), int(month[5:7]))[1]:02d}"
+    records = await db.grvs.find(
+        {
+            "received_date": {"$gte": start, "$lte": end},
+            "status": {"$in": ["completed", "partially_received", "discrepancy"]},
+            "purpose": "raw_material",
+            "is_chemical": True,
+        },
+        {"_id": 0},
+    ).sort([("received_date", -1), ("created_at", -1)]).to_list(None)
+    return [{
+        "id": grv["id"],
+        "grv_number": grv.get("grv_number", ""),
+        "received_date": grv.get("received_date", ""),
+        "supplier_name": grv.get("supplier_name", ""),
+        "items": [
+            {
+                "line_index": index,
+                "product": line.get("product", ""),
+                "accepted_quantity": float(line.get("accepted_quantity", 0) or 0),
+                "capacity": float(line.get("size", 0) or 0),
+                "container_type": line.get("container_type") or "Container",
+                "unit": line.get("unit", ""),
+                "accepted_quantity": float(line.get("accepted_quantity", 0) or 0),
+                "quantity_kg": round(
+                    float(line.get("accepted_quantity", 0) or 0) * float(line.get("size", 0) or 0),
+                    4,
+                ) if str(line.get("unit", "")).strip().casefold() in {
+                    "kg", "kgs", "kilogram", "kilograms",
+                } and float(line.get("size", 0) or 0) > 0 else None,
+            }
+            for index, line in enumerate(grv.get("items", []))
+        ],
+    } for grv in records]
+
+
+async def validate_monthly_sheet_arrival_sources(month, sources):
+    validated = []
+    for source in sources:
+        grv = await db.grvs.find_one({"id": source.grv_id}, {"_id": 0})
+        if (
+            not grv
+            or grv.get("received_date", "")[:7] != month
+            or grv.get("status") not in {"completed", "partially_received", "discrepancy"}
+            or grv.get("purpose") != "raw_material"
+            or not grv.get("is_chemical")
+        ):
+            raise HTTPException(422, f"GRV {source.grv_id} is not an eligible chemical receipt for {month}")
+        mapped_lines = []
+        for mapping in source.lines:
+            if mapping.line_index >= len(grv.get("items", [])):
+                raise HTTPException(422, f"GRV {grv.get('grv_number', source.grv_id)} has no line {mapping.line_index + 1}")
+            line = grv["items"][mapping.line_index]
+            unit = str(line.get("unit", "")).strip().casefold()
+            try:
+                capacity = float(line.get("size", 0) or 0)
+                accepted = float(line.get("accepted_quantity", 0) or 0)
+            except (TypeError, ValueError):
+                capacity, accepted = 0, 0
+            if unit not in {"kg", "kgs", "kilogram", "kilograms"} or capacity <= 0 or accepted <= 0:
+                raise HTTPException(422, f"GRV line {mapping.line_index + 1} must have accepted quantity and capacity in kg")
+            mapped_lines.append({
+                "line_index": mapping.line_index,
+                "chemical_key": mapping.chemical_key,
+                "product": line.get("product", ""),
+                "container_type": line.get("container_type") or "Container",
+                "container_capacity": capacity,
+                "container_count": accepted,
+                "unit": line.get("unit", ""),
+                "quantity_kg": round(accepted * capacity, 4),
+            })
+        validated.append({
+            "grv_id": grv["id"],
+            "grv_number": grv.get("grv_number", ""),
+            "received_date": grv.get("received_date", ""),
+            "supplier_name": grv.get("supplier_name", ""),
+            "lines": mapped_lines,
+        })
+    return validated
+
+
+@api.put("/production/monthly-chemical-sheet")
+async def save_monthly_chemical_sheet(body: MonthlyChemicalSheetIn, user=Depends(get_current_user)):
+    require_superiqfoam_monthly_sheet_access(user)
+    require_global_owner(user)
+    sheet_id = f"monthly-chemical-sheet:{body.month}"
+    timestamp = now_iso()
+    values = body.model_dump()
+    values["arrival_sources"] = await validate_monthly_sheet_arrival_sources(
+        body.month, body.arrival_sources,
+    )
+    await db.monthly_chemical_sheets.update_one(
+        {"id": sheet_id},
+        {"$set": {**values, "updated_at": timestamp, "updated_by": user["id"]},
+         "$setOnInsert": {"id": sheet_id, "created_at": timestamp}},
+        upsert=True,
+    )
+    saved = await db.monthly_chemical_sheets.find_one({"id": sheet_id}, {"_id": 0})
+    await log_audit("monthly_chemical_sheet", sheet_id, "saved", user, after=saved)
+    return saved
 
 
 class ProductionRecipeComponentIn(BaseModel):
@@ -5384,15 +5633,20 @@ async def invoice_sequence_start(year, invoice_type="standard"):
 
 async def current_invoice_sequence(year=None, invoice_type="standard"):
     year = year or local_now().year
-    counter_id = f"express-invoice-sequence-{year}" if invoice_type == "express" else f"invoice-sequence-{year}"
+    counter_id = invoice_counter_id(year, invoice_type)
     counter = await db.counters.find_one({"_id": counter_id})
     if counter:
         return int(counter["seq"])
     return await invoice_sequence_start(year, invoice_type)
 
+def invoice_counter_id(year, invoice_type):
+    counter_id = f"express-invoice-sequence-{year}" if invoice_type == "express" else f"invoice-sequence-{year}"
+    company_id = active_company_id.get() or DEFAULT_COMPANY_ID
+    return counter_id if company_id == DEFAULT_COMPANY_ID else legacy_counter_id(company_id, counter_id)
+
 async def next_invoice_number(invoice_date=None, invoice_type="standard"):
     year = invoice_numbering_year(invoice_date)
-    counter_id = f"express-invoice-sequence-{year}" if invoice_type == "express" else f"invoice-sequence-{year}"
+    counter_id = invoice_counter_id(year, invoice_type)
     counter = await db.counters.find_one({"_id": counter_id})
     if not counter:
         initial_seq = await invoice_sequence_start(year, invoice_type)
@@ -8441,6 +8695,9 @@ class EmployeeIn(BaseModel):
     name: str
     department: str = "Production"
     is_general_worker: bool = False
+    is_plastic_cleaning: bool = False
+    is_machine_work: bool = False
+    is_plastic_cutting: bool = False
     skills: Optional[str] = ""
     notes: Optional[str] = ""
     active: bool = True
@@ -8510,8 +8767,11 @@ def validate_payroll_roster_company(user):
 
 def validate_employee_worker_type(body, user):
     company_id = user.get("_active_company_id") or user.get("company_id")
-    if body.is_general_worker and company_id != "iqfoam-whole-sallers":
-        raise HTTPException(400, "General workers are only available for IQ Foam Wholesalers")
+    if company_id != "iqfoam-whole-sallers":
+        if body.is_general_worker:
+            raise HTTPException(400, "General workers are only available for IQ Foam Wholesalers")
+        if body.is_plastic_cleaning or body.is_machine_work or body.is_plastic_cutting:
+            raise HTTPException(400, "Plastic work categories are only available for IQ Foam Wholesalers")
 
 @api.post("/employees/import-roster")
 async def import_employee_roster(user=Depends(get_current_user)):
@@ -9179,6 +9439,9 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
             "employee_id": employee["id"], "name": employee.get("name", ""),
             "department": employee.get("department", ""), "active": employee.get("active", True),
             "is_general_worker": employee.get("is_general_worker", False),
+            "is_plastic_cleaning": employee.get("is_plastic_cleaning", False),
+            "is_machine_work": employee.get("is_machine_work", False),
+            "is_plastic_cutting": employee.get("is_plastic_cutting", False),
             "hourly_rate": hourly_rate, "weekly_salary": weekly_salary,
             "monthly_salary": monthly_salary,
             "pay_frequency": "piece" if is_piece_paid else ("monthly_fixed" if is_monthly_fixed else "weekly_fixed"),
@@ -11275,14 +11538,14 @@ INTERFACE_NAV_GROUPS = {
     "purchasing": ("intercompany", "grv", "suppliers", "buyings"),
     "operations": ("stock", "fleet"),
     "company-inventory": ("company-inventory",),
-    "production": ("production", "chemicals-quantity", "chemical-usage-log"),
+    "production": ("production", "superiqfoam-monthly-sheet"),
     "warehouses": ("warehouse-a", "warehouse-b", "warehouse-c", "warehouse-chemical", "warehouse-chemical-inventory"),
     "finance-team": ("expenses", "daily-report", "attendance"),
     "administration": ("settings",),
 }
 INTERFACE_SECTIONS = {
     section for sections in INTERFACE_NAV_GROUPS.values() for section in sections
-}
+} | {"chemicals-quantity", "chemical-usage-log"}
 INTERFACE_CUSTOM_LINKS = {
     "/": "dashboard",
     "/customers": "customers",
@@ -11299,6 +11562,7 @@ INTERFACE_CUSTOM_LINKS = {
     "/fleet": "fleet",
     "/company-inventory": "company-inventory",
     "/production": "production",
+    "/production/monthly-sheet": "superiqfoam-monthly-sheet",
     "/warehouses/chemical-inventory": "chemicals-quantity",
     "/warehouses/chemical": "chemical-usage-log",
     "/warehouses/A": "warehouse-a",
@@ -11311,6 +11575,7 @@ INTERFACE_CUSTOM_LINKS = {
 }
 INTERFACE_CUSTOM_LINK_COMPANIES = {
     "/production": {"superiqfoam"},
+    "/production/monthly-sheet": {"superiqfoam"},
     "/warehouses/A": {"iqfoam-manufactoring"},
     "/warehouses/B": {"iqfoam-manufactoring"},
     "/warehouses/C": {"iqfoam-manufactoring"},
@@ -11363,6 +11628,21 @@ def normalize_interface_config(config, company_id=None, allow_legacy_fields=Fals
     section_order = {}
     for group, sections in INTERFACE_NAV_GROUPS.items():
         custom_order = supplied_section_order.get(group, [])
+        if group == "production" and isinstance(custom_order, list):
+            legacy_chemical_sections = {"chemicals-quantity", "chemical-usage-log"}
+            if legacy_chemical_sections.intersection(custom_order):
+                first_legacy_index = min(
+                    index for index, section in enumerate(custom_order)
+                    if section in legacy_chemical_sections
+                )
+                custom_order = [
+                    section for section in custom_order
+                    if section not in legacy_chemical_sections
+                ]
+                custom_order.insert(
+                    min(first_legacy_index, len(custom_order)),
+                    "superiqfoam-monthly-sheet",
+                )
         if not isinstance(custom_order, list) or any(
             not isinstance(section, str) or section not in sections
             for section in custom_order
@@ -17638,6 +17918,13 @@ async def attendance_summary(user=Depends(get_current_user)):
 
 # ---------------- Seeding ----------------
 async def create_company_unique_index(collection, keys, **options):
+    try:
+        await _create_company_unique_index(collection, keys, **options)
+    except OperationFailure as error:
+        logging.warning("Index %s on %s not created: %s", options.get("name") or keys, collection.name, error)
+
+
+async def _create_company_unique_index(collection, keys, **options):
     legacy_keys = [(keys, 1)] if isinstance(keys, str) else list(keys)
     if options.pop("sparse", False):
         indexed_field = legacy_keys[-1][0]
@@ -17823,7 +18110,10 @@ async def initialize_multi_company():
         base_db.warehouse_report_share_links,
         "token_hash", unique=True, name="warehouse_report_share_token_once",
     )
-    await ensure_performance_indexes(base_db)
+    try:
+        await ensure_performance_indexes(base_db)
+    except OperationFailure as error:
+        logging.warning("Performance indexes not fully created: %s", error)
 
     for profile in COMPANY_PROFILES:
         if profile["id"] != DEFAULT_COMPANY_ID:
@@ -17980,12 +18270,9 @@ async def ensure_performance_indexes(database):
                     partialFilterExpression={"source_buying_id": {"$type": "string"}},
                     name="grv_source_buying_once",
                 )
+                await create_company_unique_index(database.grvs, "grv_number", unique=True)
             await database[collection_name].create_indexes([
                 IndexModel([("company_id", 1), ("id", 1)]),
-                *(
-                    [IndexModel([("company_id", 1), ("grv_number", 1)], unique=True)]
-                    if collection_name == "grvs" else []
-                ),
                 *(
                     IndexModel([("company_id", 1), *definition])
                     for definition in definitions
@@ -18120,18 +18407,141 @@ async def initialize_empty_company(company_id):
         [("payment_date", -1)],
         name="salary_payment_date",
     )
-    await ensure_performance_indexes(company_db)
+    try:
+        await ensure_performance_indexes(company_db)
+    except OperationFailure as error:
+        logging.warning("Performance indexes not fully created: %s", error)
 
 @app.on_event("startup")
 async def on_startup():
-    global backup_scheduler_task, fleet_notification_scheduler_task
+    global backup_scheduler_task, fleet_notification_scheduler_task, legacy_migration_task
     startup_company = active_company_id.set(DEFAULT_COMPANY_ID)
     try:
         await seed()
     finally:
         active_company_id.reset(startup_company)
-    await initialize_multi_company()
-    await initialize_workflow_indexes()
+    try:
+        await initialize_multi_company()
+    except OperationFailure as error:
+        logging.warning("Multi-company initialization incomplete (index or setup conflict): %s", error)
+    legacy_migration_task = asyncio.create_task(run_legacy_migration_in_background())
+    try:
+        await initialize_workflow_indexes()
+    except OperationFailure as error:
+        logging.warning("Workflow indexes not fully created: %s", error)
+    try:
+        await create_startup_feed_indexes()
+    except OperationFailure as error:
+        logging.warning("Notification/intercompany indexes not fully created: %s", error)
+    fleet_notification_scheduler_task = asyncio.create_task(
+        scheduled_fleet_notification_loop()
+    )
+    status = backup_runtime_status()
+    if status["configured"] and status["tools_available"]:
+        backup_scheduler_task = asyncio.create_task(scheduled_backup_loop(
+            mongo_url=mongo_url,
+            database_names=backup_database_names(),
+            configuration=backup_configuration(),
+            local_timezone=TZ,
+            lock_database=base_db,
+        ))
+    else:
+        logging.warning(
+            "Automated backups are not active; configure S3-compatible storage and MongoDB backup tools"
+        )
+
+
+LEGACY_COMPANY_DATABASES = ("iqfoam-whole-sallers", "iqfoam-manufactoring")
+LEGACY_SKIP_COLLECTIONS = GLOBAL_COLLECTIONS | {"backup_locks", "backup_operations", "legacy_migrations"}
+
+
+def legacy_counter_id(company_id, counter_id):
+    return f"{company_id}:{counter_id}"
+
+
+async def run_legacy_migration_in_background():
+    try:
+        await migrate_legacy_company_databases()
+    except Exception:
+        logging.exception("Legacy company database migration did not complete; it will retry on next startup")
+
+
+async def migrate_legacy_company_collection(source, target, company_id):
+    stats = {"inserted": 0, "existing": 0, "conflicts": 0}
+    is_counters = source.name == "counters"
+    existing_ids = set(await target.distinct("id", {"company_id": company_id}))
+    pending = []
+    async for doc in source.find({}):
+        doc["company_id"] = company_id
+        if doc.get("id") is not None and not is_counters:
+            if doc["id"] in existing_ids:
+                stats["existing"] += 1
+                continue
+            doc.pop("_id", None)
+            existing_ids.add(doc["id"])
+            pending.append(doc)
+            continue
+        if is_counters and "id" not in doc:
+            doc["_id"] = legacy_counter_id(company_id, doc["_id"])
+            match = {"_id": doc["_id"]}
+        elif doc.get("id") is not None:
+            doc.pop("_id", None)
+            match = {"company_id": company_id, "id": doc["id"]}
+        else:
+            match = {"company_id": company_id, "_id": doc["_id"]}
+        if await target.find_one(match, {"_id": 1}):
+            stats["existing"] += 1
+            continue
+        try:
+            await target.insert_one(doc)
+            stats["inserted"] += 1
+        except DuplicateKeyError as error:
+            stats["conflicts"] += 1
+            logging.warning("Legacy %s.%s record not copied (conflict): %s", company_id, source.name, error.details.get("keyValue") if error.details else error)
+    for start in range(0, len(pending), 500):
+        batch = pending[start:start + 500]
+        try:
+            result = await target.insert_many(batch, ordered=False)
+            stats["inserted"] += len(result.inserted_ids)
+        except BulkWriteError as error:
+            errors = error.details.get("writeErrors", [])
+            stats["inserted"] += error.details.get("nInserted", 0)
+            stats["conflicts"] += len(errors)
+            for item in errors[:5]:
+                logging.warning("Legacy %s.%s record not copied (conflict): %s", company_id, source.name, item.get("keyValue") or item.get("errmsg"))
+            if any(item.get("code") != 11000 for item in errors):
+                raise
+    return stats
+
+
+async def migrate_legacy_company_databases():
+    for company_id in LEGACY_COMPANY_DATABASES:
+        legacy_name = f"{base_db.name}__{company_id}"
+        legacy_db = client[legacy_name]
+        try:
+            names = await legacy_db.list_collection_names()
+        except OperationFailure as error:
+            logging.warning("Legacy database %s not readable, nothing migrated: %s", legacy_name, error)
+            continue
+        report = {}
+        for name in sorted(names):
+            if name.startswith("system.") or name in LEGACY_SKIP_COLLECTIONS:
+                continue
+            try:
+                report[name] = await migrate_legacy_company_collection(legacy_db[name], base_db[name], company_id)
+            except Exception as error:
+                report[name] = {"error": str(error)[:300]}
+                logging.exception("Legacy %s.%s migration failed; other collections continue", company_id, name)
+            logging.info("Legacy %s.%s: %s", company_id, name, report[name])
+        await base_db.legacy_migrations.update_one(
+            {"source_database": legacy_name},
+            {"$set": {"company_id": company_id, "ran_at": now_iso(), "collections": report}},
+            upsert=True,
+        )
+        logging.info("Legacy migration %s -> %s: %s", legacy_name, base_db.name, report)
+
+
+async def create_startup_feed_indexes():
     await base_db.notifications.create_index(
         [("company_id", 1), ("event_key", 1), ("recipient_user_id", 1)],
         unique=True,
@@ -18151,22 +18561,6 @@ async def on_startup():
         [("supplying_company_id", 1), ("created_at", -1)],
         name="intercompany_supplier_feed",
     )
-    fleet_notification_scheduler_task = asyncio.create_task(
-        scheduled_fleet_notification_loop()
-    )
-    status = backup_runtime_status()
-    if status["configured"] and status["tools_available"]:
-        backup_scheduler_task = asyncio.create_task(scheduled_backup_loop(
-            mongo_url=mongo_url,
-            database_names=backup_database_names(),
-            configuration=backup_configuration(),
-            local_timezone=TZ,
-            lock_database=base_db,
-        ))
-    else:
-        logging.warning(
-            "Automated backups are not active; configure S3-compatible storage and MongoDB backup tools"
-        )
 
 app.include_router(api)
 configured_cors_origins = [origin.strip() for origin in os.environ.get("CORS_ORIGINS", "*").split(",") if origin.strip()]

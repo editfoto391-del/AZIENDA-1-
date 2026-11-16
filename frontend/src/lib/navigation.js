@@ -2,7 +2,7 @@ import {
   LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
   ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart,
   Building2, Handshake, Settings as Cog, ClipboardCheck,
-  Warehouse, FlaskConical, Boxes,
+  Warehouse, FlaskConical, Boxes, ClipboardList,
 } from "lucide-react";
 
 export const NAV_GROUPS = [
@@ -34,8 +34,7 @@ export const NAV_GROUPS = [
   ] },
   { id: "production", label: "PRODUCTION", collapsible: true, companyIds: ["superiqfoam"], items: [
     { to: "/production", label: "Production", icon: Factory, section: "production" },
-    { to: "/warehouses/chemical-inventory", label: "Chemicals Quantity", icon: FlaskConical, section: "chemicals-quantity", companyId: "superiqfoam" },
-    { to: "/warehouses/chemical", label: "Chemical Usage Log", icon: FlaskConical, section: "chemical-usage-log", companyId: "superiqfoam" },
+    { to: "/production/monthly-sheet", label: "Monthly Production & Chemical Balance", icon: ClipboardList, section: "superiqfoam-monthly-sheet" },
   ] },
   { id: "warehouses", label: "WAREHOUSES", collapsible: true, companyId: "iqfoam-manufactoring", items: [
     { to: "/warehouses/A", label: "Warehouse A", icon: Warehouse, section: "warehouse-a", warehouseId: "A" },
