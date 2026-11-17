@@ -17,6 +17,7 @@ export const pageLoaders = {
   "/orders": () => import("@/pages/Orders"),
   "/stock": () => import("@/pages/Stock"),
   "/production": () => import("@/pages/Production"),
+  "/production/monthly-sheet": () => import("@/pages/MonthlyChemicalSheet"),
   "/warehouses": () => import("@/pages/Warehouses"),
   "/warehouses/chemical": () => import("@/pages/ChemicalStock"),
   "/warehouses/chemical-inventory": () => import("@/pages/ChemicalInventory"),

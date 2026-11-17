@@ -28,6 +28,7 @@ const ExpressInvoiceEditor = lazy(pageLoaders["/express-invoices/new"]);
 const Orders = lazy(pageLoaders["/orders"]);
 const Stock = lazy(pageLoaders["/stock"]);
 const Production = lazy(pageLoaders["/production"]);
+const MonthlyChemicalSheet = lazy(pageLoaders["/production/monthly-sheet"]);
 const Warehouses = lazy(pageLoaders["/warehouses"]);
 const ChemicalStock = lazy(pageLoaders["/warehouses/chemical"]);
 const ChemicalInventory = lazy(pageLoaders["/warehouses/chemical-inventory"]);
@@ -117,6 +118,7 @@ function Protected({ children }) {
       ? user.company_id === "superiqfoam" ? "chemical-usage-log" : "warehouse-chemical"
       : warehousePath === "chemical-inventory"
         ? user.company_id === "superiqfoam" ? "chemicals-quantity" : "warehouse-chemical-inventory"
+        : warehousePath === "production-chemical-balance" ? "warehouse-a"
         : ["A", "B", "C"].includes(warehousePath) ? `warehouse-${warehousePath.toLowerCase()}`
           : null;
     const section = location.pathname.startsWith("/express-invoices") ? "express-invoices"
@@ -128,7 +130,8 @@ function Protected({ children }) {
           : location.pathname.startsWith("/buyings") ? "buyings"
             : location.pathname.startsWith("/orders") ? "orders"
               : location.pathname.startsWith("/stock") ? "stock"
-                : location.pathname.startsWith("/production") ? "production"
+                : location.pathname.startsWith("/production/monthly-sheet") ? "superiqfoam-monthly-sheet"
+                  : location.pathname.startsWith("/production") ? "production"
                     : location.pathname.startsWith("/company-inventory") ? "company-inventory"
                       : location.pathname.startsWith("/warehouses") ? warehouseSection
                   : location.pathname.startsWith("/attendance") ? "attendance"
@@ -141,7 +144,10 @@ function Protected({ children }) {
                                 : location.pathname.startsWith("/settings") ? "settings"
                                   : null;
     const allowedSections = user.allowed_sections || [];
-    if (!section || !allowedSections.includes(section)) {
+    const hasMonthlySheetAccess = allowedSections.includes("superiqfoam-monthly-sheet")
+      || (user.company_id === "superiqfoam"
+        && allowedSections.some((section) => ["chemicals-quantity", "chemical-usage-log"].includes(section)));
+    if (!section || (section === "superiqfoam-monthly-sheet" ? !hasMonthlySheetAccess : !allowedSections.includes(section))) {
       const landingPath = [
         ["express-invoices", "/express-invoices"],
         ["express-client-payments", "/express-client-payments"],
@@ -154,6 +160,7 @@ function Protected({ children }) {
         ["stock", "/stock"],
         ["company-inventory", "/company-inventory"],
         ["production", "/production"],
+        ["superiqfoam-monthly-sheet", "/production/monthly-sheet"],
         ["chemicals-quantity", "/warehouses/chemical-inventory"],
         ["chemical-usage-log", "/warehouses/chemical"],
         ["warehouse-a", "/warehouses/A"],
@@ -336,6 +343,18 @@ function OwnerWelcome({ children, user }) {
   );
 }
 
+function CompanyChemicalPage({ children }) {
+  const { user } = useAuth();
+  const companyId = user?._active_company_id || user?.company_id;
+  if (companyId === "superiqfoam") {
+    return <Navigate to="/production/monthly-sheet" replace />;
+  }
+  if (companyId === "iqfoam-manufactoring") {
+    return <Navigate to="/warehouses/production-chemical-balance" replace />;
+  }
+  return children;
+}
+
 function AppRouter() {
   const location = useLocation();
   if (location.hash?.includes("session_id=")) return <Suspense fallback={<RouteLoading />}><AuthCallback /></Suspense>;
@@ -362,9 +381,11 @@ function AppRouter() {
             <Route path="/orders" element={<Orders />} />
             <Route path="/stock" element={<Stock />} />
             <Route path="/production" element={<Production />} />
+            <Route path="/production/monthly-sheet" element={<MonthlyChemicalSheet />} />
             <Route path="/warehouses" element={<Warehouses />} />
-            <Route path="/warehouses/chemical" element={<ChemicalStock />} />
-            <Route path="/warehouses/chemical-inventory" element={<ChemicalInventory />} />
+            <Route path="/warehouses/production-chemical-balance" element={<MonthlyChemicalSheet />} />
+            <Route path="/warehouses/chemical" element={<CompanyChemicalPage><ChemicalStock /></CompanyChemicalPage>} />
+            <Route path="/warehouses/chemical-inventory" element={<CompanyChemicalPage><ChemicalInventory /></CompanyChemicalPage>} />
             <Route path="/company-inventory" element={<CompanyInventory />} />
             <Route path="/warehouses/:warehouseId" element={<Warehouses />} />
             <Route path="/attendance" element={<Attendance />} />

@@ -2,7 +2,7 @@ import {
   LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
   ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart,
   Building2, Handshake, Settings as Cog, ClipboardCheck,
-  Warehouse, FlaskConical, Boxes,
+  Warehouse, Boxes, ClipboardList,
 } from "lucide-react";
 
 export const NAV_GROUPS = [
@@ -34,15 +34,13 @@ export const NAV_GROUPS = [
   ] },
   { id: "production", label: "PRODUCTION", collapsible: true, companyIds: ["superiqfoam"], items: [
     { to: "/production", label: "Production", icon: Factory, section: "production" },
-    { to: "/warehouses/chemical-inventory", label: "Chemicals Quantity", icon: FlaskConical, section: "chemicals-quantity", companyId: "superiqfoam" },
-    { to: "/warehouses/chemical", label: "Chemical Usage Log", icon: FlaskConical, section: "chemical-usage-log", companyId: "superiqfoam" },
+    { to: "/production/monthly-sheet", label: "Production Management & Chemical Balance", icon: ClipboardList, section: "superiqfoam-monthly-sheet" },
   ] },
   { id: "warehouses", label: "WAREHOUSES", collapsible: true, companyId: "iqfoam-manufactoring", items: [
     { to: "/warehouses/A", label: "Warehouse A", icon: Warehouse, section: "warehouse-a", warehouseId: "A" },
+    { to: "/warehouses/production-chemical-balance", label: "Production Management & Chemical Balance", icon: ClipboardList, section: "warehouse-a" },
     { to: "/warehouses/B", label: "Warehouse B", icon: Warehouse, section: "warehouse-b", warehouseId: "B" },
     { to: "/warehouses/C", label: "Warehouse C", icon: Warehouse, section: "warehouse-c", warehouseId: "C" },
-    { to: "/warehouses/chemical", label: "Chemical", icon: FlaskConical, section: "warehouse-chemical" },
-    { to: "/warehouses/chemical-inventory", label: "Chemical Inventory", icon: Boxes, section: "warehouse-chemical-inventory" },
   ] },
   { id: "finance-team", label: "Finance & team", items: [
     { to: "/expenses", label: "Expenses", icon: Receipt, section: "expenses" },

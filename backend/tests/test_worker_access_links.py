@@ -133,9 +133,10 @@ def test_yellow_navigation_pages_require_their_individual_worker_sections():
         ("/api/company-inventory", "company-inventory", "stock"),
         ("/api/warehouses/A/reports", "warehouse-a", "warehouse-b"),
         ("/api/warehouses/chemical/logs", "chemical-usage-log", "chemicals-quantity"),
+        ("/api/production/monthly-chemical-sheet", "superiqfoam-monthly-sheet", "production"),
     )
     for path, granted_section, denied_section in cases:
-        company_id = "superiqfoam" if granted_section.startswith(("chemical-", "chemicals-")) else "iqfoam-manufactoring"
+        company_id = "superiqfoam" if granted_section.startswith(("chemical-", "chemicals-", "superiqfoam-")) else "iqfoam-manufactoring"
         worker = {
             "is_worker": True,
             "worker_allowed_sections": [granted_section],
@@ -146,6 +147,15 @@ def test_yellow_navigation_pages_require_their_individual_worker_sections():
         with pytest.raises(HTTPException) as denied:
             server.enforce_worker_api_access(request(path, "unused"), worker)
         assert denied.value.status_code == 403
+
+    server.enforce_worker_api_access(
+        request("/api/production/monthly-chemical-sheet", "unused"),
+        {
+            "is_worker": True,
+            "worker_allowed_sections": ["chemical-usage-log"],
+            "_active_company_id": "superiqfoam",
+        },
+    )
 
     chemical_usage_worker = {
         "is_worker": True,
@@ -533,6 +543,85 @@ def test_worker_link_auth_scope_dynamic_permissions_and_revocation(worker_accoun
         reactivated = await server.issue_worker_personal_link("worker-a", "superiqfoam", owner)
         assert reactivated["active"] is True
         assert (        await server.worker_access_link_info(reactivated["access_token"], Response()))["username"] == "zeen"
+
+    asyncio.run(scenario())
+
+
+def test_worker_access_link_is_bound_to_the_selected_company(worker_accounts):
+    _, database = worker_accounts
+    worker = next(item for item in database.users.documents if item["id"] == "worker-b")
+    worker["company_roles"]["superiqfoam"] = "user"
+    worker["company_ids"].append("superiqfoam")
+    existing_token = "A" * 43
+    worker.update({
+        "personal_access_token_hash": server.worker_access_token_hash(existing_token),
+        "personal_access_token_encrypted": server.encrypt_worker_access_token(existing_token),
+        "active": True,
+    })
+    owner = {"id": "owner", "role": "owner"}
+
+    async def scenario():
+        existing_link = await server.worker_access_details(
+            "worker-b", "iqfoam-whole-sallers", owner,
+        )
+        assert existing_link["link_active"] is False
+        assert existing_link["access_token"] is None
+
+        issued = await server.issue_worker_personal_link(
+            "worker-b", "iqfoam-whole-sallers", owner,
+        )
+        assert issued["company_id"] == "iqfoam-whole-sallers"
+        assert issued["access_token"] != existing_token
+        stored_worker = next(item for item in database.users.documents if item["id"] == "worker-b")
+        assert stored_worker["personal_access_company_id"] == "iqfoam-whole-sallers"
+
+        info = await server.worker_access_link_info(issued["access_token"], Response())
+        assert info["company_id"] == "iqfoam-whole-sallers"
+
+        login = await server.login(server.LoginIn(
+            username="other",
+            password="other-password",
+            company_id="superiqfoam",
+            personal_access_token=issued["access_token"],
+        ), Response())
+        assert login["user"]["company_id"] == "iqfoam-whole-sallers"
+
+    asyncio.run(scenario())
+
+
+def test_worker_access_link_can_be_regenerated_after_encryption_key_change(
+    worker_accounts, monkeypatch,
+):
+    _, database = worker_accounts
+    worker = next(item for item in database.users.documents if item["id"] == "worker-b")
+    owner = {"id": "owner", "role": "owner"}
+    original_token = "A" * 43
+    worker.update({
+        "personal_access_token_hash": server.worker_access_token_hash(original_token),
+        "personal_access_token_encrypted": "encrypted-with-an-old-key",
+        "personal_access_company_id": "iqfoam-whole-sallers",
+        "active": True,
+    })
+
+    def invalid_ciphertext(_token):
+        raise server.InvalidToken
+
+    monkeypatch.setattr(server, "decrypt_worker_access_token", invalid_ciphertext)
+
+    async def scenario():
+        existing_link = await server.worker_access_details(
+            "worker-b", "iqfoam-whole-sallers", owner,
+        )
+        assert existing_link["link_active"] is False
+        assert existing_link["access_token"] is None
+
+        regenerated = await server.issue_worker_personal_link(
+            "worker-b", "iqfoam-whole-sallers", owner,
+        )
+        assert regenerated["access_token"] != original_token
+        assert (await server.worker_access_link_info(
+            regenerated["access_token"], Response(),
+        ))["company_id"] == "iqfoam-whole-sallers"
 
     asyncio.run(scenario())
 

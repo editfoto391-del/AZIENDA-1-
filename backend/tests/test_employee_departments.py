@@ -25,6 +25,24 @@ def test_departments_combine_saved_company_departments_with_employee_departments
     assert departments == ["Packing", "Production", "Sales"]
 
 
+def test_imraan_plastics_department_list_excludes_legacy_departments(monkeypatch):
+    async def fake_listall(collection, sort=None):
+        if collection == "departments":
+            return [
+                {"name": "Legacy department"},
+                {"name": "Plastic cleaning", "worker_department": True},
+            ]
+        if collection == "employees":
+            return [{"name": "Alex", "department": "Old employee department"}]
+        raise AssertionError(f"Unexpected collection: {collection}")
+
+    monkeypatch.setattr(server, "listall", fake_listall)
+
+    departments = asyncio.run(server.get_departments(user={"company_id": "imraan-plastics"}))
+
+    assert departments == ["Plastic cleaning"]
+
+
 def test_add_department_reuses_existing_name_ignoring_case(monkeypatch):
     existing = {"id": "department-1", "name": "Packing"}
 
@@ -69,6 +87,32 @@ def test_add_department_persists_a_new_department_for_the_active_company(monkeyp
     assert inserted == {"collection": "departments", "values": {"name": "Finishing"}}
 
 
+def test_add_department_marks_new_imraan_plastics_department_for_workers(monkeypatch):
+    inserted = {}
+
+    async def no_departments(_collection):
+        return []
+
+    async def capture_insert(collection, values):
+        inserted.update(collection=collection, values=values)
+        return {"id": "department-3", **values}
+
+    monkeypatch.setattr(server, "listall", no_departments)
+    monkeypatch.setattr(server, "insert", capture_insert)
+    monkeypatch.setattr(server, "require_admin", lambda _user: None)
+
+    result = asyncio.run(server.add_department(
+        server.DepartmentIn(name="Plastic work"),
+        user={"_active_company_id": "imraan-plastics"},
+    ))
+
+    assert result == {"id": "department-3", "name": "Plastic work", "worker_department": True}
+    assert inserted == {
+        "collection": "departments",
+        "values": {"name": "Plastic work", "worker_department": True},
+    }
+
+
 def test_department_name_is_required_and_limited_to_100_characters():
     with pytest.raises(ValueError):
         server.DepartmentIn(name="  ")
@@ -81,6 +125,25 @@ def test_general_workers_are_restricted_to_iqfoam_wholesalers():
     employee = server.EmployeeIn(name="Worker", department="", is_general_worker=True)
 
     server.validate_employee_worker_type(employee, {"company_id": "iqfoam-whole-sallers"})
+
+    with pytest.raises(HTTPException) as error:
+        server.validate_employee_worker_type(employee, {"company_id": "superiqfoam"})
+    assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize("category", [
+    "is_plastic_cleaning",
+    "is_machine_work",
+    "is_plastic_cutting",
+])
+def test_plastic_work_categories_are_restricted_to_imraan_plastics(category):
+    employee = server.EmployeeIn(name="Worker", **{category: True})
+
+    server.validate_employee_worker_type(employee, {"company_id": "imraan-plastics"})
+
+    with pytest.raises(HTTPException) as error:
+        server.validate_employee_worker_type(employee, {"company_id": "iqfoam-whole-sallers"})
+    assert error.value.status_code == 400
 
     with pytest.raises(HTTPException) as error:
         server.validate_employee_worker_type(employee, {"company_id": "superiqfoam"})

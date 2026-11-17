@@ -94,6 +94,35 @@ def test_imraan_plastics_profile_has_correct_invoice_details_and_separate_compan
     }
 
 
+def test_company_profile_initialization_reactivates_configured_profiles(monkeypatch):
+    class CompanyProfiles:
+        def __init__(self):
+            self.documents = [{"id": "imraan-plastics", "name": "Custom label", "active": False}]
+
+        async def update_one(self, query, update, upsert=False):
+            profile = next(
+                (item for item in self.documents if item["id"] == query["id"]),
+                None,
+            )
+            if profile is None and upsert:
+                profile = dict(update["$setOnInsert"])
+                self.documents.append(profile)
+            if profile is not None:
+                profile.update(deepcopy(update.get("$set", {})))
+
+    companies = CompanyProfiles()
+    monkeypatch.setattr(server, "base_db", Database(companies=companies))
+
+    asyncio.run(server.initialize_company_profiles())
+
+    imraan = next(item for item in companies.documents if item["id"] == "imraan-plastics")
+    assert imraan["active"] is True
+    assert imraan["name"] == "Custom label"
+    assert {item["id"] for item in companies.documents} == {
+        profile["id"] for profile in server.COMPANY_PROFILES
+    }
+
+
 def test_imraan_plastics_profile_account_can_access_superiqfoam_read_only(monkeypatch):
     profile_account = {
         "id": "imraan-admin",

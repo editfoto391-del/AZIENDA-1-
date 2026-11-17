@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, Navigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { BedDouble, ClipboardList, FlaskConical, Layers3, MessageCircle, PackageCheck, Plus, Save, Scissors, Trash2, TriangleAlert, Truck, Warehouse } from "lucide-react";
+import { BedDouble, ClipboardList, MessageCircle, PackageCheck, Plus, Save, Scissors, Trash2, TriangleAlert, Truck, Warehouse } from "lucide-react";
 import { Btn, Card, Empty, Input, Modal, PageHeader } from "@/components/common";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -15,28 +15,6 @@ const WAREHOUSES = [
 ];
 
 const REPORT_SECTIONS = [
-  {
-    key: "chemicals",
-    title: "Chemical usage count",
-    icon: FlaskConical,
-    description: "Record each chemical used and its quantity.",
-    fields: [
-      { key: "chemical", label: "Chemical" },
-      { key: "quantity", label: "Quantity", numeric: true },
-      { key: "unit", label: "Unit (e.g. kg, L)" },
-    ],
-  },
-  {
-    key: "manufactured_blocks",
-    title: "Manufactured blocks",
-    icon: Layers3,
-    description: "Record the type, size and number of blocks produced.",
-    fields: [
-      { key: "block_type", label: "Block type" },
-      { key: "size", label: "Block size" },
-      { key: "quantity", label: "Quantity", numeric: true, integer: true },
-    ],
-  },
   {
     key: "foam_cut",
     title: "Foam cut",
@@ -71,6 +49,11 @@ const REPORT_SECTIONS = [
       { key: "pieces_recovered", label: "Pieces recovered", numeric: true, integer: true },
     ],
   },
+];
+
+const WAREHOUSE_A_LEGACY_HISTORY_SECTIONS = [
+  { key: "chemicals", title: "Chemical usage count" },
+  { key: "manufactured_blocks", title: "Manufactured blocks" },
 ];
 
 const WAREHOUSE_B_REPORT_SECTIONS = [
@@ -211,7 +194,14 @@ function reportLineSummary(line) {
   return quantity;
 }
 
-function WarehouseReportSummary({ warehouseId, report, date }) {
+function WarehouseReportSummary({ warehouseId, report, date, showLegacyWarehouseA = false }) {
+  const removedWarehouseAMetrics = new Set([
+    "Total chemical usage",
+    "Total blocks manufactured",
+    "Manufactured by type and size",
+  ]);
+  const metrics = warehouseReportMetrics(warehouseId, report).filter((metric) =>
+    showLegacyWarehouseA || warehouseId !== "A" || !removedWarehouseAMetrics.has(metric.label));
   return (
     <Card className="border-emerald-200 bg-emerald-50/40 p-4 sm:p-5" data-testid={`warehouse-${warehouseId.toLowerCase()}-report-summary`}>
       <div className="mb-4 flex items-center gap-2">
@@ -222,7 +212,7 @@ function WarehouseReportSummary({ warehouseId, report, date }) {
         Totals include saved reports and current entries for {date}.
       </p>
       <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {warehouseReportMetrics(warehouseId, report).map((metric) => (
+        {metrics.map((metric) => (
           <div key={metric.label} className="min-w-0 rounded-lg border border-emerald-100 bg-white/80 p-3">
             <dt className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{metric.label}</dt>
             <dd className="mt-1 break-words text-sm font-semibold text-slate-800">{metric.value}</dd>
@@ -240,6 +230,9 @@ export default function Warehouses() {
   const reportSections = warehouseId === "B"
     ? WAREHOUSE_B_REPORT_SECTIONS
     : warehouseId === "C" ? WAREHOUSE_C_REPORT_SECTIONS : REPORT_SECTIONS;
+  const reportHistorySections = warehouseId === "A"
+    ? [...WAREHOUSE_A_LEGACY_HISTORY_SECTIONS, ...reportSections]
+    : reportSections;
   const canAccessWarehouseA = manufacturingProfile && (
     !user?.is_worker
     || (
@@ -506,9 +499,9 @@ export default function Warehouses() {
                       )}
                     </div>
                   </div>
-                  <WarehouseReportSummary warehouseId={warehouseId} report={report} />
+                  <WarehouseReportSummary warehouseId={warehouseId} report={report} showLegacyWarehouseA />
                   <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                    {reportSections.filter(({ key }) => report[key]?.length > 0).map((section) => (
+                    {reportHistorySections.filter(({ key }) => report[key]?.length > 0).map((section) => (
                       <div key={section.key}>
                         <h4 className="text-xs font-bold uppercase tracking-wide text-slate-500">{section.title}</h4>
                         <ul className="mt-2 space-y-1.5 text-sm text-slate-700">

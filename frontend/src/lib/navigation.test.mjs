@@ -28,3 +28,19 @@ test("IMRAAN PLASTICS uses the correct profile name and only requested sections"
     "Clients balances and payments",
   );
 });
+
+test("SuperIQFoam replaces the two chemical menu links with the monthly sheet", () => {
+  const superIqLinks = navigationLinksForCompany("superiqfoam");
+  const superIqSections = superIqLinks.map((link) => link.section);
+
+  assert.ok(superIqSections.includes("superiqfoam-monthly-sheet"));
+  assert.ok(!superIqSections.includes("chemicals-quantity"));
+  assert.ok(!superIqSections.includes("chemical-usage-log"));
+
+  const manufacturingLinks = navigationLinksForCompany("iqfoam-manufactoring");
+  assert.ok(manufacturingLinks.some((link) =>
+    link.path === "/warehouses/production-chemical-balance"
+      && link.label === "Production Management & Chemical Balance"));
+  assert.ok(!manufacturingLinks.some((link) =>
+    ["warehouse-chemical", "warehouse-chemical-inventory"].includes(link.section)));
+});

@@ -32,6 +32,7 @@ export default function Attendance() {
   const { user } = useAuth();
   const isSuperIqFoam = user?.company_id === "superiqfoam";
   const isIqfoamWholesaler = user?.company_id === "iqfoam-whole-sallers";
+  const isImraanPlastics = user?.company_id === "imraan-plastics";
   const canManageDepartments = user?.is_owner || user?.is_company_owner || user?.is_admin || user?.role === "admin"
     || user?.company_roles?.[user?.company_id] === "admin";
   const [employees, setEmployees] = useState([]);
@@ -74,7 +75,7 @@ export default function Attendance() {
   };
   useEffect(() => { load(); }, [date, user?.company_id]);
   useEffect(() => {
-    if (!isIqfoamWholesaler) {
+    if (!isIqfoamWholesaler && !isImraanPlastics) {
       setCompanyDepartments([]);
       return undefined;
     }
@@ -87,7 +88,7 @@ export default function Attendance() {
         if (activeRequest) toast.error(`Could not load departments: ${apiError(error)}`);
       });
     return () => { activeRequest = false; };
-  }, [isIqfoamWholesaler]);
+  }, [isIqfoamWholesaler, isImraanPlastics]);
   useEffect(() => {
     let activeRequest = true;
     setPieceLoading(true);
@@ -99,6 +100,11 @@ export default function Attendance() {
   }, [date]);
 
   const active = employees.filter((e) => e.active !== false);
+  const employeeDepartmentOptions = isIqfoamWholesaler || isImraanPlastics
+    ? companyDepartments
+    : DEPTS;
+  const hasLegacyEmployeeDepartment = empModal?.department
+    && !employeeDepartmentOptions.includes(empModal.department);
   const statusOf = (eid) => {
     const status = records.find((record) => record.employee_id === eid && record.date === date)?.status;
     if (!isSuperIqFoam) return status;
@@ -278,10 +284,13 @@ export default function Attendance() {
   };
   const saveEmp = async () => {
     if (!empModal.name.trim()) return toast.error("Name required");
-    if (isIqfoamWholesaler) {
-      const validDepartment = !empModal.department || companyDepartments.includes(empModal.department);
+    if (isIqfoamWholesaler || isImraanPlastics) {
+      const currentEmployeeDepartment = empModal.id && employees.find(({ id }) => id === empModal.id)?.department;
+      const validDepartment = !empModal.department
+        || companyDepartments.includes(empModal.department)
+        || (isImraanPlastics && empModal.department === currentEmployeeDepartment);
       if (!validDepartment || (!empModal.is_general_worker && !empModal.department)) {
-        return toast.error(empModal.is_general_worker
+        return toast.error(isIqfoamWholesaler && empModal.is_general_worker
           ? "Select a department from this company or leave it blank."
           : "Select or create a department for this worker.");
       }
@@ -591,6 +600,9 @@ export default function Attendance() {
                   <p className="flex flex-wrap items-center gap-2 font-semibold text-slate-800">
                     {e.name}
                     {e.is_general_worker && <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-600">General Worker</span>}
+                    {e.is_plastic_cleaning && <span className="rounded-full border border-cyan-200 bg-cyan-50 px-2 py-0.5 text-[10px] font-semibold text-cyan-700">Plastic cleaning</span>}
+                    {e.is_machine_work && <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">Machine work</span>}
+                    {e.is_plastic_cutting && <span className="rounded-full border border-orange-200 bg-orange-50 px-2 py-0.5 text-[10px] font-semibold text-orange-700">Plastic cutting</span>}
                   </p>
                   <p className="text-[11px] text-slate-400">Week {per?.week ?? 0} · Month {per?.month ?? 0} days</p>
                   {todayHours && <p className="text-[11px] font-medium text-slate-600" data-testid={`attendance-hours-${e.id}`}>
@@ -680,6 +692,35 @@ export default function Attendance() {
             />
             General worker
           </label>}
+          {isImraanPlastics && <>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={!!empModal.is_plastic_cleaning}
+                onChange={(event) => setEmpModal({ ...empModal, is_plastic_cleaning: event.target.checked })}
+                data-testid="employee-plastic-cleaning"
+              />
+              Plastic cleaning
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={!!empModal.is_machine_work}
+                onChange={(event) => setEmpModal({ ...empModal, is_machine_work: event.target.checked })}
+                data-testid="employee-machine-work"
+              />
+              Machine work
+            </label>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={!!empModal.is_plastic_cutting}
+                onChange={(event) => setEmpModal({ ...empModal, is_plastic_cutting: event.target.checked })}
+                data-testid="employee-plastic-cutting"
+              />
+              Plastic cutting
+            </label>
+          </>}
           <Select
             label="Department"
             value={isIqfoamWholesaler && empModal.is_general_worker && !empModal.department ? "__general_worker__" : empModal.department || ""}
@@ -690,10 +731,12 @@ export default function Attendance() {
           >
             <option value="">{empModal.is_general_worker ? "No department (optional)" : "Select a department"}</option>
             {isIqfoamWholesaler && <option value="__general_worker__">General Worker</option>}
-            {empModal.department && !(isIqfoamWholesaler ? companyDepartments : DEPTS).includes(empModal.department) && <option value={empModal.department}>{empModal.department} (legacy)</option>}
-            {(isIqfoamWholesaler ? companyDepartments : DEPTS).map((department) => <option key={department} value={department}>{department}</option>)}
+            {hasLegacyEmployeeDepartment && <option value={empModal.department}>
+              {isImraanPlastics ? empModal.department : `${empModal.department} (legacy)`}
+            </option>}
+            {employeeDepartmentOptions.map((department) => <option key={department} value={department}>{department}</option>)}
           </Select>
-          {isIqfoamWholesaler && canManageDepartments && <div className="flex items-end gap-2">
+          {(isIqfoamWholesaler || isImraanPlastics) && canManageDepartments && <div className="flex items-end gap-2">
             <Input
               label="Create department"
               value={newDepartmentName}
