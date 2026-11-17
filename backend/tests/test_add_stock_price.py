@@ -89,3 +89,19 @@ def test_add_stock_rejects_duplicates(env):
         asyncio.run(server.add_stock(body.model_copy(update={"product": "simple"}), {"is_worker": False}))
     assert err.value.status_code == 400
     assert len(env["stock"].docs) == 1
+
+
+def test_superiqfoam_stock_creation_rejects_legacy_category_alias_duplicates(env):
+    asyncio.run(server.add_stock(
+        server.StockIn(product="Ribbon Black", size="760x100"),
+        {"is_worker": False, "_active_company_id": "superiqfoam"},
+    ))
+
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(server.add_stock(
+            server.StockIn(product="Ribbon Balck", size="760x100"),
+            {"is_worker": False, "_active_company_id": "superiqfoam"},
+        ))
+
+    assert err.value.status_code == 400
+    assert len(env["stock"].docs) == 1

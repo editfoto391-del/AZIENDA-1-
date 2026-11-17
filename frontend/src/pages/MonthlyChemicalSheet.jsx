@@ -185,6 +185,8 @@ export default function MonthlyChemicalSheet() {
   }, [grvs]);
 
   const selectedGrv = grvs.find((grv) => grv.id === selectedGrvId);
+  const availableGrvs = grvs.filter((grv) =>
+    !sheet.arrival_sources.some((source) => source.grv_id === grv.id));
   const totals = useMemo(() => calculateMonthlySheet(sheet), [sheet]);
   const dailyReport = useMemo(
     () => calculateDailyProductionReport(sheet, dailyReportDate),
@@ -413,7 +415,7 @@ export default function MonthlyChemicalSheet() {
         <div className="space-y-3 border-t border-slate-200 p-4">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
             <Select label="Import chemical receipt from GRV" value={selectedGrvId}
-              disabled={!canEdit || grvLoading || !!grvError || !grvs.length}
+              disabled={!canEdit || grvLoading || !!grvError}
               onChange={(event) => {
                 const nextId = event.target.value;
                 setSelectedGrvId(nextId);
@@ -424,17 +426,27 @@ export default function MonthlyChemicalSheet() {
                 ])));
               }}
               data-testid="monthly-sheet-grv-select">
-              <option value="">{grvLoading ? "Loading GRVs..." : "Select a confirmed chemical GRV"}</option>
-              {grvs.filter((grv) => !sheet.arrival_sources.some((source) => source.grv_id === grv.id))
-                .map((grv) => <option key={grv.id} value={grv.id}>
-                  {grv.grv_number} · {grv.received_date} · {grv.supplier_name}
-                </option>)}
+              <option value="">
+                {grvLoading ? "Loading GRVs..." : "Select a confirmed chemical GRV"}
+              </option>
+              {availableGrvs.map((grv) => <option key={grv.id} value={grv.id}>
+                {grv.grv_number} · {grv.received_date} · {grv.supplier_name}
+              </option>)}
             </Select>
             <Btn type="button" onClick={addSelectedGrv} disabled={!canEdit || !selectedGrv || loading || !!loadError}
               data-testid="monthly-sheet-add-grv">
-              <Plus size={16} /> Add GRV
+              <Plus size={16} /> {selectedGrv ? "Add GRV" : "Select a GRV first"}
             </Btn>
           </div>
+          {!canEdit && <p className="text-sm text-amber-800" role="status">
+            Only a company owner can import chemical GRVs into this sheet.
+          </p>}
+          {!grvLoading && !grvError && canEdit && grvs.length === 0 && <p className="text-sm text-slate-600" role="status">
+            No confirmed chemical GRVs were found for {month}. In GRV, mark the receipt as Raw material and Chemical, enter capacity in kg, then confirm it.
+          </p>}
+          {!grvLoading && !grvError && canEdit && grvs.length > 0 && availableGrvs.length === 0 && <p className="text-sm text-slate-600" role="status">
+            All confirmed chemical GRVs for {month} are already included in this sheet.
+          </p>}
           {grvError && <p className="text-sm text-red-700" role="alert">
             Could not load GRVs: {grvError}
             <button type="button" className="ml-2 font-semibold underline" onClick={() => setGrvReload((value) => value + 1)}>Retry</button>

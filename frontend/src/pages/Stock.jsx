@@ -47,6 +47,7 @@ export default function Stock() {
   const [showHist, setShowHist] = useState(false);
   const [showProductIds, setShowProductIds] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [updatingRightStock, setUpdatingRightStock] = useState(false);
   const [downloadingRangeReport, setDownloadingRangeReport] = useState(false);
   const [valueZone, setValueZone] = useState(1);
 
@@ -102,6 +103,32 @@ export default function Stock() {
       toast.error(error instanceof Error ? error.message : "Could not download the stock PDF");
     } finally {
       setDownloadingRangeReport(false);
+    }
+  };
+
+  const updateRightStock = async () => {
+    if (busy || updatingRightStock) return;
+    const confirmed = window.confirm(
+      "Set the listed SuperIQFoam product sizes to the stock quantities you provided? "
+      + "This records adjustment movements and preserves invoices and production history. "
+      + "Negative quantities will remain as backorders. "
+      + "The listed MIX-COLOR sizes total 4,749, not the stated 4,809; all listed mattress rows total 5,251, not 5,311. "
+      + "The button applies the quantities by size, not the inconsistent summary totals.",
+    );
+    if (!confirmed) return;
+    setUpdatingRightStock(true);
+    try {
+      const result = await api.post("/stock/update-right-stock", {});
+      toast.success(
+        `Stock updated: ${result.adjusted_items} adjustment(s), ${result.created_items} new item(s). `
+        + `${result.duplicate_records_zeroed} duplicate record(s) zeroed without deleting rows. `
+        + `Mattress total from the listed sizes: ${result.net_mattress_stock}.`,
+      );
+      load();
+    } catch (error) {
+      toast.error(`Could not update right stock: ${apiError(error)}`);
+    } finally {
+      setUpdatingRightStock(false);
     }
   };
 
@@ -290,6 +317,17 @@ export default function Stock() {
           {addProductAction}
           {isSuperIqFoam && (
             <>
+              {user?.is_primary_owner && user?.is_owner && (
+                <Btn
+                  type="button"
+                  variant="outline"
+                  onClick={updateRightStock}
+                  disabled={updatingRightStock || busy || list === null}
+                  data-testid="update-right-stock"
+                >
+                  {updatingRightStock ? "Updating..." : "UPDATE RIGHT STOCK"}
+                </Btn>
+              )}
               <Btn
                 type="button"
                 onClick={() => downloadRangeReport()}

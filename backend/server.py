@@ -7392,6 +7392,82 @@ class StockIn(BaseModel):
         return value
 
 
+RIGHT_STOCK_UPDATE_ITEMS = [
+    ("Simple", "760x50", 150),
+    ("Simple", "760x75", 305),
+    ("Simple", "760x100", 200),
+    ("Simple", "760x120", 410),
+    ("Simple", "760x150", 120),
+    ("Simple", "910x50", 345),
+    ("Simple", "910x75", 535),
+    ("Simple", "910x100", 420),
+    ("Simple", "910x120", 340),
+    ("Simple", "910x150", 170),
+    ("Simple", "1070x50", 175),
+    ("Simple", "1070x75", 340),
+    ("Simple", "1070x100", 320),
+    ("Simple", "1070x120", 335),
+    ("Simple", "1070x150", 80),
+    ("Simple", "1370x50", 110),
+    ("Simple", "1370x75", 99),
+    ("Simple", "1370x100", 185),
+    ("Simple", "1370x120", 5),
+    ("Simple", "1370x150", 105),
+    ("Ribbon Black", "760x100", 25),
+    ("Ribbon Black", "760x120", 0),
+    ("Ribbon Black", "760x150", 0),
+    ("Ribbon Black", "910x100", 0),
+    ("Ribbon Black", "910x120", 45),
+    ("Ribbon Black", "910x150", 0),
+    ("Ribbon Black", "1070x100", 115),
+    ("Ribbon Black", "1070x120", 85),
+    ("Ribbon Black", "1070x150", -20),
+    ("Ribbon Black", "1370x100", 0),
+    ("Ribbon Black", "1370x120", -10),
+    ("Ribbon Black", "1370x150", 0),
+    ("Ribbon Pink", "760x100", 20),
+    ("Ribbon Pink", "760x120", 0),
+    ("Ribbon Pink", "760x150", 0),
+    ("Ribbon Pink", "910x100", 55),
+    ("Ribbon Pink", "910x120", 10),
+    ("Ribbon Pink", "910x150", 0),
+    ("Ribbon Pink", "1070x100", 25),
+    ("Ribbon Pink", "1070x120", 52),
+    ("Ribbon Pink", "1070x150", 0),
+    ("Ribbon Pink", "1370x100", 25),
+    ("Ribbon Pink", "1370x120", 35),
+    ("Ribbon Pink", "1370x150", 0),
+    ("Candy", "760x100", 10),
+    ("Candy", "760x120", 0),
+    ("Candy", "760x150", 0),
+    ("Candy", "910x100", 5),
+    ("Candy", "910x120", 0),
+    ("Candy", "910x150", 0),
+    ("Candy", "1070x100", 0),
+    ("Candy", "1070x120", 10),
+    ("Candy", "1070x150", 0),
+    ("Candy", "1370x100", 0),
+    ("Candy", "1370x120", 0),
+    ("Candy", "1370x150", 0),
+    ("Strong Boy", "760x125", 0),
+    ("Strong Boy", "910x125", 0),
+    ("Strong Boy", "1070x125", 0),
+    ("Strong Boy", "1370x125", 15),
+    ("Uncovered", "910x100", 0),
+    ("Uncovered", "1070x100", 0),
+    ("White Drum", "1000L", -12),
+]
+RIGHT_STOCK_PRODUCT_ALIASES = {
+    "simple": {"simple", "standard", "simplemixcolor", "mixcolor"},
+    "ribbon black": {"ribbon black", "ribbon balck", "black"},
+    "ribbon pink": {"ribbon pink", "ribbon"},
+    "strong boy": {"strong boy"},
+    "uncovered": {"uncovered", "uncovered blue 16 density", "uncovered (blue 16 density)"},
+    "white drum": {"white drum"},
+    "candy": {"candy"},
+}
+
+
 def valid_ean13(value):
     if not isinstance(value, str) or not re.fullmatch(r"[0-9]{13}", value):
         return False
@@ -8375,6 +8451,166 @@ async def get_stock(user=Depends(get_current_user)):
     return [stock_for_user(item, user) for item in items]
 
 
+def right_stock_product_key(product):
+    return re.sub(r"[^a-z0-9]", "", str(product or "").casefold())
+
+
+def right_stock_size_key(size):
+    return re.sub(r"\s+", "", str(size or "")).casefold()
+
+
+def match_right_stock_item(stock, product, size):
+    aliases = RIGHT_STOCK_PRODUCT_ALIASES[product.casefold()]
+    return (
+        right_stock_product_key(stock.get("product")) in {
+            right_stock_product_key(alias) for alias in aliases
+        }
+        and right_stock_size_key(stock.get("size")) == right_stock_size_key(size)
+    )
+
+
+def right_stock_products_equivalent(left, right):
+    left_key = right_stock_product_key(left)
+    right_key = right_stock_product_key(right)
+    if left_key == right_key:
+        return True
+    for aliases in RIGHT_STOCK_PRODUCT_ALIASES.values():
+        alias_keys = {right_stock_product_key(alias) for alias in aliases}
+        if left_key in alias_keys and right_key in alias_keys:
+            return True
+    return False
+
+
+def same_stock_identity(stock, product, size, company_id):
+    if company_id == DEFAULT_COMPANY_ID:
+        return (
+            right_stock_products_equivalent(stock.get("product"), product)
+            and right_stock_size_key(stock.get("size")) == right_stock_size_key(size)
+        )
+    return (
+        str(stock.get("product", "")).strip().casefold() == str(product or "").strip().casefold()
+        and str(stock.get("size", "")).strip().casefold() == str(size or "").strip().casefold()
+    )
+
+
+async def find_stock_by_identity(product, size, company_id, *, exclude_id=None):
+    matches = [
+        item for item in await listall("stock")
+        if item.get("id") != exclude_id
+        and same_stock_identity(item, product, size, company_id)
+    ]
+    return max(matches, key=lambda item: str(item.get("created_at") or ""), default=None)
+
+
+def validate_right_stock_matches(stock_items):
+    matches = []
+    for product, size, target_quantity in RIGHT_STOCK_UPDATE_ITEMS:
+        found = [
+            item for item in stock_items
+            if match_right_stock_item(item, product, size)
+        ]
+        matches.append((product, size, target_quantity, found))
+    return matches
+
+
+@api.post("/stock/update-right-stock")
+async def update_right_stock(user=Depends(get_current_user)):
+    company_id = user.get("_active_company_id") or user.get("company_id")
+    if company_id != DEFAULT_COMPANY_ID:
+        raise HTTPException(403, "Right stock update is only available in SuperIQFoam")
+    require_global_owner(user)
+
+    company_context = active_company_id.set(DEFAULT_COMPANY_ID)
+    try:
+        stock_items = await listall("stock")
+        matches = validate_right_stock_matches(stock_items)
+        existing_ids = [
+            item["id"]
+            for _, _, _, records in matches
+            for item in records
+        ]
+        async with StockLock(existing_ids):
+            stock_items = await listall("stock")
+            matches = validate_right_stock_matches(stock_items)
+            movements_by_stock = await stock_movements_for_stock_ids(
+                [
+                    item["id"]
+                    for _, _, _, records in matches
+                    for item in records
+                ]
+            )
+            updated_count = 0
+            created_count = 0
+            changed_count = 0
+            duplicate_records_zeroed = 0
+            for product, size, target_quantity, records in matches:
+                if records:
+                    primary = records[0]
+                    for candidate in records[1:]:
+                        if str(candidate.get("created_at") or "") > str(primary.get("created_at") or ""):
+                            primary = candidate
+                    stock_targets = [(primary, target_quantity)]
+                    stock_targets.extend((item, 0) for item in records if item is not primary)
+                    duplicate_records_zeroed += len(records) - 1
+                else:
+                    primary = await insert("stock", {
+                        "product": product,
+                        "size": size,
+                        "opening": 0,
+                        "threshold": 0,
+                    })
+                    created_count += 1
+                    movements_by_stock[primary["id"]] = []
+                    stock_targets = [(primary, target_quantity)]
+                for stock, desired_quantity in stock_targets:
+                    current = apply_stock_movements(
+                        stock,
+                        movements_by_stock.get(stock["id"], []),
+                    )["current"]
+                    delta = r2(desired_quantity - current)
+                    if delta:
+                        reason = "UPDATE RIGHT STOCK"
+                        movement = await post_movement(
+                            stock,
+                            "adjustment_in" if delta > 0 else "adjustment_out",
+                            abs(delta),
+                            user,
+                            reason=reason,
+                            reference="SuperIQFoam inventory correction",
+                            notes=(
+                                f"Set count to {desired_quantity} from the confirmed stock count list."
+                                if desired_quantity else
+                                "Zeroed duplicate stock record without deleting it or its history."
+                            ),
+                            allow_negative=True,
+                        )
+                        await log_audit(
+                            "stock_movement",
+                            movement["id"],
+                            "posted",
+                            user,
+                            after=movement,
+                            reason=reason,
+                        )
+                        changed_count += 1
+                updated_count += 1
+
+            totals_by_product = {}
+            for product, _, quantity in RIGHT_STOCK_UPDATE_ITEMS:
+                if product != "White Drum":
+                    totals_by_product[product] = totals_by_product.get(product, 0) + quantity
+            return {
+                "updated_items": updated_count,
+                "created_items": created_count,
+                "adjusted_items": changed_count,
+                "duplicate_records_zeroed": duplicate_records_zeroed,
+                "totals_by_product": totals_by_product,
+                "net_mattress_stock": sum(totals_by_product.values()),
+            }
+    finally:
+        active_company_id.reset(company_context)
+
+
 @api.post("/stock")
 async def add_stock(body: StockIn, user=Depends(get_current_user)):
     data = body.model_dump()
@@ -8389,11 +8625,10 @@ async def add_stock(body: StockIn, user=Depends(get_current_user)):
         raise HTTPException(400, "Product and size are required")
     if not can_view_stock_costs(user):
         data.pop("unit_cost", None)
-    for item in await listall("stock"):
-        if (str(item.get("product", "")).strip().casefold() == data["product"].casefold()
-                and str(item.get("size", "")).strip().casefold() == data["size"].casefold()):
-            raise HTTPException(400, "This product and size already exist in stock")
-    unified = uses_unified_price_list(active_company_id.get())
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    if await find_stock_by_identity(data["product"], data["size"], company_id):
+        raise HTTPException(400, "This product and size already exist in stock")
+    unified = uses_unified_price_list(company_id)
     category, price_zone, existing_price = None, None, None
     if selling_price is not None:
         category = data["product"]
@@ -8463,11 +8698,10 @@ async def edit_stock(sid: str, body: StockIn, user=Depends(get_current_user)):
     d["size"] = d["size"].strip()
     if not d["product"] or not d["size"]:
         raise HTTPException(400, "Product and size are required")
-    clash = await db.stock.find_one({
-        "id": {"$ne": sid},
-        "product": {"$regex": f"^\\s*{re.escape(d['product'])}\\s*$", "$options": "i"},
-        "size": {"$regex": f"^\\s*{re.escape(d['size'])}\\s*$", "$options": "i"},
-    }, {"_id": 0})
+    company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    clash = await find_stock_by_identity(
+        d["product"], d["size"], company_id, exclude_id=sid,
+    )
     if clash and clash.get("id") != sid:
         raise HTTPException(400, "This product and size already exist in stock")
     if not can_view_stock_costs(user):
@@ -13032,10 +13266,15 @@ async def _purchase_order_data(body):
         elif line.stock_id:
             raise HTTPException(400, "A selected stock item no longer exists")
         else:
-            stock = await db.stock.find_one({
-                "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
-                "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
-            }, {"_id": 0})
+            company_id = active_company_id.get() or DEFAULT_COMPANY_ID
+            stock = (
+                await find_stock_by_identity(product, size, company_id)
+                if company_id == DEFAULT_COMPANY_ID else
+                await db.stock.find_one({
+                    "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+                    "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
+                }, {"_id": 0})
+            )
             if not stock:
                 stock = await insert("stock", {"product": product, "size": size, "opening": 0, "threshold": 5})
         items.append({
@@ -13808,19 +14047,29 @@ async def _grv_items_from_request(
                 if new_product_key in new_product_keys:
                     raise HTTPException(400, "A new product and size can appear only once in the GRV")
                 new_product_keys.add(new_product_key)
-                stock = await db.stock.find_one({
-                    "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
-                    "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
-                }, {"_id": 0})
+                company_id = active_company_id.get() or DEFAULT_COMPANY_ID
+                stock = (
+                    await find_stock_by_identity(product, size, company_id)
+                    if company_id == DEFAULT_COMPANY_ID else
+                    await db.stock.find_one({
+                        "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+                        "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
+                    }, {"_id": 0})
+                )
                 if stock:
                     raise HTTPException(400, "This product and size already exist in stock; select the existing product")
             else:
                 stock = await db.stock.find_one({"id": stock_id}, {"_id": 0}) if stock_id else None
             if not is_new_product and not stock and product and size:
-                stock = await db.stock.find_one({
-                    "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
-                    "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
-                }, {"_id": 0})
+                company_id = active_company_id.get() or DEFAULT_COMPANY_ID
+                stock = (
+                    await find_stock_by_identity(product, size, company_id)
+                    if company_id == DEFAULT_COMPANY_ID else
+                    await db.stock.find_one({
+                        "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+                        "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
+                    }, {"_id": 0})
+                )
             if not is_new_product and not stock:
                 raise HTTPException(400, "Select a valid stock product for every GRV line")
             if stock:
@@ -13882,10 +14131,15 @@ async def _materialize_grv_new_products(grv, user):
             {"_id": 0},
         )
         if not existing:
-            duplicate = await db.stock.find_one({
-                "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
-                "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
-            }, {"_id": 0})
+            company_id = user.get("_active_company_id") or DEFAULT_COMPANY_ID
+            duplicate = (
+                await find_stock_by_identity(product, size, company_id)
+                if company_id == DEFAULT_COMPANY_ID else
+                await db.stock.find_one({
+                    "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+                    "size": {"$regex": f"^{re.escape(size)}$", "$options": "i"},
+                }, {"_id": 0})
+            )
             if duplicate:
                 raise HTTPException(
                     409,
