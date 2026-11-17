@@ -114,7 +114,8 @@ export default function InvoiceEditor({ express = false }) {
   const [inv, setInv] = useState({
     customer_id: "", customer_name: "", customer_phone: "", customer_city: "", date: today(), due_date: today(), zone: 1,
     payment_terms: defaultInvoicePaymentTerms(user?.company_id), reference: "", notes: "", items: [makeEmptyItem()],
-    discount: 0, extra_charges: 0, delivery_fee: 0, made_by: "",
+    discount: 0, extra_charges: 0, delivery_fee: 0,
+    made_by: user?.is_worker ? (user.name || user.username || user.email || "") : "",
     client_number: "", assigned_driver_id: "", assigned_driver_name: "",
     idempotency_key: newKey(), tax_enabled: false, tax_rate: 15, status: "draft",
     amount_paid: 0, number: null, include_previous_balance: includePreviousInvoiceBalanceByDefault(user?.company_id),
@@ -146,6 +147,15 @@ export default function InvoiceEditor({ express = false }) {
   const deliveryNoteRef = useRef(null);
   const locked = !!id && !editing;
   const invoiceItemPriceLocked = user?.is_worker && !user?.can_edit_invoice_prices;
+
+  useEffect(() => {
+    if (!id && user?.is_worker) {
+      const madeBy = user.name || user.username || user.email || "";
+      setInv((current) => current.made_by === madeBy
+        ? current
+        : { ...current, made_by: madeBy });
+    }
+  }, [id, user?.email, user?.is_worker, user?.name, user?.username]);
 
   const prepareForEdit = (invoice) => invoice.opening_balance
     ? { ...invoice, opening_balance: false, reference: "", notes: "", items: [makeEmptyItem()] }
@@ -1230,7 +1240,7 @@ export default function InvoiceEditor({ express = false }) {
                     {paymentTermOptions.map((t) => <option key={t}>{t}</option>)}
                   </Select></div>
                   {!id ? <>
-                    <Input label="Made By *" value={inv.made_by || ""} onChange={(event) => setInv({ ...inv, made_by: event.target.value })} required data-testid="invoice-made-by" />
+                    <Input label="Made By *" value={inv.made_by || ""} onChange={(event) => setInv({ ...inv, made_by: event.target.value })} readOnly={user?.is_worker} required data-testid="invoice-made-by" />
                     <Select label="Assigned Driver" value={inv.assigned_driver_id || ""} onChange={(event) => {
                       const driver = drivers.find((item) => item.id === event.target.value);
                       setInv({ ...inv, assigned_driver_id: event.target.value, assigned_driver_name: driver?.name || "" });

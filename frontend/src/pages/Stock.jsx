@@ -48,6 +48,8 @@ export default function Stock() {
   const [showProductIds, setShowProductIds] = useState(false);
   const [busy, setBusy] = useState(false);
   const [updatingRightStock, setUpdatingRightStock] = useState(false);
+  const [dailyCountSheet, setDailyCountSheet] = useState(null);
+  const [loadingDailyCount, setLoadingDailyCount] = useState(false);
   const [downloadingRangeReport, setDownloadingRangeReport] = useState(false);
   const [valueZone, setValueZone] = useState(1);
 
@@ -106,27 +108,89 @@ export default function Stock() {
     }
   };
 
-  const updateRightStock = async () => {
+  const openDailyCountSheet = async () => {
+    if (busy || updatingRightStock) return;
+    setUpdatingRightStock(true);
+    setLoadingDailyCount(true);
+    try {
+      const report = await api.get("/stock/daily-reconciliation");
+      setDailyCountSheet({
+        ...report,
+        rows: report.rows.map((row) => ({
+          ...row,
+          made_today_input: row.made_today == null ? "" : String(row.made_today),
+          physical_count: row.quantity == null ? "" : String(row.quantity),
+        })),
+      });
+    } catch (error) {
+      toast.error(`Could not load today's stock count: ${apiError(error)}`);
+    } finally {
+      setUpdatingRightStock(false);
+      setLoadingDailyCount(false);
+    }
+  };
+
+  const submitDailyCountSheet = async () => {
+    if (!dailyCountSheet || updatingRightStock) return;
+    const counts = dailyCountSheet.rows.map((row) => ({
+      product: row.product,
+      size: row.size,
+      made_today: row.made_today_input === "" ? 0 : Number(row.made_today_input),
+      quantity: row.physical_count === "" ? null : Number(row.physical_count),
+    }));
+    if (counts.some((line) =>
+      !Number.isFinite(line.made_today) || line.made_today < 0
+      || (line.quantity !== null && (!Number.isFinite(line.quantity) || line.quantity < 0))
+    )) {
+      toast.error("Enter valid non-negative quantities for today's production and any physical counts");
+      return;
+    }
+    const confirmed = window.confirm(
+      "Compile today's production quantities? Production will be recorded in the stock ledger. Physical counts are optional; if entered, differences will be recorded as audited adjustments.",
+    );
+    if (!confirmed) return;
+    setUpdatingRightStock(true);
+    try {
+      const report = await api.post("/stock/daily-reconciliation", {
+        report_date: dailyCountSheet.report_date,
+        counts,
+      });
+      setDailyCountSheet({
+        ...report,
+        rows: report.rows.map((row) => ({
+          ...row,
+          made_today_input: row.made_today == null ? "" : String(row.made_today),
+          physical_count: row.quantity == null ? "" : String(row.quantity),
+        })),
+      });
+      toast.success("Today's production and stock update were compiled");
+      load();
+    } catch (error) {
+      toast.error(`Could not reconcile today's stock: ${apiError(error)}`);
+    }
+    finally { setUpdatingRightStock(false); }
+  };
+
+  const updateSuppliedRightStock = async () => {
     if (busy || updatingRightStock) return;
     const confirmed = window.confirm(
-      "Set the listed SuperIQFoam product sizes to the stock quantities you provided? "
-      + "This records adjustment movements and preserves invoices and production history. "
-      + "Negative quantities will remain as backorders. "
-      + "The listed MIX-COLOR sizes total 4,749, not the stated 4,809; all listed mattress rows total 5,251, not 5,311. "
-      + "The button applies the quantities by size, not the inconsistent summary totals.",
+      "Apply the supplied SuperIQFoam stock quantities by category and size? "
+      + "This records audit-tracked stock movements and keeps all invoices and existing history. "
+      + "Negative quantities (Ribbon Black backorders and White Drum) will be retained. "
+      + "The per-size list will be used; its printed summary totals do not match the listed lines.",
     );
     if (!confirmed) return;
     setUpdatingRightStock(true);
     try {
       const result = await api.post("/stock/update-right-stock", {});
       toast.success(
-        `Stock updated: ${result.adjusted_items} adjustment(s), ${result.created_items} new item(s). `
-        + `${result.duplicate_records_zeroed} duplicate record(s) zeroed without deleting rows. `
-        + `Mattress total from the listed sizes: ${result.net_mattress_stock}.`,
+        `Supplied stock applied: ${result.adjusted_items} adjustment(s), `
+        + `${result.created_items} new size(s), ${result.duplicate_records_zeroed} duplicate row(s) set to zero. `
+        + `Mattress quantity from listed sizes: ${result.net_mattress_stock}.`,
       );
       load();
     } catch (error) {
-      toast.error(`Could not update right stock: ${apiError(error)}`);
+      toast.error(`Could not apply supplied stock: ${apiError(error)}`);
     } finally {
       setUpdatingRightStock(false);
     }
@@ -284,13 +348,50 @@ export default function Stock() {
       {showStockSearch ? "Close search" : "Search stock"}
     </Btn>
   );
-  const productIdsAction = <Btn variant="outline" onClick={() => setShowProductIds(true)} data-testid="product-identification-btn"><Boxes size={16} /> Product IDs & Labels</Btn>;
+  const productIdsAction = <Btn variant="outline" onClick={() => setShowProductIds(true)} data-testid="product-identification-btn"><Boxes size={16} /> Product IDs</Btn>;
   const ledgerAction = <Btn variant="outline" onClick={() => { setShowHist(true); void loadMovements(); }} data-testid="stock-history-btn"><History size={16} /> Ledger</Btn>;
   const addProductAction = <Btn onClick={() => setAddModal({ product: "", category: "", size: "", opening: 0, threshold: 5, selling_price: "", zone: 1 })} data-testid="add-stock-btn"><Plus size={16} /> Add Product</Btn>;
 
   return (
     <div>
       <PageHeader title="Finished Stock" subtitle="Calculated from the stock movement ledger" />
+
+      {isSuperIqFoam && (
+        <div className="no-print mb-5 flex flex-wrap items-center gap-2 border-b border-slate-200 pb-4" data-testid="stock-update-actions">
+          {user?.is_primary_owner && user?.is_owner && (
+            <>
+              <Btn
+                type="button"
+                onClick={openDailyCountSheet}
+                disabled={updatingRightStock || busy || list === null}
+                data-testid="update-daily-stock"
+              >
+                {loadingDailyCount ? "Loading..." : "COMPILE STOCK UPDATE"}
+              </Btn>
+              <Btn
+                type="button"
+                variant="outline"
+                onClick={updateSuppliedRightStock}
+                disabled={updatingRightStock || busy || list === null}
+                data-testid="update-right-stock"
+              >
+                {updatingRightStock && !loadingDailyCount ? "Updating..." : "UPDATE STOCK"}
+              </Btn>
+            </>
+          )}
+          {productIdsAction}
+          {ledgerAction}
+          <Btn
+            type="button"
+            variant="outline"
+            onClick={() => downloadRangeReport({ blank: true })}
+            disabled={downloadingRangeReport}
+            data-testid="download-stock-count-sheet"
+          >
+            <Download size={16} /> {downloadingRangeReport ? "Preparing..." : "Download Stock Calculating Sheet"}
+          </Btn>
+        </div>
+      )}
 
       <div className="no-print -mt-3 mb-4 flex flex-wrap items-end gap-3">
         <div className="grid w-full max-w-2xl flex-1 gap-3 sm:grid-cols-2">
@@ -312,22 +413,9 @@ export default function Stock() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {searchAction}
-          {productIdsAction}
-          {ledgerAction}
           {addProductAction}
           {isSuperIqFoam && (
             <>
-              {user?.is_primary_owner && user?.is_owner && (
-                <Btn
-                  type="button"
-                  variant="outline"
-                  onClick={updateRightStock}
-                  disabled={updatingRightStock || busy || list === null}
-                  data-testid="update-right-stock"
-                >
-                  {updatingRightStock ? "Updating..." : "UPDATE RIGHT STOCK"}
-                </Btn>
-              )}
               <Btn
                 type="button"
                 onClick={() => downloadRangeReport()}
@@ -336,19 +424,125 @@ export default function Stock() {
               >
                 <Download size={16} /> {downloadingRangeReport ? "Preparing..." : "Download Current Stock PDF"}
               </Btn>
-              <Btn
-                type="button"
-                variant="outline"
-                onClick={() => downloadRangeReport({ blank: true })}
-                disabled={downloadingRangeReport}
-                data-testid="download-stock-count-sheet"
-              >
-                <Download size={16} /> {downloadingRangeReport ? "Preparing..." : "Download Stock Calculation Sheet"}
-              </Btn>
             </>
           )}
         </div>
       </div>
+
+      <Modal
+        open={!!dailyCountSheet}
+        onClose={() => {
+          if (!updatingRightStock) setDailyCountSheet(null);
+        }}
+        title={`Compile Stock Update — ${dailyCountSheet?.report_date || ""}`}
+        wide
+      >
+        {dailyCountSheet && (
+          <div className="flex min-h-0 flex-col">
+            <div className="shrink-0 space-y-3 border-b border-border/70 px-4 py-4 sm:px-6">
+              <p className="text-sm text-slate-600">
+                Enter the number of pieces made today for each product and size. The stock ID and book balance are shown alongside today's invoices, dispatches, other movements, and receipts. Physical count is optional; when entered, it reconciles the ledger to the actual count.
+              </p>
+              {dailyCountSheet.already_submitted && (
+                <p className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+                  A production update has already been saved today. Saving again adjusts the production entry to the new total instead of double-counting it.
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                <div className="rounded-md bg-slate-50 p-2">Invoice out: <strong>{dailyCountSheet.activity.invoice_out}</strong></div>
+                <div className="rounded-md bg-slate-50 p-2">Dispatched: <strong>{dailyCountSheet.activity.dispatch_out}</strong></div>
+                <div className="rounded-md bg-slate-50 p-2">Other out: <strong>{dailyCountSheet.activity.other_out}</strong></div>
+                <div className="rounded-md bg-slate-50 p-2">Received in: <strong>{dailyCountSheet.activity.received_in}</strong></div>
+                <div className="rounded-md bg-slate-50 p-2">Made today: <strong>{dailyCountSheet.activity.production_in}</strong></div>
+              </div>
+            </div>
+            <div className="min-h-0 overflow-auto px-4 py-3 sm:px-6">
+              <table className="w-full min-w-[1080px] border-collapse text-left text-xs">
+                <thead className="sticky top-0 z-10 bg-slate-100 text-slate-600">
+                  <tr>
+                    <th className="p-2">Category</th>
+                    <th className="p-2">Size</th>
+                    <th className="p-2">Product ID</th>
+                    <th className="p-2 text-right">Book balance</th>
+                    <th className="p-2">Pieces made today</th>
+                    <th className="p-2 text-right">Invoice out</th>
+                    <th className="p-2 text-right">Dispatched</th>
+                    <th className="p-2 text-right">Other out</th>
+                    <th className="p-2 text-right">Received in</th>
+                    <th className="p-2">Physical count (optional)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dailyCountSheet.rows.map((row) => (
+                    <tr key={row.key} className="border-b border-slate-100">
+                      <td className="p-2 font-medium">{row.product}</td>
+                      <td className="p-2">{row.size}</td>
+                      <td className="p-2 font-mono">{row.product_id || "—"}</td>
+                      <td className="p-2 text-right font-mono">{row.book_quantity}</td>
+                      <td className="p-2">
+                        <Input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={row.made_today_input}
+                          onChange={(event) => setDailyCountSheet((current) => ({
+                            ...current,
+                            rows: current.rows.map((item) => item.key === row.key
+                              ? { ...item, made_today_input: event.target.value }
+                              : item),
+                          }))}
+                          aria-label={`Pieces made today for ${row.product} ${row.size}`}
+                          data-testid={`made-today-${row.key}`}
+                          className="min-w-24 px-2 py-1.5 text-right"
+                        />
+                      </td>
+                      <td className="p-2 text-right font-mono">{row.invoice_out}</td>
+                      <td className="p-2 text-right font-mono">{row.dispatch_out}</td>
+                      <td className="p-2 text-right font-mono">{row.other_out}</td>
+                      <td className="p-2 text-right font-mono">{row.received_in}</td>
+                      <td className="p-2">
+                        <Input
+                          type="number"
+                          min="0"
+                          step="any"
+                          value={row.physical_count}
+                          onChange={(event) => setDailyCountSheet((current) => ({
+                            ...current,
+                            rows: current.rows.map((item) => item.key === row.key
+                              ? { ...item, physical_count: event.target.value }
+                              : item),
+                          }))}
+                          aria-label={`Optional physical count for ${row.product} ${row.size}`}
+                          data-testid={`physical-count-${row.key}`}
+                          className="min-w-24 px-2 py-1.5 text-right"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex shrink-0 justify-end gap-2 border-t border-border/70 px-4 py-3 sm:px-6">
+              <Btn
+                type="button"
+                variant="outline"
+                disabled={updatingRightStock}
+                onClick={() => setDailyCountSheet(null)}
+              >
+                Cancel
+              </Btn>
+              <Btn
+                type="button"
+                disabled={updatingRightStock || dailyCountSheet.rows.length === 0}
+                onClick={submitDailyCountSheet}
+                data-testid="save-daily-stock-count"
+              >
+                {updatingRightStock ? "Saving..." : "Save & Update Stock"}
+              </Btn>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       <Card className="p-4 mb-6 bg-slate-50 border-slate-200">
         <div className="mb-3 flex items-center justify-between gap-3">

@@ -213,6 +213,12 @@ def worker_restrictions_apply(user):
     return user.get("is_worker") and user.get("_active_role") not in ("admin", "owner")
 
 
+def worker_display_name(user):
+    return str(
+        user.get("name") or user.get("username") or user.get("email") or ""
+    ).strip()
+
+
 def can_view_stock_costs(user):
     return user.get("role") == "owner" or user.get("_active_role") == "owner"
 
@@ -6448,7 +6454,11 @@ async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
             if existing.get("made_by_user_id"):
                 inv["made_by_user_id"] = existing["made_by_user_id"]
     else:
-        made_by = (body.made_by or "").strip()
+        made_by = (
+            worker_display_name(user)
+            if user and user.get("is_worker")
+            else (body.made_by or "").strip()
+        )
         if not made_by:
             raise HTTPException(400, "Made By is required")
         inv["made_by"] = made_by
@@ -8456,7 +8466,7 @@ def right_stock_product_key(product):
 
 
 def right_stock_size_key(size):
-    return re.sub(r"\s+", "", str(size or "")).casefold()
+    return re.sub(r"\s+", "", str(size or "")).casefold().replace("×", "x").replace("/", "x")
 
 
 def match_right_stock_item(stock, product, size):
@@ -8502,6 +8512,22 @@ async def find_stock_by_identity(product, size, company_id, *, exclude_id=None):
     return max(matches, key=lambda item: str(item.get("created_at") or ""), default=None)
 
 
+def right_stock_canonical_product(product):
+    product_key = right_stock_product_key(product)
+    for canonical, aliases in RIGHT_STOCK_PRODUCT_ALIASES.items():
+        if product_key in {right_stock_product_key(alias) for alias in aliases}:
+            return {
+                "simple": "Simple",
+                "ribbon black": "Ribbon Black",
+                "ribbon pink": "Ribbon Pink",
+                "strong boy": "Strong Boy",
+                "uncovered": "Uncovered",
+                "white drum": "White Drum",
+                "candy": "Candy",
+            }[canonical]
+    return " ".join(str(product or "").split())
+
+
 def validate_right_stock_matches(stock_items):
     matches = []
     for product, size, target_quantity in RIGHT_STOCK_UPDATE_ITEMS:
@@ -8511,6 +8537,165 @@ def validate_right_stock_matches(stock_items):
         ]
         matches.append((product, size, target_quantity, found))
     return matches
+
+
+def daily_stock_identity_key(product, size):
+    return f"{right_stock_product_key(right_stock_canonical_product(product))}|{right_stock_size_key(size)}"
+
+
+class DailyStockCountLine(BaseModel):
+    product: str = Field(min_length=1, max_length=120)
+    size: str = Field(min_length=1, max_length=80)
+    made_today: int = Field(default=0, ge=0)
+    quantity: Optional[float] = Field(default=None, ge=0)
+
+    @field_validator("made_today", "quantity")
+    @classmethod
+    def finite_count_quantity(cls, value):
+        if value is not None and not math.isfinite(value):
+            raise ValueError("Stock counts must be finite numbers")
+        return value
+
+
+class DailyStockReconciliationIn(BaseModel):
+    report_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    counts: List[DailyStockCountLine] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def unique_count_rows(self):
+        keys = [
+            daily_stock_identity_key(line.product, line.size)
+            for line in self.counts
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Each stock category and size can only be counted once")
+        return self
+
+
+def daily_stock_count_specs(stock_items):
+    specs = {}
+    for product, size, _quantity in RIGHT_STOCK_UPDATE_ITEMS:
+        canonical_product = right_stock_canonical_product(product)
+        key = daily_stock_identity_key(canonical_product, size)
+        specs.setdefault(key, {"product": canonical_product, "size": size, "records": []})
+    for stock in stock_items:
+        product = right_stock_canonical_product(stock.get("product"))
+        size = str(stock.get("size") or "").strip()
+        if not product or not size:
+            continue
+        key = daily_stock_identity_key(product, size)
+        specs.setdefault(key, {"product": product, "size": size, "records": []})
+        specs[key]["records"].append(stock)
+    return list(specs.values())
+
+
+def daily_stock_movement_summary(movements):
+    summary = {
+        "invoice_out": 0.0,
+        "dispatch_out": 0.0,
+        "other_out": 0.0,
+        "received_in": 0.0,
+        "production_in": 0.0,
+    }
+    for movement in movements:
+        quantity = float(movement.get("quantity") or 0)
+        direction = mov_sign(movement)
+        if movement.get("type") == "invoice" and direction < 0:
+            summary["invoice_out"] += quantity
+        elif movement.get("type") == "dispatch" and direction < 0:
+            summary["dispatch_out"] += quantity
+        elif movement.get("type") == "production":
+            summary["production_in"] += quantity * direction
+        elif direction > 0:
+            summary["received_in"] += quantity
+        else:
+            summary["other_out"] += quantity
+    return {key: r2(value) for key, value in summary.items()}
+
+
+async def daily_stock_reconciliation_data(report_date):
+    stock_items = await listall("stock")
+    specs = daily_stock_count_specs(stock_items)
+    stock_ids = [
+        stock["id"]
+        for spec in specs
+        for stock in spec["records"]
+    ]
+    movements_by_stock = await stock_movements_for_stock_ids(stock_ids)
+    movements_today = await listall("stock_movements", {"date": report_date})
+    movements_today_by_stock = {}
+    for movement in movements_today:
+        movements_today_by_stock.setdefault(movement.get("stock_id"), []).append(movement)
+
+    document_id = f"daily-stock-reconciliation:{report_date}"
+    saved = await db.stock_daily_reconciliations.find_one({"id": document_id}, {"_id": 0})
+    saved_counts = {
+        daily_stock_identity_key(line.get("product"), line.get("size")): line.get("quantity")
+        for line in (saved or {}).get("counts", [])
+    }
+    saved_production = {
+        daily_stock_identity_key(line.get("product"), line.get("size")): line.get("made_today", 0)
+        for line in (saved or {}).get("counts", [])
+    }
+    rows = []
+    summary_movements = []
+    for spec in specs:
+        row_movements = []
+        book_quantity = 0.0
+        for stock in spec["records"]:
+            stock_movements = movements_by_stock.get(stock["id"], [])
+            book_quantity += float(apply_stock_movements(dict(stock), stock_movements)["current"])
+            row_movements.extend(movements_today_by_stock.get(stock["id"], []))
+        summary_movements.extend(row_movements)
+        activity = daily_stock_movement_summary(row_movements)
+        key = daily_stock_identity_key(spec["product"], spec["size"])
+        rows.append({
+            "key": key,
+            "product": spec["product"],
+            "size": spec["size"],
+            "product_id": next(
+                (stock.get("product_id") or stock.get("code") for stock in spec["records"]
+                 if stock.get("product_id") or stock.get("code")),
+                "",
+            ),
+            "book_quantity": r2(book_quantity),
+            "quantity": saved_counts.get(key),
+            "made_today": saved_production.get(key, 0),
+            "invoice_out": activity["invoice_out"],
+            "dispatch_out": activity["dispatch_out"],
+            "other_out": activity["other_out"],
+            "received_in": activity["received_in"],
+        })
+    return {
+        "report_date": report_date,
+        "already_submitted": bool(saved),
+        "rows": rows,
+        "activity": daily_stock_movement_summary(summary_movements),
+    }
+
+
+async def get_daily_stock_reconciliation(user, report_date=None):
+    company_id = user.get("_active_company_id") or user.get("company_id")
+    if company_id != DEFAULT_COMPANY_ID:
+        raise HTTPException(403, "Daily stock reconciliation is only available in SuperIQFoam")
+    require_global_owner(user)
+    company_context = active_company_id.set(DEFAULT_COMPANY_ID)
+    try:
+        selected_date = report_date or today_str()
+        _validate_grv_date(selected_date)
+        if selected_date != today_str():
+            raise HTTPException(400, "Daily stock reconciliation is available for today only")
+        return await daily_stock_reconciliation_data(selected_date)
+    finally:
+        active_company_id.reset(company_context)
+
+
+@api.get("/stock/daily-reconciliation")
+async def get_daily_stock_reconciliation_route(
+    report_date: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    return await get_daily_stock_reconciliation(user, report_date)
 
 
 @api.post("/stock/update-right-stock")
@@ -8607,6 +8792,212 @@ async def update_right_stock(user=Depends(get_current_user)):
                 "totals_by_product": totals_by_product,
                 "net_mattress_stock": sum(totals_by_product.values()),
             }
+    finally:
+        active_company_id.reset(company_context)
+
+
+@api.post("/stock/daily-reconciliation")
+async def update_daily_stock_reconciliation(
+    body: DailyStockReconciliationIn,
+    user=Depends(get_current_user),
+):
+    company_id = user.get("_active_company_id") or user.get("company_id")
+    if company_id != DEFAULT_COMPANY_ID:
+        raise HTTPException(403, "Daily stock reconciliation is only available in SuperIQFoam")
+    require_global_owner(user)
+    _validate_grv_date(body.report_date)
+    if body.report_date != today_str():
+        raise HTTPException(400, "Daily stock reconciliation is available for today only")
+
+    company_context = active_company_id.set(DEFAULT_COMPANY_ID)
+    try:
+        initial = await daily_stock_reconciliation_data(body.report_date)
+        expected = {row["key"]: row for row in initial["rows"]}
+        submitted = {
+            daily_stock_identity_key(line.product, line.size): line
+            for line in body.counts
+        }
+        missing = sorted(set(expected) - set(submitted))
+        unexpected = sorted(set(submitted) - set(expected))
+        if missing or unexpected:
+            raise HTTPException(422, {
+                "message": "Submit a daily entry for every listed stock category and size.",
+                "missing_count": len(missing),
+                "unexpected_count": len(unexpected),
+            })
+
+        initial_stock_specs = daily_stock_count_specs(await listall("stock"))
+        existing_ids = sorted(
+            stock["id"]
+            for spec in initial_stock_specs
+            for stock in spec["records"]
+        )
+        async with StockLock(existing_ids):
+            specs = daily_stock_count_specs(await listall("stock"))
+            current_ids = sorted(
+                stock["id"]
+                for spec in specs
+                for stock in spec["records"]
+            )
+            if current_ids != existing_ids:
+                raise HTTPException(409, "Stock products changed while preparing the count sheet. Reload and retry.")
+            if {daily_stock_identity_key(spec["product"], spec["size"]) for spec in specs} != set(submitted):
+                raise HTTPException(409, "Stock categories or sizes changed while preparing the count sheet. Reload and retry.")
+
+            movements_by_stock = await stock_movements_for_stock_ids(current_ids)
+            reconciliation_id = f"daily-stock-reconciliation:{body.report_date}"
+            before_record = await db.stock_daily_reconciliations.find_one(
+                {"id": reconciliation_id}, {"_id": 0},
+            )
+            previous_made_today = {
+                daily_stock_identity_key(line.get("product"), line.get("size")):
+                    float(line.get("made_today") or 0)
+                for line in (before_record or {}).get("counts", [])
+            }
+            changed_count = 0
+            duplicate_records_zeroed = 0
+            created_count = 0
+            saved_counts = []
+            for spec in specs:
+                key = daily_stock_identity_key(spec["product"], spec["size"])
+                target_quantity = (
+                    r2(submitted[key].quantity)
+                    if submitted[key].quantity is not None else None
+                )
+                target_made_today = r2(submitted[key].made_today)
+                records = spec["records"]
+                before_quantity = sum(
+                    float(apply_stock_movements(
+                        dict(stock), movements_by_stock.get(stock["id"], []),
+                    )["current"])
+                    for stock in records
+                )
+                if records:
+                    primary = max(
+                        records,
+                        key=lambda item: (
+                            str(item.get("created_at") or ""),
+                            str(item.get("id") or ""),
+                        ),
+                    )
+                elif target_made_today > 0 or (target_quantity is not None and target_quantity > 0):
+                    primary = await insert("stock", {
+                        "product": spec["product"],
+                        "size": spec["size"],
+                        "opening": 0,
+                        "threshold": 0,
+                    })
+                    created_count += 1
+                    movements_by_stock[primary["id"]] = []
+                else:
+                    primary = None
+
+                movement_ids = []
+                production_delta = r2(target_made_today - previous_made_today.get(key, 0))
+                if primary and production_delta:
+                    movement = await post_movement(
+                        primary,
+                        "production",
+                        abs(production_delta),
+                        user,
+                        reason="Daily production count",
+                        reference=body.report_date,
+                        notes=f"Daily production count updated to {target_made_today} for {spec['product']} {spec['size']}.",
+                        direction=1 if production_delta > 0 else -1,
+                        allow_negative=True,
+                    )
+                    await log_audit(
+                        "stock_movement",
+                        movement["id"],
+                        "posted",
+                        user,
+                        after=movement,
+                        reason="Daily production count",
+                    )
+                    movements_by_stock.setdefault(primary["id"], []).append(movement)
+                    movement_ids.append(movement["id"])
+                    changed_count += 1
+
+                physical_adjustment = 0.0
+                if target_quantity is not None:
+                    stock_targets = (
+                        [(primary, target_quantity)]
+                        + [(stock, 0) for stock in records if stock is not primary]
+                    ) if primary else []
+                    duplicate_records_zeroed += max(0, len(records) - 1)
+                    for stock, desired_quantity in stock_targets:
+                        current_quantity = float(apply_stock_movements(
+                            dict(stock), movements_by_stock.get(stock["id"], []),
+                        )["current"])
+                        delta = r2(desired_quantity - current_quantity)
+                        if not delta:
+                            continue
+                        movement = await post_movement(
+                            stock,
+                            "adjustment_in" if delta > 0 else "adjustment_out",
+                            abs(delta),
+                            user,
+                            reason="Daily physical stock reconciliation",
+                            reference=body.report_date,
+                            notes=(
+                                f"Physical count set to {desired_quantity} for {spec['product']} {spec['size']}."
+                                if desired_quantity else
+                                "Duplicate stock row set to zero without deleting the row or its movement history."
+                            ),
+                            allow_negative=True,
+                        )
+                        await log_audit(
+                            "stock_movement",
+                            movement["id"],
+                            "posted",
+                            user,
+                            after=movement,
+                            reason="Daily physical stock reconciliation",
+                        )
+                        movements_by_stock.setdefault(stock["id"], []).append(movement)
+                        movement_ids.append(movement["id"])
+                        changed_count += 1
+                        physical_adjustment = r2(physical_adjustment + delta)
+
+                saved_counts.append({
+                    "product": spec["product"],
+                    "size": spec["size"],
+                    "made_today": target_made_today,
+                    "quantity": target_quantity,
+                    "book_quantity_before": r2(before_quantity),
+                    "adjustment": physical_adjustment,
+                    "movement_ids": movement_ids,
+                })
+
+            record_data = {
+                "report_date": body.report_date,
+                "counts": saved_counts,
+                "adjusted_items": changed_count,
+                "created_items": created_count,
+                "duplicate_records_zeroed": duplicate_records_zeroed,
+                "submitted_by": worker_display_name(user),
+                "submitted_by_user_id": user.get("id", ""),
+                "submitted_at": now_iso(),
+            }
+            if before_record:
+                saved_record = await update_doc(
+                    "stock_daily_reconciliations", reconciliation_id, record_data,
+                )
+            else:
+                saved_record = await insert(
+                    "stock_daily_reconciliations",
+                    {"id": reconciliation_id, **record_data},
+                )
+            await log_audit(
+                "stock_daily_reconciliation",
+                reconciliation_id,
+                "submitted",
+                user,
+                before=before_record,
+                after=saved_record,
+                reason="Daily physical stock reconciliation",
+            )
+        return await daily_stock_reconciliation_data(body.report_date)
     finally:
         active_company_id.reset(company_context)
 
@@ -14293,7 +14684,11 @@ async def create_grv(body: GRVIn, user=Depends(get_current_user)):
         "purchase_order_reference": purchase_order.get("reference", "") if purchase_order else "",
         "delivery_note_number": (body.delivery_note_number or "").strip(),
         "received_date": body.received_date,
-        "received_by": (body.received_by or user.get("name") or user["email"]).strip(),
+        "received_by": (
+            worker_display_name(user)
+            if user.get("is_worker")
+            else (body.received_by or user.get("name") or user["email"]).strip()
+        ),
         "warehouse": (body.warehouse or "").strip(),
         "notes": (body.notes or "").strip(),
         "items": items,
@@ -14348,7 +14743,11 @@ async def edit_grv(grv_id: str, body: GRVIn, user=Depends(get_current_user)):
         "purchase_order_reference": purchase_order.get("reference", "") if purchase_order else "",
         "delivery_note_number": (body.delivery_note_number or "").strip(),
         "received_date": body.received_date,
-        "received_by": (body.received_by or user.get("name") or user["email"]).strip(),
+        "received_by": (
+            worker_display_name(user)
+            if user.get("is_worker")
+            else (body.received_by or user.get("name") or user["email"]).strip()
+        ),
         "warehouse": (body.warehouse or "").strip(),
         "notes": (body.notes or "").strip(),
         "items": items,

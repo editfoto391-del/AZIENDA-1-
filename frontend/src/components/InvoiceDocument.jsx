@@ -95,11 +95,33 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
           ))}
         </div>
       </div>}
-      {rows.length > 0 && <table className="w-full mt-3 border-collapse border border-slate-300 text-[13px]">
-        <thead style={{ display: "table-header-group" }}><tr className="bg-slate-800 text-left text-white">{["#", settings.freeform_invoice_items ? "Product / Service" : "Category", ...(!settings.freeform_invoice_items ? ["Size"] : []), "Qty", "Unit Price", "Total"].map((h, i) => <th key={h} className={`px-2 py-2 font-bold ${i >= (settings.freeform_invoice_items ? 2 : 3) ? "text-right" : ""}`}>{h}</th>)}</tr></thead>
+      {rows.length > 0 && <table
+        className="mt-3 w-full border-collapse border border-slate-300 text-[13px]"
+        style={{ width: "100%", tableLayout: "fixed" }}
+        data-testid="invoice-items-table"
+      >
+        <colgroup>
+          {(settings.freeform_invoice_items
+            ? ["5%", "44%", "10%", "20.5%", "20.5%"]
+            : ["5%", "30%", "15%", "8%", "21%", "21%"]
+          ).map((width, index) => <col key={index} style={{ width }} />)}
+        </colgroup>
+        <thead style={{ display: "table-header-group" }}>
+          <tr className="text-left text-white">
+            {["#", settings.freeform_invoice_items ? "Product / Service" : "Category", ...(!settings.freeform_invoice_items ? ["Size"] : []), "Qty", "Unit Price", "Total"].map((h, i) => (
+              <th
+                key={h}
+                className={`px-2 py-2 font-bold ${i >= (settings.freeform_invoice_items ? 2 : 3) ? "text-right" : ""}`}
+                style={{ backgroundColor: "#1e293b" }}
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
         <tbody>{rows.map((it, i) => (
           <tr key={i} className={`border-t border-slate-200 ${i % 2 ? "bg-slate-50" : "bg-white"}`} style={{ breakInside: "avoid", pageBreakInside: "avoid" }}>
-            <td className="px-2 py-2 text-slate-500">{i + 1}</td><td className="px-2 py-2 font-semibold">{it.category || it.description}</td>{!settings.freeform_invoice_items && <td className="px-2 py-2">{it.size || "—"}</td>}
+            <td className="px-2 py-2 text-slate-500">{i + 1}</td><td className="break-words px-2 py-2 font-semibold" style={{ overflowWrap: "anywhere" }}>{it.category || it.description}</td>{!settings.freeform_invoice_items && <td className="break-words px-2 py-2" style={{ overflowWrap: "anywhere" }}>{it.size || "—"}</td>}
             <td className="px-2 py-2 text-right tabular-nums">{it.qty}</td><td className="px-2 py-2 text-right tabular-nums">{fmtMoney(it.unit_price)}</td><td className="px-2 py-2 text-right font-bold tabular-nums">{fmtMoney((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
           </tr>))}</tbody>
       </table>}

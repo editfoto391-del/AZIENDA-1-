@@ -802,7 +802,7 @@ export default function GRV() {
                       <div className="flex flex-wrap items-center justify-end gap-1.5">
                         <button type="button" onClick={() => setViewTarget(grv)} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50" title="View GRV" aria-label={`View ${grv.grv_number}`} data-testid={`grv-view-${grv.id}`}><Eye size={14} /> View</button>
                         <button type="button" onClick={() => exportPdf(grv)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50" title="Download GRV PDF" aria-label={`Download PDF ${grv.grv_number}`} data-testid={`grv-pdf-${grv.id}`}><Download size={15} /></button>
-                        {grv.status === "draft" && <button type="button" onClick={() => { setScanReceivingMode(false); setStockSearchByLine({}); setDraft({ ...grv, received_by: grv.received_by || "" }); }} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50" title="Edit draft" aria-label={`Edit ${grv.grv_number}`} data-testid={`grv-edit-${grv.id}`}><Pencil size={15} /></button>}
+                        {grv.status === "draft" && <button type="button" onClick={() => { setScanReceivingMode(false); setStockSearchByLine({}); setDraft({ ...grv, received_by: user?.is_worker ? (user.name || user.username || user.email || "") : grv.received_by || "" }); }} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50" title="Edit draft" aria-label={`Edit ${grv.grv_number}`} data-testid={`grv-edit-${grv.id}`}><Pencil size={15} /></button>}
                         {grv.status === "draft" && <button type="button" onClick={() => act(grv, "inspect")} disabled={busy} className="inline-flex h-8 items-center rounded-md border border-blue-200 bg-blue-50 px-2 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50" data-testid={`grv-inspect-${grv.id}`}>Inspect</button>}
                         {["draft", "pending_inspection", "confirming"].includes(grv.status) && <button type="button" onClick={() => act(grv, "confirm", `Confirm ${grv.grv_number}? Accepted quantities will be posted to Stock once.`)} disabled={busy} className="inline-flex h-8 items-center rounded-md border border-emerald-200 bg-emerald-50 px-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50" data-testid={`grv-confirm-${grv.id}`}>{busy ? "Working..." : grv.status === "confirming" ? "Retry confirm" : "Confirm"}</button>}
                         {["draft", "pending_inspection"].includes(grv.status) && <button type="button" onClick={() => act(grv, "cancel")} disabled={busy} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 hover:border-red-200 hover:bg-red-50 hover:text-red-700 disabled:opacity-50" title="Cancel draft" aria-label={`Cancel ${grv.grv_number}`} data-testid={`grv-cancel-${grv.id}`}><Ban size={15} /></button>}
@@ -848,7 +848,7 @@ export default function GRV() {
             </label>}
             <Input label="Received date *" type="date" value={draft.received_date} onChange={(event) => setDraft({ ...draft, received_date: event.target.value })} required data-testid="grv-received-date" />
             <Input label="Delivery note number" value={draft.delivery_note_number} onChange={(event) => setDraft({ ...draft, delivery_note_number: event.target.value })} data-testid="grv-delivery-note" />
-            <Input label={scanReceivingMode ? "Scanned by *" : "Received by"} value={draft.received_by} onChange={(event) => setDraft({ ...draft, received_by: event.target.value })} required={scanReceivingMode} data-testid="grv-received-by" />
+            <Input label={scanReceivingMode ? "Scanned by *" : "Received by"} value={draft.received_by} onChange={(event) => setDraft({ ...draft, received_by: event.target.value })} readOnly={user?.is_worker} required={scanReceivingMode} data-testid="grv-received-by" />
             <Input label="Warehouse" value={draft.warehouse} onChange={(event) => setDraft({ ...draft, warehouse: event.target.value })} data-testid="grv-warehouse" />
             <Input label="VAT (%)" type="text" inputMode="decimal" value={draft.vat_rate ?? 0}
               onChange={(event) => setDraft({ ...draft, vat_rate: event.target.value })}
@@ -871,12 +871,12 @@ export default function GRV() {
               <thead><tr className="bg-slate-50 text-left text-slate-500">
                 <th className="p-2">Product / size</th>
                 {scanReceivingMode
-                  ? <><th className="p-2 text-right">Quantity received</th><th className="p-2 text-right">Purchase price</th>
+                  ? <><th className="p-2 text-right">Quantity received</th><th className="p-2 text-right">Unit Price</th>
                     {draft.purpose !== "raw_material" && salePriceFields.map(([key, label]) => <th key={key} className="p-2 text-right">{label}</th>)}
                     <th className="p-2 text-right">Total value</th><th className="p-2"> </th></>
                   : <><th className="p-2 text-right">Actually received</th><th className="p-2 text-right">Accepted</th>
                     <th className="p-2 text-right">Rejected</th><th className="p-2 text-right">Damaged</th>
-                    <th className="p-2 text-right">Purchase price</th>
+                    <th className="p-2 text-right">Unit Price</th>
                     {draft.purpose !== "raw_material" && salePriceFields.map(([key, label]) => <th key={key} className="p-2 text-right">{label}</th>)}
                     <th className="p-2 text-right">Total value</th>
                     {!draft.purchase_order_id && <th className="p-2"> </th>}</>}
@@ -960,7 +960,7 @@ export default function GRV() {
                     <td className="p-2">
                       <input type="text" inputMode="decimal" value={line.unit_cost ?? ""}
                         onChange={(event) => updateLine(index, "unit_cost", event.target.value)}
-                        aria-label={`Purchase price line ${index + 1}`}
+                        aria-label={`Unit price line ${index + 1}`}
                         className="w-28 rounded border border-input px-2 py-1.5 text-right font-mono"
                         data-testid={`grv-quick-unit-cost-${index}`} />
                     </td>
@@ -993,7 +993,7 @@ export default function GRV() {
                     <td className="p-2">
                       <input type="text" inputMode="decimal" value={line.unit_cost ?? ""}
                         onChange={(event) => updateLine(index, "unit_cost", event.target.value)}
-                        aria-label={`Purchase price line ${index + 1}`}
+                        aria-label={`Unit price line ${index + 1}`}
                         className="w-24 rounded border border-input px-2 py-1.5 text-right font-mono"
                         data-testid={`grv-unit-cost-${index}`} />
                     </td>
