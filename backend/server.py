@@ -8299,6 +8299,10 @@ def invoice_stock_text_key(value):
     return " ".join(str(value or "").split()).casefold()
 
 
+def invoice_stock_description_key(value):
+    return re.sub(r"(?<=\d)\s*[x×]\s*(?=\d)", "x", invoice_stock_text_key(value))
+
+
 def invoice_stock_size_key(value):
     return invoice_stock_text_key(canonical_price_size(value))
 
@@ -8312,11 +8316,29 @@ async def invoice_stock_deductions(invoice, allow_empty=False):
             invoice_stock_size_key(stock.get("size")),
         )
         stock_by_product_size.setdefault(key, []).append(stock)
+    imraan_freeform = uses_freeform_invoice_items(active_company_id.get())
     quantities = {}
     current_by_stock = {}
     for index, item in enumerate(invoice.get("items", []), 1):
-        products = invoice_stock_product_aliases(item)
+        category = (item.get("category") or "").strip()
         size = (item.get("size") or "").strip()
+        if imraan_freeform and (not category or not size):
+            description_key = invoice_stock_description_key(item.get("description"))
+            description_matches = {
+                (invoice_stock_text_key(stock.get("product")), invoice_stock_size_key(stock.get("size"))):
+                (stock.get("product"), stock.get("size"))
+                for stock in stock_items
+                if description_key in {
+                    invoice_stock_description_key(f"{stock.get('product', '')} {stock.get('size', '')}"),
+                    invoice_stock_description_key(f"{stock.get('product', '')} - {stock.get('size', '')}"),
+                    invoice_stock_description_key(f"{stock.get('product', '')} · {stock.get('size', '')}"),
+                }
+            }
+            if len(description_matches) == 1:
+                category, size = next(iter(description_matches.values()))
+        products = invoice_stock_product_aliases(item)
+        if category and not (item.get("category") or "").strip():
+            products = invoice_stock_product_aliases({**item, "category": category})
         if not products[0] or not size:
             continue
         normalized_size = invoice_stock_size_key(size)

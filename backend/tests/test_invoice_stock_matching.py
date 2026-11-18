@@ -112,6 +112,29 @@ def test_imraan_invoice_lines_deduct_from_imraan_stock(monkeypatch):
     }]
 
 
+def test_imraan_legacy_freeform_invoice_description_matches_stock(monkeypatch):
+    deductions = asyncio.run(resolve_deductions(
+        monkeypatch,
+        [{
+            "id": "imraan-ribbon",
+            "product": "Ribbon Pink",
+            "size": "1070x120",
+        }],
+        {"items": [{
+            "description": "Ribbon Pink 1070 x 120",
+            "qty": 2,
+        }]},
+        company="imraan-plastics",
+    ))
+
+    assert deductions == [{
+        "stock_id": "imraan-ribbon",
+        "product": "Ribbon Pink",
+        "size": "1070x120",
+        "quantity": server.D("2"),
+    }]
+
+
 def test_candy_invoice_does_not_deduct_ribbon_black_stock(monkeypatch):
     deductions = asyncio.run(resolve_deductions(
         monkeypatch,

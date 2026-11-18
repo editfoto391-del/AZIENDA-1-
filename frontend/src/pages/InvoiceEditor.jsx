@@ -1282,11 +1282,11 @@ export default function InvoiceEditor({ express = false }) {
                         <input type="number" min="1" value={it.qty} onChange={(e) => updateItem(idx, { qty: e.target.value })} data-testid={`item-qty-${idx}`}
                           className="w-16 rounded-md border border-input bg-white px-2 py-2 text-center text-sm font-medium focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
                       </td>
-                      <td className="px-2 py-2" colSpan={!freeformInvoiceItems && !it.category && it.description ? 2 : 1}>
+                      <td className="px-2 py-2" colSpan={!freeformInvoiceItems && !imraanStockBackedItems && !it.category && it.description ? 2 : 1}>
                         {freeformInvoiceItems ? (
                           <input value={it.description} placeholder="Enter item or service description" onChange={(e) => updateItem(idx, { category: "", size: "", description: e.target.value })} data-testid={`item-desc-${idx}`}
                             className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
-                        ) : !it.category && it.description ? (
+                        ) : !imraanStockBackedItems && !it.category && it.description ? (
                           <input value={it.description} onChange={(e) => updateItem(idx, { description: e.target.value })} data-testid={`item-desc-${idx}`}
                             className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
                         ) : (
@@ -1296,7 +1296,7 @@ export default function InvoiceEditor({ express = false }) {
                         <datalist id={`invoice-category-options-${idx}`}>{categoriesFor(inv.zone).map((category) => <option key={category} value={category} />)}</datalist>
                         </>)}
                       </td>
-                      {!freeformInvoiceItems && !(!it.category && it.description) && <td className="px-2 py-2">
+                      {!freeformInvoiceItems && (imraanStockBackedItems || !(!it.category && it.description)) && <td className="px-2 py-2">
                         <input list={`invoice-size-options-${idx}`} value={it.size} placeholder="Select size" onChange={(e) => onCatSize(idx, { size: e.target.value })} data-testid={`item-size-${idx}`}
                           className="w-full min-w-[110px] rounded-md border border-input bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15" />
                         <datalist id={`invoice-size-options-${idx}`}>{sizesFor(inv.zone, it.category).map((size) => <option key={size} value={size} />)}</datalist>
