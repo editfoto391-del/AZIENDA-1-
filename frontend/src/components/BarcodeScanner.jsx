@@ -115,7 +115,6 @@ export default function BarcodeScanner({
       </div>
       {cameraOpen && <video ref={videoRef} className="max-h-64 w-full rounded-lg bg-slate-950 object-contain" muted playsInline />}
       {cameraError && <p className="text-xs text-red-600" role="alert">{cameraError}</p>}
-      <p className="text-xs text-slate-400">USB and Bluetooth scanners work as keyboard input. Camera scanning requires browser permission and HTTPS.</p>
     </div>
   );
 }

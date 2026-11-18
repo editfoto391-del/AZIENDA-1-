@@ -8305,36 +8305,75 @@ def invoice_stock_size_key(value):
 
 async def invoice_stock_deductions(invoice, allow_empty=False):
     stock_items = await listall("stock")
-    stock_by_product_size = {
-        (
-            invoice_stock_text_key(item.get("product")),
-            invoice_stock_size_key(item.get("size")),
-        ): item
-        for item in stock_items
-    }
+    stock_by_product_size = {}
+    for stock in stock_items:
+        key = (
+            invoice_stock_text_key(stock.get("product")),
+            invoice_stock_size_key(stock.get("size")),
+        )
+        stock_by_product_size.setdefault(key, []).append(stock)
     quantities = {}
+    current_by_stock = {}
     for index, item in enumerate(invoice.get("items", []), 1):
         products = invoice_stock_product_aliases(item)
         size = (item.get("size") or "").strip()
         if not products[0] or not size:
             continue
         normalized_size = invoice_stock_size_key(size)
-        stock = next(
-            (
-                stock_by_product_size.get((invoice_stock_text_key(product), normalized_size))
-                for product in products
-                if stock_by_product_size.get((invoice_stock_text_key(product), normalized_size))
-            ),
-            None,
-        )
-        if not stock:
+        candidates = []
+        seen_stock_ids = set()
+        for product in products:
+            for stock in stock_by_product_size.get(
+                (invoice_stock_text_key(product), normalized_size), [],
+            ):
+                if stock["id"] not in seen_stock_ids:
+                    candidates.append(stock)
+                    seen_stock_ids.add(stock["id"])
+        if not candidates:
             raise HTTPException(400, f"Stock item not found for invoice line {index}: {products[0]} {size}")
         quantity = D(item.get("qty", 0))
         if quantity <= 0:
             raise HTTPException(400, f"Invoice line {index} quantity must be greater than 0")
-        entry = quantities.setdefault(stock["id"], {"stock_id": stock["id"], "product": stock["product"],
-                                                     "size": stock["size"], "quantity": Decimal("0")})
-        entry["quantity"] += quantity
+        if len(candidates) == 1:
+            stock = candidates[0]
+            entry = quantities.setdefault(stock["id"], {
+                "stock_id": stock["id"],
+                "product": stock["product"],
+                "size": stock["size"],
+                "quantity": Decimal("0"),
+            })
+            entry["quantity"] += quantity
+            continue
+        for stock in candidates:
+            if stock["id"] not in current_by_stock:
+                await stock_current(stock)
+                current_by_stock[stock["id"]] = D(stock["current"])
+        candidates.sort(
+            key=lambda stock: current_by_stock[stock["id"]]
+            - quantities.get(stock["id"], {}).get("quantity", Decimal("0")),
+            reverse=True,
+        )
+        remaining = quantity
+        for stock in candidates:
+            entry = quantities.setdefault(stock["id"], {
+                "stock_id": stock["id"],
+                "product": stock["product"],
+                "size": stock["size"],
+                "quantity": Decimal("0"),
+            })
+            available = max(
+                Decimal("0"),
+                current_by_stock[stock["id"]] - entry["quantity"],
+            )
+            allocated = min(remaining, available)
+            if allocated > 0:
+                entry["quantity"] += allocated
+                remaining -= allocated
+            if remaining <= 0:
+                break
+        if remaining > 0:
+            stock = candidates[0]
+            quantities[stock["id"]]["quantity"] += remaining
     if not quantities and not allow_empty:
         raise HTTPException(400, "No invoice products match stock items to deduct")
     return list(quantities.values())
@@ -8707,36 +8746,50 @@ async def update_right_stock(user=Depends(get_current_user)):
 
     company_context = active_company_id.set(DEFAULT_COMPANY_ID)
     try:
-        stock_items = await listall("stock")
-        matches = validate_right_stock_matches(stock_items)
-        existing_ids = [
-            item["id"]
-            for _, _, _, records in matches
-            for item in records
-        ]
-        async with StockLock(existing_ids):
-            stock_items = await listall("stock")
-            matches = validate_right_stock_matches(stock_items)
-            movements_by_stock = await stock_movements_for_stock_ids(
-                [
-                    item["id"]
-                    for _, _, _, records in matches
-                    for item in records
+        initial_stocks = await listall("stock")
+        initial_matches = {
+            (product, size): [
+                stock for stock in initial_stocks
+                if match_right_stock_item(stock, product, size)
+            ]
+            for product, size, _quantity in RIGHT_STOCK_UPDATE_ITEMS
+        }
+        initial_ids = sorted({
+            stock["id"]
+            for records in initial_matches.values()
+            for stock in records
+        })
+        async with StockLock(initial_ids):
+            stocks = await listall("stock")
+            matches = {
+                (product, size): [
+                    stock for stock in stocks
+                    if match_right_stock_item(stock, product, size)
                 ]
-            )
-            updated_count = 0
+                for product, size, _quantity in RIGHT_STOCK_UPDATE_ITEMS
+            }
+            current_ids = sorted({
+                stock["id"]
+                for records in matches.values()
+                for stock in records
+            })
+            if current_ids != initial_ids:
+                raise HTTPException(409, "Stock products changed while preparing the update. Reload and retry.")
+
+            movements_by_stock = await stock_movements_for_stock_ids(current_ids)
             created_count = 0
-            changed_count = 0
+            adjusted_count = 0
             duplicate_records_zeroed = 0
-            for product, size, target_quantity, records in matches:
+            for product, size, target_quantity in RIGHT_STOCK_UPDATE_ITEMS:
+                records = matches[(product, size)]
                 if records:
-                    primary = records[0]
-                    for candidate in records[1:]:
-                        if str(candidate.get("created_at") or "") > str(primary.get("created_at") or ""):
-                            primary = candidate
-                    stock_targets = [(primary, target_quantity)]
-                    stock_targets.extend((item, 0) for item in records if item is not primary)
-                    duplicate_records_zeroed += len(records) - 1
+                    primary = max(
+                        records,
+                        key=lambda item: (
+                            str(item.get("created_at") or ""),
+                            str(item.get("id") or ""),
+                        ),
+                    )
                 else:
                     primary = await insert("stock", {
                         "product": product,
@@ -8745,52 +8798,53 @@ async def update_right_stock(user=Depends(get_current_user)):
                         "threshold": 0,
                     })
                     created_count += 1
+                    records = [primary]
                     movements_by_stock[primary["id"]] = []
-                    stock_targets = [(primary, target_quantity)]
-                for stock, desired_quantity in stock_targets:
-                    current = apply_stock_movements(
+
+                duplicate_records_zeroed += len(records) - 1
+                for stock in [primary, *(candidate for candidate in records if candidate is not primary)]:
+                    desired_quantity = target_quantity if stock is primary else 0
+                    current_quantity = float(apply_stock_movements(
+                        dict(stock), movements_by_stock.get(stock["id"], []),
+                    )["current"])
+                    delta = r2(desired_quantity - current_quantity)
+                    if not delta:
+                        continue
+                    movement = await post_movement(
                         stock,
-                        movements_by_stock.get(stock["id"], []),
-                    )["current"]
-                    delta = r2(desired_quantity - current)
-                    if delta:
-                        reason = "UPDATE RIGHT STOCK"
-                        movement = await post_movement(
-                            stock,
-                            "adjustment_in" if delta > 0 else "adjustment_out",
-                            abs(delta),
-                            user,
-                            reason=reason,
-                            reference="SuperIQFoam inventory correction",
-                            notes=(
-                                f"Set count to {desired_quantity} from the confirmed stock count list."
-                                if desired_quantity else
-                                "Zeroed duplicate stock record without deleting it or its history."
-                            ),
-                            allow_negative=True,
-                        )
-                        await log_audit(
-                            "stock_movement",
-                            movement["id"],
-                            "posted",
-                            user,
-                            after=movement,
-                            reason=reason,
-                        )
-                        changed_count += 1
-                updated_count += 1
+                        "adjustment_in" if delta > 0 else "adjustment_out",
+                        abs(delta),
+                        user,
+                        reason="UPDATE RIGHT STOCK",
+                        reference="SuperIQFoam supplied stock count",
+                        notes=f"Set {product} {size} to the supplied quantity {target_quantity}.",
+                        allow_negative=True,
+                    )
+                    await log_audit(
+                        "stock_movement",
+                        movement["id"],
+                        "posted",
+                        user,
+                        after=movement,
+                        reason="UPDATE RIGHT STOCK",
+                    )
+                    movements_by_stock.setdefault(stock["id"], []).append(movement)
+                    adjusted_count += 1
 
             totals_by_product = {}
-            for product, _, quantity in RIGHT_STOCK_UPDATE_ITEMS:
-                if product != "White Drum":
-                    totals_by_product[product] = totals_by_product.get(product, 0) + quantity
+            for product, _size, quantity in RIGHT_STOCK_UPDATE_ITEMS:
+                totals_by_product[product] = totals_by_product.get(product, 0) + quantity
             return {
-                "updated_items": updated_count,
+                "updated_items": len(RIGHT_STOCK_UPDATE_ITEMS),
                 "created_items": created_count,
-                "adjusted_items": changed_count,
+                "adjusted_items": adjusted_count,
                 "duplicate_records_zeroed": duplicate_records_zeroed,
                 "totals_by_product": totals_by_product,
-                "net_mattress_stock": sum(totals_by_product.values()),
+                "net_mattress_stock": sum(
+                    quantity
+                    for product, _size, quantity in RIGHT_STOCK_UPDATE_ITEMS
+                    if product != "White Drum"
+                ),
             }
     finally:
         active_company_id.reset(company_context)
@@ -10904,6 +10958,10 @@ class IntercompanyCreateInvoiceIn(BaseModel):
     assigned_driver_id: Optional[str] = ""
     items: Optional[List[IntercompanyInvoiceLineIn]] = Field(default=None, min_length=1, max_length=100)
 
+class IntercompanyInvoiceSendIn(BaseModel):
+    invoice_id: str = Field(min_length=1, max_length=100)
+    recipient_company_id: str = Field(min_length=1, max_length=100)
+
 def require_intercompany_company_access(user, company_id, *, administrator=False):
     if company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
         raise HTTPException(404, "Company not found")
@@ -10928,7 +10986,7 @@ async def notify_intercompany_company(company_id, event_key, title, message, act
     ).to_list(None)
     recipients = {
         account["id"]: account
-        for account in fleet_notification_recipients(accounts, company_id)
+        for account in intercompany_notification_recipients(accounts, company_id)
     }
     for user_id in extra_user_ids:
         account = next((item for item in accounts if item.get("id") == user_id), None)
@@ -10987,6 +11045,54 @@ async def intercompany_available_stock(company_db, company_id, stock_ids):
         for stock in stocks
     }
 
+async def resolve_intercompany_request_stock(company_db, company_id, items, available):
+    resolved_items = [dict(item) for item in items]
+    available = dict(available)
+    relinked = []
+    for item in resolved_items:
+        if D(available.get(item["stock_id"], 0)) >= D(item["quantity"]):
+            continue
+        product = str(item.get("product") or "").strip()
+        dimensions = str(item.get("dimensions") or "").strip()
+        if not product or not dimensions:
+            continue
+        candidates = await company_db.stock.find(
+            {
+                "product": {"$regex": f"^{re.escape(product)}$", "$options": "i"},
+                "size": {"$regex": f"^{re.escape(dimensions)}$", "$options": "i"},
+                "archived": {"$ne": True},
+            },
+            {"_id": 0, "id": 1, "product": 1, "size": 1},
+        ).to_list(None)
+        candidate_ids = [
+            stock["id"]
+            for stock in candidates
+            if stock.get("id") != item["stock_id"]
+            and same_stock_identity(stock, product, dimensions, company_id)
+        ]
+        if not candidate_ids:
+            continue
+        candidate_available = await intercompany_available_stock(
+            company_db, company_id, candidate_ids,
+        )
+        usable = [
+            (stock_id, D(candidate_available.get(stock_id, 0)))
+            for stock_id in candidate_ids
+            if D(candidate_available.get(stock_id, 0)) >= D(item["quantity"])
+        ]
+        if not usable:
+            continue
+        replacement_id, quantity = max(usable, key=lambda pair: pair[1])
+        previous_id = item["stock_id"]
+        item["stock_id"] = replacement_id
+        available[replacement_id] = quantity
+        relinked.append({
+            "item_id": item["id"],
+            "previous_stock_id": previous_id,
+            "stock_id": replacement_id,
+        })
+    return resolved_items, available, relinked
+
 def intercompany_price_zone(supplying_company_id, requesting_company_id, customer=None):
     if supplying_company_id != DEFAULT_COMPANY_ID:
         return 1
@@ -11000,6 +11106,14 @@ def public_intercompany_request(request, company_id):
         for key in ("invoice_id", "invoice_number", "invoice_total", "invoice_date", "sent_at"):
             result.pop(key, None)
     return result
+
+def intercompany_notification_recipients(accounts, company_id):
+    return [
+        account for account in accounts
+        if account.get("active", True) is not False
+        and not account.get("is_worker")
+        and company_role(account, company_id) in ("owner", "admin")
+    ]
 
 @api.get("/intercompany/products")
 async def get_intercompany_products(
@@ -11311,6 +11425,9 @@ async def accept_intercompany_request(request_id: str, user=Depends(get_current_
     supplier_db = tenant_database(client, base_db, company_id)
     stock_ids = [item["stock_id"] for item in request["items"]]
     available = await intercompany_available_stock(supplier_db, company_id, stock_ids)
+    resolved_items, available, relinked = await resolve_intercompany_request_stock(
+        supplier_db, company_id, request["items"], available,
+    )
     shortages = [
         {
             "product": item["product"],
@@ -11318,7 +11435,7 @@ async def accept_intercompany_request(request_id: str, user=Depends(get_current_
             "available": available.get(item["stock_id"], 0),
             "requested": item["quantity"],
         }
-        for item in request["items"]
+        for item in resolved_items
         if D(available.get(item["stock_id"], 0)) < D(item["quantity"])
     ]
     if shortages:
@@ -11336,9 +11453,11 @@ async def accept_intercompany_request(request_id: str, user=Depends(get_current_
                 "accepted_by": user["id"],
                 "accepted_at": now,
                 "updated_at": now,
+                "items": resolved_items,
             },
             "$push": {"audit": {
                 "action": "accepted", "at": now, "by": user["id"], "company_id": company_id,
+                "stock_relinked_items": relinked,
             }},
         },
         projection={"_id": 0},
@@ -11545,17 +11664,17 @@ async def create_intercompany_invoice(
             },
             {"_id": 0},
         )
+        requesting_profile = next(
+            profile for profile in COMPANY_PROFILES
+            if profile["id"] == request["requesting_company_id"]
+        )
         customer = None
         if mapping:
             customer = await company_db.customers.find_one(
                 {"id": mapping["customer_id"], "company_id": company_id, "active": {"$ne": False}},
                 {"_id": 0},
             )
-        else:
-            requesting_profile = next(
-                profile for profile in COMPANY_PROFILES
-                if profile["id"] == request["requesting_company_id"]
-            )
+        if not customer:
             customer_names = {requesting_profile["name"], requesting_profile["username"]}
             customer = await company_db.customers.find_one(
                 {
@@ -11564,11 +11683,6 @@ async def create_intercompany_invoice(
                     "active": {"$ne": False},
                 },
                 {"_id": 0},
-            )
-        if not customer:
-            raise HTTPException(
-                409,
-                "Add an active customer record for the requesting company before creating its invoice",
             )
         stock_ids = [item["stock_id"] for item in request["items"]]
         zone = intercompany_price_zone(
@@ -11638,9 +11752,7 @@ async def create_intercompany_invoice(
             if not driver:
                 raise HTTPException(400, "Assigned driver is not active in the supplying company")
         invoice_body = InvoiceIn(
-            customer_id=customer["id"],
-            customer_name=customer["name"],
-            client_number=customer.get("client_number", ""),
+            customer_name=requesting_profile["name"],
             zone=zone,
             reference=f"Intercompany {request_id}",
             notes=f"Generated from intercompany order request {request_id}",
@@ -11745,15 +11857,49 @@ async def get_intercompany_request_invoice(request_id: str, user=Depends(get_cur
     is_supplier = request["supplying_company_id"] == company_id
     if not is_supplier and not request.get("invoice_sent"):
         raise HTTPException(404, "Invoice has not been sent to the requesting company")
-    if not request.get("invoice_id"):
-        raise HTTPException(404, "Invoice has not been created")
     supplier_db = tenant_database(client, base_db, request["supplying_company_id"])
-    invoice = await supplier_db.invoices.find_one(
-        {"id": request["invoice_id"], "intercompany_request_id": request_id},
-        {"_id": 0},
-    )
+    invoice = None
+    if request.get("invoice_id"):
+        invoice = await supplier_db.invoices.find_one(
+            {"id": request["invoice_id"], "intercompany_request_id": request_id},
+            {"_id": 0},
+        )
+        if not invoice:
+            candidate = await supplier_db.invoices.find_one(
+                {"id": request["invoice_id"]},
+                {"_id": 0},
+            )
+            if candidate and candidate.get("intercompany_request_id") in (None, "", request_id):
+                invoice = candidate
+    if not invoice:
+        candidate = await supplier_db.invoices.find_one(
+            {"idempotency_key": f"intercompany:{request_id}"},
+            {"_id": 0},
+        )
+        if candidate and candidate.get("intercompany_request_id") in (None, "", request_id):
+            invoice = candidate
     if not invoice:
         raise HTTPException(404, "Linked invoice not found")
+    if not invoice.get("intercompany_request_id"):
+        await supplier_db.invoices.update_one(
+            {"id": invoice["id"]},
+            {"$set": {"intercompany_request_id": request_id}},
+        )
+    if request.get("invoice_id") != invoice["id"]:
+        await base_db.intercompany_order_requests.update_one(
+            {"id": request_id},
+            {"$set": {
+                "invoice_id": invoice["id"],
+                "invoice_number": invoice.get("number"),
+                "invoice_date": invoice.get("date"),
+                "invoice_total": invoice.get("total"),
+                "updated_at": now_iso(),
+            }},
+        )
+    return await intercompany_invoice_details(invoice, request["supplying_company_id"])
+
+async def intercompany_invoice_details(invoice, supplier_company_id):
+    supplier_db = tenant_database(client, base_db, supplier_company_id)
     invoice.pop("audit", None)
     payments = await supplier_db.payments.find(
         {
@@ -11772,7 +11918,7 @@ async def get_intercompany_request_invoice(request_id: str, user=Depends(get_cur
     ) or {}
     settings_defaults = {
         **seed_data.DEFAULT_SETTINGS,
-        **COMPANY_INVOICE_DETAILS.get(request["supplying_company_id"], {}),
+        **COMPANY_INVOICE_DETAILS.get(supplier_company_id, {}),
     }
     settings = {
         key: stored_settings.get(key, settings_defaults.get(key, ""))
@@ -11781,17 +11927,171 @@ async def get_intercompany_request_invoice(request_id: str, user=Depends(get_cur
             "tax_number", "banking_details",
         )
     }
-    settings["unified_price_list"] = uses_unified_price_list(request["supplying_company_id"])
-    settings["price_zones_enabled"] = uses_price_zones(request["supplying_company_id"])
-    settings["freeform_invoice_items"] = uses_freeform_invoice_items(request["supplying_company_id"])
+    settings["unified_price_list"] = uses_unified_price_list(supplier_company_id)
+    settings["price_zones_enabled"] = uses_price_zones(supplier_company_id)
+    settings["freeform_invoice_items"] = uses_freeform_invoice_items(supplier_company_id)
     customer = await supplier_db.customers.find_one(
         {
             "id": invoice.get("customer_id"),
-            "company_id": request["supplying_company_id"],
+            "company_id": supplier_company_id,
         },
         {"_id": 0, "id": 1, "address": 1, "city": 1, "phone": 1, "email": 1},
     ) if invoice.get("customer_id") else None
     return {"invoice": invoice, "settings": settings, "customer": customer or {}}
+
+@api.post("/intercompany/invoices/send")
+async def send_intercompany_invoice(
+    body: IntercompanyInvoiceSendIn,
+    user=Depends(get_current_user),
+):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id)
+    if body.recipient_company_id == company_id:
+        raise HTTPException(400, "Choose a different company to receive this invoice")
+    if body.recipient_company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
+        raise HTTPException(400, "Invalid recipient company")
+    company_db = tenant_database(client, base_db, company_id)
+    invoice = await company_db.invoices.find_one(
+        {"id": body.invoice_id, "archived": {"$ne": True}},
+        {"_id": 0},
+    )
+    if not invoice:
+        raise HTTPException(404, "Invoice not found in the active company")
+    if derive_status(invoice) in ("draft", "void"):
+        raise HTTPException(409, "Only active, issued invoices can be sent to another company")
+    if invoice.get("intercompany_request_id"):
+        raise HTTPException(409, "This invoice is already linked to an intercompany request")
+    linked_request = await base_db.intercompany_order_requests.find_one(
+        {"invoice_id": body.invoice_id, "supplying_company_id": company_id},
+        {"_id": 0, "id": 1},
+    )
+    if linked_request:
+        raise HTTPException(409, "This invoice has already been sent through an intercompany request")
+    delivery_id = f"{company_id}:{body.recipient_company_id}:{body.invoice_id}"
+    sent_at = now_iso()
+    await base_db.intercompany_invoice_deliveries.update_one(
+        {"id": delivery_id},
+        {"$set": {
+            "sender_company_id": company_id,
+            "recipient_company_id": body.recipient_company_id,
+            "invoice_id": body.invoice_id,
+            "invoice_number": invoice.get("number"),
+            "sent_at": sent_at,
+            "sent_by": user.get("id", ""),
+        }, "$setOnInsert": {"id": delivery_id, "created_at": sent_at}},
+        upsert=True,
+    )
+    await notify_intercompany_company(
+        body.recipient_company_id,
+        f"intercompany-invoice:{delivery_id}",
+        "Intercompany Invoice Received",
+        f"Invoice {invoice.get('number') or '—'} was sent by {company_id}.",
+        "/intercompany",
+    )
+    return {
+        "id": delivery_id,
+        "invoice_id": body.invoice_id,
+        "invoice_number": invoice.get("number"),
+        "sender_company_id": company_id,
+        "recipient_company_id": body.recipient_company_id,
+        "sent_at": sent_at,
+    }
+
+@api.get("/intercompany/invoices/received")
+async def list_received_intercompany_invoices(user=Depends(get_current_user)):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id)
+    request_invoices = await base_db.intercompany_order_requests.find(
+        {"requesting_company_id": company_id, "invoice_sent": True},
+        {"_id": 0},
+    ).sort("sent_at", -1).to_list(100)
+    direct_deliveries = await base_db.intercompany_invoice_deliveries.find(
+        {"recipient_company_id": company_id},
+        {"_id": 0},
+    ).sort("sent_at", -1).to_list(100)
+    received = [{
+        "id": f"request:{request['id']}",
+        "source": "request",
+        "requesting_company_id": company_id,
+        "supplying_company_id": request["supplying_company_id"],
+        "invoice_id": request.get("invoice_id"),
+        "invoice_number": request.get("invoice_number"),
+        "invoice_total": request.get("invoice_total"),
+        "sent_at": request.get("sent_at"),
+    } for request in request_invoices if request.get("invoice_id")]
+    for delivery in direct_deliveries:
+        sender_company_id = delivery.get("sender_company_id")
+        if sender_company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
+            continue
+        supplier_db = tenant_database(client, base_db, sender_company_id)
+        invoice = await supplier_db.invoices.find_one(
+            {"id": delivery.get("invoice_id")},
+            {"_id": 0, "number": 1, "total": 1, "customer_name": 1},
+        )
+        if not invoice:
+            continue
+        received.append({
+            "id": f"direct:{delivery['id']}",
+            "source": "direct",
+            "requesting_company_id": company_id,
+            "supplying_company_id": sender_company_id,
+            "invoice_id": delivery["invoice_id"],
+            "invoice_number": invoice.get("number") or delivery.get("invoice_number"),
+            "invoice_total": invoice.get("total"),
+            "customer_name": invoice.get("customer_name", ""),
+            "sent_at": delivery.get("sent_at"),
+        })
+    received.sort(key=lambda item: item.get("sent_at") or "", reverse=True)
+    return received
+
+@api.get("/intercompany/invoices/received/{receipt_id}")
+async def get_received_intercompany_invoice(receipt_id: str, user=Depends(get_current_user)):
+    company_id = active_company_id.get()
+    require_intercompany_company_access(user, company_id)
+    receipt_type, separator, identifier = receipt_id.partition(":")
+    if not separator or not identifier:
+        raise HTTPException(404, "Received intercompany invoice not found")
+    if receipt_type == "request":
+        request = await base_db.intercompany_order_requests.find_one(
+            {
+                "id": identifier,
+                "requesting_company_id": company_id,
+                "invoice_sent": True,
+            },
+            {"_id": 0},
+        )
+        if not request or not request.get("invoice_id"):
+            raise HTTPException(404, "Received intercompany invoice not found")
+        details = await get_intercompany_request_invoice(identifier, user)
+        return {
+            "source": "request",
+            "requesting_company_id": company_id,
+            "supplying_company_id": request["supplying_company_id"],
+            "invoice_details": details,
+        }
+    if receipt_type != "direct":
+        raise HTTPException(404, "Received intercompany invoice not found")
+    delivery = await base_db.intercompany_invoice_deliveries.find_one(
+        {"id": identifier, "recipient_company_id": company_id},
+        {"_id": 0},
+    )
+    if not delivery:
+        raise HTTPException(404, "Received intercompany invoice not found")
+    if delivery.get("sender_company_id") not in {profile["id"] for profile in COMPANY_PROFILES}:
+        raise HTTPException(404, "Received intercompany invoice not found")
+    supplier_db = tenant_database(client, base_db, delivery["sender_company_id"])
+    invoice = await supplier_db.invoices.find_one(
+        {"id": delivery["invoice_id"]},
+        {"_id": 0},
+    )
+    if not invoice:
+        raise HTTPException(404, "Linked invoice not found")
+    return {
+        "source": "direct",
+        "requesting_company_id": company_id,
+        "supplying_company_id": delivery["sender_company_id"],
+        "invoice_details": await intercompany_invoice_details(invoice, delivery["sender_company_id"]),
+    }
 
 @api.get("/vehicles")
 async def get_vehicles(user=Depends(get_current_user)):
@@ -13575,6 +13875,8 @@ class GRVLineIn(BaseModel):
 class GRVIn(BaseModel):
     purpose: str = "selling"
     is_chemical: bool = False
+    source_intercompany_invoice_id: Optional[str] = ""
+    source_intercompany_category: Optional[str] = ""
     vat_rate: float = Field(default=0, ge=0, le=100)
     supplier_id: Optional[str] = ""
     supplier_name: Optional[str] = ""
@@ -14401,7 +14703,6 @@ async def _grv_items_from_request(
         raise HTTPException(400, "Add at least one product to the GRV")
 
     result = []
-    new_product_keys = set()
     for line in requested_items:
         data = line.model_dump() if isinstance(line, GRVLineIn) else dict(line)
         po_index = data.get("purchase_order_item_index")
@@ -14434,10 +14735,6 @@ async def _grv_items_from_request(
             ):
                 raise HTTPException(400, "Enter a category/product name and size for every new product")
             if is_new_product:
-                new_product_key = (product.casefold(), canonical_price_size(size).casefold())
-                if new_product_key in new_product_keys:
-                    raise HTTPException(400, "A new product and size can appear only once in the GRV")
-                new_product_keys.add(new_product_key)
                 company_id = active_company_id.get() or DEFAULT_COMPANY_ID
                 stock = (
                     await find_stock_by_identity(product, size, company_id)
@@ -14448,7 +14745,8 @@ async def _grv_items_from_request(
                     }, {"_id": 0})
                 )
                 if stock:
-                    raise HTTPException(400, "This product and size already exist in stock; select the existing product")
+                    is_new_product = False
+                    stock_id = stock["id"]
             else:
                 stock = await db.stock.find_one({"id": stock_id}, {"_id": 0}) if stock_id else None
             if not is_new_product and not stock and product and size:
@@ -14494,7 +14792,7 @@ async def _grv_items_from_request(
             "product_code": (
                 data.get("product_code") or (stock or {}).get("code") or stock_id
             ),
-            "new_product": bool(data.get("new_product")),
+            "new_product": bool(data.get("new_product")) and not bool(stock),
             "product": product,
             "size": size,
             "purchase_order_item_index": po_index,
@@ -14648,6 +14946,32 @@ async def get_grvs(
 @api.post("/grvs")
 async def create_grv(body: GRVIn, user=Depends(get_current_user)):
     _validate_grv_date(body.received_date)
+    source_intercompany_invoice_id = (body.source_intercompany_invoice_id or "").strip()
+    source_intercompany_category = (body.source_intercompany_category or "").strip()
+    if source_intercompany_invoice_id and source_intercompany_category not in (
+        "selling_product", "raw_material", "chemical",
+    ):
+        raise HTTPException(400, "Choose a valid intercompany GRV category")
+    if source_intercompany_invoice_id:
+        company_id = active_company_id.get() or user.get("_active_company_id")
+        invoice_request = await base_db.intercompany_order_requests.find_one({
+            "invoice_id": source_intercompany_invoice_id,
+            "requesting_company_id": company_id,
+            "invoice_sent": True,
+        }, {"_id": 0})
+        if not invoice_request:
+            invoice_request = await base_db.intercompany_invoice_deliveries.find_one({
+                "invoice_id": source_intercompany_invoice_id,
+                "recipient_company_id": company_id,
+            }, {"_id": 0})
+        if not invoice_request:
+            raise HTTPException(404, "Sent intercompany invoice not found for the active company")
+        existing = await db.grvs.find_one({
+            "source_intercompany_invoice_id": source_intercompany_invoice_id,
+            "source_intercompany_category": source_intercompany_category,
+        }, {"_id": 0})
+        if existing:
+            return existing
     purchase_order_id = (body.purchase_order_id or "").strip()
     purchase_order = None
     if purchase_order_id:
@@ -14695,6 +15019,8 @@ async def create_grv(body: GRVIn, user=Depends(get_current_user)):
         "vat_rate": body.vat_rate,
         "purpose": purpose,
         "is_chemical": bool(body.is_chemical) if purpose == "raw_material" else False,
+        "source_intercompany_invoice_id": source_intercompany_invoice_id,
+        "source_intercompany_category": source_intercompany_category,
         "status": "draft",
         "created_by": user["email"],
         "edited_by": user["email"],
@@ -14754,6 +15080,14 @@ async def edit_grv(grv_id: str, body: GRVIn, user=Depends(get_current_user)):
         "vat_rate": body.vat_rate,
         "purpose": purpose,
         "is_chemical": bool(body.is_chemical) if purpose == "raw_material" else False,
+        "source_intercompany_invoice_id": (
+            (body.source_intercompany_invoice_id or "").strip()
+            or before.get("source_intercompany_invoice_id", "")
+        ),
+        "source_intercompany_category": (
+            (body.source_intercompany_category or "").strip()
+            or before.get("source_intercompany_category", "")
+        ),
         "edited_by": user["email"],
         "audit": audit,
     }
@@ -14816,7 +15150,9 @@ async def confirm_grv(grv_id: str, user=Depends(get_current_user)):
         _grv_sale_price_updates(
             price_check_items,
             user,
-            require_new_product_prices=not bool(grv.get("source_buying_id")),
+            require_new_product_prices=not bool(
+                grv.get("source_buying_id") or grv.get("source_intercompany_invoice_id")
+            ),
         )
         if grv.get("purpose") != "raw_material" else []
     )
@@ -19341,6 +19677,15 @@ async def create_startup_feed_indexes():
     await base_db.intercompany_order_requests.create_index(
         [("supplying_company_id", 1), ("created_at", -1)],
         name="intercompany_supplier_feed",
+    )
+    await base_db.intercompany_invoice_deliveries.create_index(
+        "id",
+        unique=True,
+        name="intercompany_invoice_delivery_id",
+    )
+    await base_db.intercompany_invoice_deliveries.create_index(
+        [("recipient_company_id", 1), ("sent_at", -1)],
+        name="intercompany_invoice_recipient_feed",
     )
 
 app.include_router(api)

@@ -11,7 +11,12 @@ async def resolve_deductions(monkeypatch, stock_items, invoice, company="iqfoam-
         assert collection == "stock"
         return stock_items
 
+    async def stock_current(stock):
+        stock["current"] = stock.get("opening", 0)
+        return stock
+
     monkeypatch.setattr(server, "listall", list_stock)
+    monkeypatch.setattr(server, "stock_current", stock_current)
     token = server.active_company_id.set(company)
     try:
         return await server.invoice_stock_deductions(invoice)

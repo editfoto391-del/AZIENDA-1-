@@ -1,5 +1,6 @@
 import asyncio
 from copy import deepcopy
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -41,6 +42,10 @@ def matches(document, query):
                 return False
             if "$ne" in expected and actual == expected["$ne"]:
                 return False
+            if "$regex" in expected:
+                flags = re.IGNORECASE if "i" in expected.get("$options", "") else 0
+                if actual is None or re.search(expected["$regex"], str(actual), flags) is None:
+                    return False
         elif actual != expected:
             return False
     return True
@@ -76,6 +81,32 @@ class ObjectIdOnInsertCollection(Collection):
         document["_id"] = ObjectId()
         return await super().insert_one(document)
 
+class AtomicCollection(Collection):
+    async def find_one_and_update(self, query, update, **_kwargs):
+        document = next(
+            (row for row in self.documents if matches(row, query)),
+            None,
+        )
+        if not document:
+            return None
+        document.update(deepcopy(update.get("$set", {})))
+        document.setdefault("audit", []).append(deepcopy(update["$push"]["audit"]))
+        return deepcopy(document)
+
+
+class UpsertCollection(Collection):
+    async def update_one(self, query, update, **kwargs):
+        document = next((row for row in self.documents if matches(row, query)), None)
+        if document:
+            document.update(deepcopy(update.get("$set", {})))
+            return SimpleNamespace(matched_count=1, upserted_id=None)
+        if kwargs.get("upsert"):
+            document = deepcopy(update.get("$setOnInsert", {}))
+            document.update(deepcopy(update.get("$set", {})))
+            self.documents.append(document)
+            return SimpleNamespace(matched_count=0, upserted_id=document.get("id"))
+        return SimpleNamespace(matched_count=0, upserted_id=None)
+
 
 class Database:
     def __init__(self, **collections):
@@ -85,7 +116,14 @@ class Database:
         return self.collections[name]
 
 
-def test_request_creation_snapshots_only_supplier_stock_and_rejects_duplicate_lines(monkeypatch):
+@pytest.mark.parametrize(
+    "user",
+    [
+        {"id": "requester", "role": "owner"},
+        {"id": "requester-admin", "company_roles": {"superiqfoam": "admin"}},
+    ],
+)
+def test_request_creation_snapshots_only_supplier_stock_and_rejects_duplicate_lines(monkeypatch, user):
     supplier_db = Database(stock=Collection([{
         "id": "supplier-stock-1",
         "company_id": "iqfoam-whole-sallers",
@@ -105,7 +143,6 @@ def test_request_creation_snapshots_only_supplier_stock_and_rejects_duplicate_li
     )
     monkeypatch.setattr(server, "notify_intercompany_company", lambda *_args, **_kwargs: asyncio.sleep(0))
     company_token = server.active_company_id.set("superiqfoam")
-    user = {"id": "requester", "role": "owner"}
     try:
         body = server.IntercompanyOrderRequestIn(
             supplying_company_id="iqfoam-whole-sallers",
@@ -191,7 +228,7 @@ def test_request_access_is_company_scoped_and_invoice_details_are_hidden_until_s
     }
     shared_db = Database(intercompany_order_requests=Collection([request]))
     monkeypatch.setattr(server, "base_db", shared_db)
-    user = {"id": "owner", "role": "owner"}
+    user = {"id": "requester-admin", "company_roles": {"superiqfoam": "admin"}}
     company_token = server.active_company_id.set("superiqfoam")
     try:
         visible = asyncio.run(server.get_intercompany_request("ICR-1", user))
@@ -205,12 +242,39 @@ def test_request_access_is_company_scoped_and_invoice_details_are_hidden_until_s
     try:
         with pytest.raises(HTTPException) as error:
             asyncio.run(server.get_intercompany_request("ICR-1", user))
-        assert error.value.status_code == 404
+        assert error.value.status_code == 403
     finally:
         server.active_company_id.reset(company_token)
 
     request["invoice_sent"] = True
     assert server.public_intercompany_request(request, "superiqfoam")["invoice_id"] == "invoice-1"
+
+
+def test_intercompany_notifications_reach_admins_authorized_for_the_supplier_company():
+    accounts = [
+        {"id": "manufacturing-admin", "company_roles": {"iqfoam-manufactoring": "admin"}},
+        {"id": "manufacturing-user", "company_roles": {"iqfoam-manufactoring": "user"}},
+        {"id": "other-company-admin", "company_roles": {"superiqfoam": "admin"}},
+        {"id": "wholesaler-admin", "company_roles": {"iqfoam-whole-sallers": "admin"}},
+        {
+            "id": "manufacturing-worker",
+            "company_roles": {"iqfoam-manufactoring": "admin"},
+            "is_worker": True,
+        },
+        {
+            "id": "inactive-admin",
+            "company_roles": {"iqfoam-manufactoring": "admin"},
+            "active": False,
+        },
+    ]
+
+    recipients = server.intercompany_notification_recipients(
+        accounts, "iqfoam-manufactoring",
+    )
+
+    assert {account["id"] for account in recipients} == {
+        "manufacturing-admin", "wholesaler-admin",
+    }
 
 
 def test_acceptance_rejects_unreviewed_or_insufficient_stock_without_mutation(monkeypatch):
@@ -232,7 +296,10 @@ def test_acceptance_rejects_unreviewed_or_insufficient_stock_without_mutation(mo
     }
     request_collection = Collection([request])
     monkeypatch.setattr(server, "base_db", Database(intercompany_order_requests=request_collection))
-    monkeypatch.setattr(server, "tenant_database", lambda *_args: Database())
+    monkeypatch.setattr(
+        server, "tenant_database",
+        lambda *_args: Database(stock=Collection([])),
+    )
     monkeypatch.setattr(server, "notify_intercompany_company", lambda *_args, **_kwargs: asyncio.sleep(0))
     user = {"id": "supplier-admin", "company_roles": {"iqfoam-whole-sallers": "admin"}}
     company_token = server.active_company_id.set("iqfoam-whole-sallers")
@@ -254,6 +321,97 @@ def test_acceptance_rejects_unreviewed_or_insufficient_stock_without_mutation(mo
         assert request_collection.documents[0]["items"][0]["quantity"] == 4
     finally:
         server.active_company_id.reset(company_token)
+
+
+def test_acceptance_relinks_recreated_supplier_stock_item(monkeypatch):
+    request = {
+        "id": "ICR-RELINK",
+        "requesting_company_id": "superiqfoam",
+        "supplying_company_id": "iqfoam-whole-sallers",
+        "status": "PENDING",
+        "created_by": "requester",
+        "supplying_company_name": "IQFOAM WHOLESALERS",
+        "items": [{
+            "id": "item-1",
+            "stock_id": "deleted-stock-item",
+            "product": "Ribbon Pink",
+            "dimensions": "1070x120",
+            "quantity": 1,
+            "manual_review": False,
+        }],
+    }
+    request_collection = AtomicCollection([request])
+    supplier_db = Database(stock=Collection([{
+        "id": "recreated-stock-item",
+        "company_id": "iqfoam-whole-sallers",
+        "product": "Ribbon Pink",
+        "size": "1070x120",
+        "opening": 5,
+        "archived": False,
+    }]))
+    monkeypatch.setattr(
+        server, "base_db",
+        Database(intercompany_order_requests=request_collection),
+    )
+    monkeypatch.setattr(server, "tenant_database", lambda *_args: supplier_db)
+    monkeypatch.setattr(
+        server,
+        "intercompany_available_stock",
+        lambda _db, _company, stock_ids: asyncio.sleep(0, result={
+            stock_id: 5 for stock_id in stock_ids
+            if stock_id == "recreated-stock-item"
+        }),
+    )
+    monkeypatch.setattr(
+        server, "notify_intercompany_company",
+        lambda *_args, **_kwargs: asyncio.sleep(0),
+    )
+    user = {"id": "supplier-admin", "company_roles": {"iqfoam-whole-sallers": "admin"}}
+    company_token = server.active_company_id.set("iqfoam-whole-sallers")
+    try:
+        accepted = asyncio.run(server.accept_intercompany_request("ICR-RELINK", user))
+        assert accepted["status"] == "ACCEPTED"
+        assert accepted["items"][0]["stock_id"] == "recreated-stock-item"
+        assert accepted["audit"][-1]["stock_relinked_items"] == [{
+            "item_id": "item-1",
+            "previous_stock_id": "deleted-stock-item",
+            "stock_id": "recreated-stock-item",
+        }]
+    finally:
+        server.active_company_id.reset(company_token)
+
+
+def test_invoice_stock_deductions_use_in_stock_matching_product_record(monkeypatch):
+    stock_records = [
+        {"id": "recreated-stock", "product": "Ribbon Pink", "size": "1070x120"},
+        {"id": "old-stock", "product": "Ribbon Pink", "size": "1070x120"},
+    ]
+    async def list_stock(collection, **_kwargs):
+        assert collection == "stock"
+        return deepcopy(stock_records)
+
+    monkeypatch.setattr(server, "listall", list_stock)
+
+    async def stock_current(stock):
+        stock["current"] = 1 if stock["id"] == "recreated-stock" else 0
+        return stock
+
+    monkeypatch.setattr(server, "stock_current", stock_current)
+    deductions = asyncio.run(server.invoice_stock_deductions({
+        "items": [{
+            "category": "Ribbon Pink",
+            "size": "1070x120",
+            "qty": 1,
+        }],
+    }))
+
+    assert deductions == [{
+        "stock_id": "recreated-stock",
+        "product": "Ribbon Pink",
+        "size": "1070x120",
+        "quantity": server.D("1"),
+    }]
+
 
 @pytest.mark.parametrize(
     "company_id",
@@ -390,9 +548,61 @@ def test_intercompany_invoice_uses_saved_price_and_customer_zone_rules(monkeypat
         assert created_invoices[0].items[0].unit_price == 85
         assert created_invoices[0].items[0].qty == 5
         assert created_invoices[0].items[0].unit_price * created_invoices[0].items[0].qty == 425
+        assert created_invoices[0].customer_id == ""
+        assert created_invoices[0].customer_name == "IQFOAM WHOLESALERS"
         assert shared_db.intercompany_order_requests.documents[0]["invoice_quantities"] == {
             "request-line-1": 5,
         }
+    finally:
+        server.active_company_id.reset(token)
+
+
+def test_intercompany_invoice_uses_requesting_company_name_without_customer_record(monkeypatch):
+    request = {
+        "id": "ICR-NO-CUSTOMER",
+        "requesting_company_id": "imraan-plastics",
+        "supplying_company_id": "superiqfoam",
+        "status": "ACCEPTED",
+        "items": [{
+            "id": "request-line",
+            "stock_id": "supplier-stock",
+            "product": "Ribbon Pink",
+            "dimensions": "1070x120",
+            "quantity": 1,
+        }],
+    }
+    shared_db = Database(intercompany_order_requests=Collection([request]))
+    supplier_db = Database(
+        invoices=Collection(),
+        intercompany_customer_mappings=Collection(),
+        customers=Collection(),
+    )
+    monkeypatch.setattr(server, "base_db", shared_db)
+    monkeypatch.setattr(server, "tenant_database", lambda *_args: supplier_db)
+    monkeypatch.setattr(
+        server,
+        "resolve_price",
+        lambda *_args: asyncio.sleep(0, result={"found": True, "price": 100}),
+    )
+    created_invoices = []
+
+    async def create_saved_invoice(body, user):
+        created_invoices.append(body)
+        return {"id": "invoice-no-customer", "number": "INV-IC", "total": 100}
+
+    monkeypatch.setattr(server, "create_invoice", create_saved_invoice)
+    user = {"id": "supplier-admin", "company_roles": {"superiqfoam": "admin"}}
+    token = server.active_company_id.set("superiqfoam")
+    try:
+        result = asyncio.run(server.create_intercompany_invoice(
+            "ICR-NO-CUSTOMER",
+            server.IntercompanyCreateInvoiceIn(send_to_requesting_company=False),
+            user,
+        ))
+
+        assert result["invoice"]["id"] == "invoice-no-customer"
+        assert created_invoices[0].customer_id == ""
+        assert created_invoices[0].customer_name == "IMRAAN PLASTICS"
     finally:
         server.active_company_id.reset(token)
 
@@ -572,6 +782,232 @@ def test_requesting_company_can_preview_sent_invoice_with_supplier_document_deta
         assert result["settings"]["unified_price_list"] is False
         assert result["customer"]["address"] == "Customer address"
         assert "supervisor_password_hash" not in result["settings"]
+    finally:
+        server.active_company_id.reset(token)
+
+
+@pytest.mark.parametrize(
+    "request_invoice_id, invoice_link",
+    [
+        ("invoice-legacy", None),
+        (None, "idempotency_key"),
+    ],
+)
+def test_sent_intercompany_invoice_repairs_legacy_linkage_on_access(
+    monkeypatch, request_invoice_id, invoice_link,
+):
+    request = {
+        "id": "ICR-LEGACY",
+        "requesting_company_id": "iqfoam-whole-sallers",
+        "supplying_company_id": "superiqfoam",
+        "invoice_id": request_invoice_id,
+        "invoice_sent": True,
+    }
+    invoice = {
+        "id": "invoice-legacy",
+        "number": "INV-LEGACY",
+        "date": "2026-11-01",
+        "total": 200,
+        "items": [],
+    }
+    if invoice_link:
+        invoice[invoice_link] = "intercompany:ICR-LEGACY"
+    requests = Collection([request])
+    invoices = Collection([invoice])
+    shared_db = Database(intercompany_order_requests=requests)
+    supplier_db = Database(
+        invoices=invoices,
+        payments=Collection(),
+        settings=Collection(),
+        customers=Collection(),
+    )
+    monkeypatch.setattr(server, "base_db", shared_db)
+    monkeypatch.setattr(server, "tenant_database", lambda *_args: supplier_db)
+    token = server.active_company_id.set("iqfoam-whole-sallers")
+    try:
+        result = asyncio.run(server.get_intercompany_request_invoice(
+            "ICR-LEGACY", {"id": "wholesaler-admin", "role": "owner"},
+        ))
+        assert result["invoice"]["id"] == "invoice-legacy"
+        assert invoices.documents[0]["intercompany_request_id"] == "ICR-LEGACY"
+        assert requests.documents[0]["invoice_id"] == "invoice-legacy"
+    finally:
+        server.active_company_id.reset(token)
+
+
+def test_sent_intercompany_invoice_does_not_resolve_invoice_linked_to_another_request(monkeypatch):
+    request = {
+        "id": "ICR-LEGACY",
+        "requesting_company_id": "iqfoam-whole-sallers",
+        "supplying_company_id": "superiqfoam",
+        "invoice_id": "invoice-legacy",
+        "invoice_sent": True,
+    }
+    invoice = {
+        "id": "invoice-legacy",
+        "intercompany_request_id": "ICR-OTHER",
+        "items": [],
+    }
+    supplier_db = Database(
+        invoices=Collection([invoice]),
+        payments=Collection(),
+        settings=Collection(),
+        customers=Collection(),
+    )
+    monkeypatch.setattr(
+        server, "base_db",
+        Database(intercompany_order_requests=Collection([request])),
+    )
+    monkeypatch.setattr(server, "tenant_database", lambda *_args: supplier_db)
+    token = server.active_company_id.set("iqfoam-whole-sallers")
+    try:
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(server.get_intercompany_request_invoice(
+                "ICR-LEGACY", {"id": "wholesaler-admin", "role": "owner"},
+            ))
+        assert error.value.status_code == 404
+    finally:
+        server.active_company_id.reset(token)
+
+
+def test_direct_intercompany_invoice_send_is_idempotent_and_received_by_recipient(monkeypatch):
+    invoice = {
+        "id": "invoice-direct",
+        "number": "INV-DIRECT",
+        "status": "issued",
+        "items": [{"qty": 2, "unit_price": 50, "category": "Foam", "size": "100x200"}],
+    }
+    deliveries = UpsertCollection()
+    shared_db = Database(
+        intercompany_order_requests=Collection(),
+        intercompany_invoice_deliveries=deliveries,
+    )
+    sender_db = Database(invoices=Collection([invoice]))
+    monkeypatch.setattr(server, "base_db", shared_db)
+    monkeypatch.setattr(server, "tenant_database", lambda _client, _base, company_id: sender_db)
+    monkeypatch.setattr(server, "notify_intercompany_company", lambda *_args, **_kwargs: asyncio.sleep(0))
+    user = {"id": "sender-admin", "role": "owner"}
+    token = server.active_company_id.set("superiqfoam")
+    try:
+        body = server.IntercompanyInvoiceSendIn(
+            invoice_id="invoice-direct",
+            recipient_company_id="iqfoam-whole-sallers",
+        )
+        first = asyncio.run(server.send_intercompany_invoice(body, user))
+        second = asyncio.run(server.send_intercompany_invoice(body, user))
+        assert first["invoice_id"] == "invoice-direct"
+        assert second["id"] == first["id"]
+        assert len(deliveries.documents) == 1
+        assert deliveries.documents[0]["recipient_company_id"] == "iqfoam-whole-sallers"
+    finally:
+        server.active_company_id.reset(token)
+
+
+def test_direct_intercompany_invoice_appears_in_recipient_receiving_invoices(monkeypatch):
+    request_db = Database(
+        intercompany_order_requests=Collection([{
+            "id": "ICR-RECEIVED",
+            "requesting_company_id": "iqfoam-whole-sallers",
+            "supplying_company_id": "iqfoam-manufactoring",
+            "invoice_id": "invoice-requested",
+            "invoice_number": "INV-REQUESTED",
+            "invoice_total": 75,
+            "invoice_sent": True,
+            "sent_at": "2026-11-18T08:00:00+00:00",
+        }]),
+        intercompany_invoice_deliveries=Collection([{
+            "id": "direct-delivery",
+            "sender_company_id": "superiqfoam",
+            "recipient_company_id": "iqfoam-whole-sallers",
+            "invoice_id": "invoice-direct",
+            "sent_at": "2026-11-18T09:00:00+00:00",
+        }]),
+    )
+    sender_db = Database(invoices=Collection([{
+        "id": "invoice-direct",
+        "number": "INV-DIRECT",
+        "total": 100,
+        "customer_name": "IQFOAM WHOLESALERS",
+    }]))
+    monkeypatch.setattr(server, "base_db", request_db)
+    monkeypatch.setattr(server, "tenant_database", lambda *_args: sender_db)
+    token = server.active_company_id.set("iqfoam-whole-sallers")
+    try:
+        receipts = asyncio.run(server.list_received_intercompany_invoices(
+            {"id": "recipient-admin", "role": "owner"},
+        ))
+        assert receipts == [{
+            "id": "direct:direct-delivery",
+            "source": "direct",
+            "requesting_company_id": "iqfoam-whole-sallers",
+            "supplying_company_id": "superiqfoam",
+            "invoice_id": "invoice-direct",
+            "invoice_number": "INV-DIRECT",
+            "invoice_total": 100,
+            "customer_name": "IQFOAM WHOLESALERS",
+            "sent_at": "2026-11-18T09:00:00+00:00",
+        }, {
+            "id": "request:ICR-RECEIVED",
+            "source": "request",
+            "requesting_company_id": "iqfoam-whole-sallers",
+            "supplying_company_id": "iqfoam-manufactoring",
+            "invoice_id": "invoice-requested",
+            "invoice_number": "INV-REQUESTED",
+            "invoice_total": 75,
+            "sent_at": "2026-11-18T08:00:00+00:00",
+        }]
+    finally:
+        server.active_company_id.reset(token)
+
+
+def test_direct_intercompany_invoice_details_are_only_available_to_recipient(monkeypatch):
+    delivery = {
+        "id": "superiqfoam:iqfoam-whole-sallers:invoice-direct",
+        "sender_company_id": "superiqfoam",
+        "recipient_company_id": "iqfoam-whole-sallers",
+        "invoice_id": "invoice-direct",
+    }
+    invoice = {
+        "id": "invoice-direct",
+        "customer_name": "IQFOAM WHOLESALERS",
+        "number": "INV-DIRECT",
+        "date": "2026-11-18",
+        "due_date": "2026-11-18",
+        "items": [{"qty": 2, "category": "Foam", "size": "100x200", "unit_price": 50}],
+        "status": "issued",
+        "amount_paid": 0,
+    }
+    shared_db = Database(
+        intercompany_order_requests=Collection(),
+        intercompany_invoice_deliveries=Collection([delivery]),
+    )
+    sender_db = Database(
+        invoices=Collection([invoice]),
+        payments=Collection(),
+        settings=Collection(),
+        customers=Collection(),
+    )
+    monkeypatch.setattr(server, "base_db", shared_db)
+    monkeypatch.setattr(server, "tenant_database", lambda *_args: sender_db)
+    token = server.active_company_id.set("iqfoam-whole-sallers")
+    try:
+        received = asyncio.run(server.get_received_intercompany_invoice(
+            "direct:superiqfoam:iqfoam-whole-sallers:invoice-direct",
+            {"id": "recipient-admin", "role": "owner"},
+        ))
+        assert received["source"] == "direct"
+        assert received["invoice_details"]["invoice"]["number"] == "INV-DIRECT"
+    finally:
+        server.active_company_id.reset(token)
+
+    token = server.active_company_id.set("iqfoam-manufactoring")
+    try:
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(server.get_received_intercompany_invoice(
+                "direct:superiqfoam:iqfoam-whole-sallers:invoice-direct",
+                {"id": "other-admin", "role": "owner"},
+            ))
+        assert error.value.status_code == 404
     finally:
         server.active_company_id.reset(token)
 

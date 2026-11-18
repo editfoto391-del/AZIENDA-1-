@@ -284,6 +284,162 @@ def test_partial_grvs_update_po_and_stock_once_without_creating_buyings(monkeypa
     asyncio.run(scenario())
 
 
+def test_intercompany_invoice_grv_creates_new_stock_without_inventing_sale_prices(monkeypatch):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    monkeypatch.setattr(server, "base_db", type("SharedDatabase", (), {
+        "intercompany_order_requests": FakeCollection([{
+            "id": "request-1",
+            "invoice_id": "invoice-1",
+            "requesting_company_id": "test-company",
+            "invoice_sent": True,
+        }]),
+    })())
+    user = {
+        "email": "receiver@example.test",
+        "name": "Receiver",
+        "_active_company_id": "test-company",
+    }
+
+    async def scenario():
+        draft = await server.create_grv(server.GRVIn(
+            purpose="selling",
+            supplier_name="Intercompany supplier",
+            source_intercompany_invoice_id="invoice-1",
+            source_intercompany_category="selling_product",
+            received_date="2026-10-29",
+            items=[server.GRVLineIn(
+                new_product=True,
+                product="New foam",
+                size="900x50",
+                actual_received_quantity=3,
+                accepted_quantity=3,
+                unit_cost=85,
+            )],
+        ), user)
+        assert draft["status"] == "draft"
+        assert draft["source_intercompany_invoice_id"] == "invoice-1"
+        assert draft["source_intercompany_category"] == "selling_product"
+
+        confirmed = await server.confirm_grv(draft["id"], user)
+        assert confirmed["status"] == "completed"
+        assert any(
+            item["product"] == "New foam" and item["size"] == "900x50"
+            for item in fake_db.stock.documents
+        )
+        assert fake_db.prices.documents == []
+        assert sum(item["quantity"] for item in fake_db.stock_movements.documents) == 3
+
+        duplicate = await server.create_grv(server.GRVIn(
+            purpose="selling",
+            supplier_name="Intercompany supplier",
+            source_intercompany_invoice_id="invoice-1",
+            source_intercompany_category="selling_product",
+            received_date="2026-10-29",
+            items=[],
+        ), user)
+        assert duplicate["id"] == draft["id"]
+        assert len(fake_db.grvs.documents) == 1
+
+    asyncio.run(scenario())
+
+
+def test_intercompany_grv_automatically_uses_existing_stock_product(monkeypatch):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    existing_stock = fake_db.stock.documents[0]
+
+    async def find_existing_stock(product, size, company_id):
+        assert product == "Simple"
+        assert size == "910x100"
+        assert company_id == "superiqfoam"
+        return deepcopy(existing_stock)
+
+    monkeypatch.setattr(server, "find_stock_by_identity", find_existing_stock)
+    token = server.active_company_id.set("superiqfoam")
+    try:
+        items = asyncio.run(server._grv_items_from_request([
+            server.GRVLineIn(
+                new_product=True,
+                product="Simple",
+                size="910x100",
+                actual_received_quantity=4,
+                accepted_quantity=4,
+                unit_cost=85,
+            ),
+        ]))
+        assert len(items) == 1
+        assert items[0]["stock_id"] == existing_stock["id"]
+        assert items[0]["product"] == existing_stock["product"]
+        assert items[0]["size"] == existing_stock["size"]
+        assert items[0]["new_product"] is False
+        assert items[0]["actual_received_quantity"] == 4
+        assert items[0]["accepted_quantity"] == 4
+    finally:
+        server.active_company_id.reset(token)
+
+
+@pytest.mark.parametrize(
+    ("category", "is_chemical", "line", "target_collection", "target_field"),
+    [
+        (
+            "raw_material", False,
+            {"product": "Glue", "size": "25", "unit": "kg", "category": "Glue"},
+            "company_inventory", "loose_units",
+        ),
+        (
+            "chemical", True,
+            {"product": "Resin", "size": "25", "unit": "L", "container_type": "Barrel"},
+            "chemical_inventory", "count",
+        ),
+    ],
+)
+def test_intercompany_invoice_raw_and_chemical_grvs_post_to_their_inventory(
+    monkeypatch, category, is_chemical, line, target_collection, target_field,
+):
+    fake_db = FakeDatabase()
+    _install_fake_grv_dependencies(monkeypatch, fake_db)
+    monkeypatch.setattr(server, "base_db", type("SharedDatabase", (), {
+        "intercompany_order_requests": FakeCollection([{
+            "id": "request-1",
+            "invoice_id": "invoice-1",
+            "requesting_company_id": "superiqfoam",
+            "invoice_sent": True,
+        }]),
+    })())
+    user = {
+        "email": "receiver@example.test",
+        "name": "Receiver",
+        "_active_company_id": "superiqfoam",
+    }
+
+    async def scenario():
+        company_context = server.active_company_id.set("superiqfoam")
+        try:
+            draft = await server.create_grv(server.GRVIn(
+                purpose="raw_material",
+                is_chemical=is_chemical,
+                supplier_name="Intercompany supplier",
+                source_intercompany_invoice_id="invoice-1",
+                source_intercompany_category=category,
+                received_date="2026-10-29",
+                items=[server.GRVLineIn(
+                    **line,
+                    actual_received_quantity=4,
+                    accepted_quantity=4,
+                    unit_cost=12,
+                )],
+            ), user)
+            confirmed = await server.confirm_grv(draft["id"], user)
+            assert confirmed["status"] == "completed"
+            target = fake_db[target_collection].documents[0]
+            assert target[target_field] == 4
+        finally:
+            server.active_company_id.reset(company_context)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("initial_status", ["completed", "reversing"])
 def test_grv_reversal_batches_stock_history_reads_and_retries_interrupted_reversals(
     monkeypatch, initial_status,

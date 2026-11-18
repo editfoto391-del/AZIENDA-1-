@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { useSearchParams } from "react-router-dom";
-import { Building2, CircleAlert, Download, LoaderCircle, Plus, RefreshCw, Send } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Building2, CircleAlert, ClipboardCheck, Download, LoaderCircle, Plus, RefreshCw, Send } from "lucide-react";
 import { api, apiError } from "@/lib/api";
 import { companyProfileName } from "@/lib/company";
 import { InvoiceDocument } from "@/components/InvoiceDocument";
 import { elementToPdf } from "@/lib/pdf";
-import { documentFilename } from "@/lib/format";
+import { documentFilename, today } from "@/lib/format";
 import { useAuth } from "@/context/AuthContext";
 
 const COMPANIES = [
@@ -33,6 +33,12 @@ function companyName(id) {
 
 function intercompanyError(error) {
   const detail = error.response?.data?.detail;
+  if (detail?.code === "INSUFFICIENT_STOCK" && Array.isArray(detail.items)) {
+    const shortages = detail.items.map((item) =>
+      `${item.product} ${item.size}: ${item.available} available, ${item.requested} requested`,
+    );
+    return ["Insufficient stock to create the invoice.", ...shortages].join(" ");
+  }
   if (!detail || typeof detail !== "object" || typeof detail.message !== "string") {
     return apiError(error);
   }
@@ -43,6 +49,19 @@ function intercompanyError(error) {
 }
 
 const intercompanyProductLabel = (product) => [product.product, product.dimensions].filter(Boolean).join(" · ");
+const invoiceItemsForGRV = (invoice) => (invoice?.items || [])
+  .filter((item) => (item.category || item.size || item.description)
+    && !(!item.category && !item.size && item.description?.trim().toLowerCase() === "opening balance"))
+  .map((item, index) => ({ ...item, key: String(index) }));
+const invoiceItemName = (item) => (item.category || item.description || "").trim();
+const invoiceItemMeasure = (item) => {
+  const size = String(item.size || "").trim();
+  const measure = size.match(/^(\d+(?:[.,]\d+)?)\s*([a-zA-Z]+)$/);
+  return {
+    capacity: Number(String(item.capacity ?? measure?.[1] ?? "").replace(",", ".")),
+    unit: String(item.unit || measure?.[2] || "").trim(),
+  };
+};
 
 function Panel({ title, children, icon: Icon }) {
   return (
@@ -58,10 +77,12 @@ function Panel({ title, children, icon: Icon }) {
 
 export default function Intercompany() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const companyId = user?.company_id;
   const isAdmin = !user?.is_worker && (
-    user?.is_owner || user?.role === "admin" || user?.company_roles?.[companyId] === "admin"
+    user?.is_owner || user?.is_admin
+    || ["owner", "admin"].includes(user?.company_roles?.[companyId])
   );
   const suppliers = COMPANIES.filter((company) => company.id !== companyId);
   const [requests, setRequests] = useState([]);
@@ -82,6 +103,8 @@ export default function Intercompany() {
   const [invoiceProducts, setInvoiceProducts] = useState([]);
   const [invoiceProductsLoading, setInvoiceProductsLoading] = useState(false);
   const [invoicePdfBusy, setInvoicePdfBusy] = useState(false);
+  const [grvAssignments, setGrvAssignments] = useState(null);
+  const [grvBusy, setGrvBusy] = useState(false);
   const invoiceDocumentRef = useRef(null);
 
   const loadRequests = useCallback(async (page = 1) => {
@@ -101,18 +124,41 @@ export default function Intercompany() {
   useEffect(() => { loadRequests(); }, [loadRequests]);
 
   useEffect(() => {
+    if (!companyId) return undefined;
+    const refreshVisibleRequests = () => {
+      if (document.visibilityState === "visible") {
+        loadRequests(requestPage);
+      }
+    };
+    const interval = window.setInterval(refreshVisibleRequests, 30000);
+    window.addEventListener("focus", refreshVisibleRequests);
+    document.addEventListener("visibilitychange", refreshVisibleRequests);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshVisibleRequests);
+      document.removeEventListener("visibilitychange", refreshVisibleRequests);
+    };
+  }, [companyId, loadRequests, requestPage]);
+
+  useEffect(() => {
     const requestId = searchParams.get("requestId");
     if (!requestId) return;
     let active = true;
-    api.get(`/intercompany/requests/${requestId}`).then((request) => {
-      if (active) setSelectedRequest(request);
+    api.get(`/intercompany/requests/${requestId}`).then(async (request) => {
+      if (!active) return;
+      if (request.status === "INVOICE_SENT" && request.requesting_company_id === companyId) {
+        const invoiceDetails = await api.get(`/intercompany/requests/${requestId}/invoice`);
+        if (active) setSelectedRequest({ ...request, invoice_details: invoiceDetails });
+        return;
+      }
+      setSelectedRequest(request);
     }).catch((requestError) => {
       if (active) toast.error(intercompanyError(requestError));
     }).finally(() => {
       if (active) setSearchParams({}, { replace: true });
     });
     return () => { active = false; };
-  }, [searchParams, setSearchParams]);
+  }, [companyId, searchParams, setSearchParams]);
 
   useEffect(() => {
     if (!supplierId) return undefined;
@@ -282,11 +328,121 @@ export default function Intercompany() {
     setBusy(request.id);
     try {
       const invoiceDetails = await api.get(`/intercompany/requests/${request.id}/invoice`);
+      setGrvAssignments(null);
       setSelectedRequest({ ...request, invoice_details: invoiceDetails });
     } catch (requestError) {
       toast.error(intercompanyError(requestError));
     } finally {
       setBusy("");
+    }
+  };
+
+  const createInvoiceGRVs = async () => {
+    const invoiceDetails = selectedRequest?.invoice_details;
+    const invoice = invoiceDetails?.invoice;
+    const invoiceItems = invoiceItemsForGRV(invoice);
+    if (selectedRequest?.requesting_company_id !== companyId) {
+      toast.error("Only the requesting company can receive this invoice into its GRV.");
+      return;
+    }
+    if (!invoice || !invoiceItems.length) {
+      toast.error("This invoice has no product lines to add to a GRV.");
+      return;
+    }
+    if (invoiceItems.some((item) => !grvAssignments?.[item.key])) {
+      toast.error("Choose a destination for every invoice line.");
+      return;
+    }
+    const groups = new Map();
+    invoiceItems.forEach((item, index) => {
+      const category = grvAssignments[item.key];
+      if (!groups.has(category)) groups.set(category, []);
+      groups.get(category).push({ item, index });
+    });
+
+    setGrvBusy(true);
+    const created = [];
+    try {
+      let stock = null;
+      const payloads = [];
+      if (groups.has("selling_product")) {
+        stock = await api.getUncached("/stock");
+        if (!Array.isArray(stock)) throw new Error("The stock list response is not valid.");
+      }
+
+      for (const [category, entries] of groups) {
+        const isChemical = category === "chemical";
+        const purpose = category === "selling_product" ? "selling" : "raw_material";
+        const items = entries.map(({ item, index }) => {
+          const product = invoiceItemName(item);
+          const quantity = Number(item.qty);
+          if (!product || !Number.isFinite(quantity) || quantity <= 0) {
+            throw new Error(`Invoice line ${index + 1} needs a product name and a positive quantity.`);
+          }
+          const measure = invoiceItemMeasure(item);
+          if (isChemical && (!Number.isFinite(measure.capacity) || measure.capacity <= 0 || !measure.unit)) {
+            throw new Error(
+              `Invoice line ${index + 1} needs a numeric chemical capacity and unit in its size (for example 25 L).`,
+            );
+          }
+          const line = {
+            product,
+            size: isChemical ? String(measure.capacity) : String(item.size || "").trim(),
+            actual_received_quantity: quantity,
+            accepted_quantity: quantity,
+            rejected_quantity: 0,
+            damaged_quantity: 0,
+            unit_cost: Number(item.unit_price) || 0,
+          };
+          if (category === "selling_product") {
+            const existing = stock.find((candidate) =>
+              String(candidate.product || "").trim().toLowerCase() === product.toLowerCase()
+              && String(candidate.size || "").trim().toLowerCase() === line.size.toLowerCase(),
+            );
+            return existing
+              ? { ...line, stock_id: existing.id, product_code: existing.code || existing.sku || existing.id }
+              : { ...line, new_product: true };
+          }
+          return {
+            ...line,
+            category: isChemical ? "Chemical" : (item.category || "Other"),
+            unit: measure.unit || String(item.unit || "pcs").trim(),
+            container_type: item.container_type || "Barrel",
+          };
+        });
+        const payload = {
+          purpose,
+          is_chemical: isChemical,
+          source_intercompany_invoice_id: invoice.id,
+          source_intercompany_category: category,
+          supplier_name: invoiceDetails.settings?.company_name
+            || companyName(selectedRequest.supplying_company_id),
+          delivery_note_number: invoice.number || "",
+          received_date: invoice.date || today(),
+          received_by: user?.name || user?.email || "",
+          notes: `Created from intercompany invoice ${invoice.number || ""}`.trim(),
+          vat_rate: 0,
+          items,
+        };
+        payloads.push(payload);
+      }
+      for (const payload of payloads) {
+        const result = await api.post("/grvs", payload);
+        created.push(result);
+      }
+      toast.success(`${created.length} GRV draft${created.length === 1 ? "" : "s"} ready to review and confirm.`);
+      setSelectedRequest(null);
+      setGrvAssignments(null);
+      navigate("/grv");
+    } catch (requestError) {
+      const detail = requestError.response?.data?.detail;
+      const message = typeof detail === "string" ? detail : requestError.message || apiError(requestError);
+      const partial = created.length
+        ? ` ${created.length} draft${created.length === 1 ? "" : "s"} were already created; retry to complete the remaining categories.`
+        : "";
+      toast.error(`${message}${partial}`);
+    } finally {
+      setGrvBusy(false);
     }
   };
 
@@ -315,9 +471,14 @@ export default function Intercompany() {
             Request products from another company. The supplier reviews each request, and invoices use the supplier's saved price list.
           </p>
         </div>
-        <button type="button" onClick={() => loadRequests()} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-semibold text-foreground shadow-sm hover:bg-muted disabled:opacity-50" data-testid="intercompany-refresh">
-          <RefreshCw size={16} /> Refresh
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => navigate("/invoices/new?sendToCompany=1")} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800" data-testid="intercompany-send-without-request">
+            <Send size={16} /> No request? Create and send an invoice
+          </button>
+          <button type="button" onClick={() => loadRequests()} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-semibold text-foreground shadow-sm hover:bg-muted disabled:opacity-50" data-testid="intercompany-refresh">
+            <RefreshCw size={16} /> Refresh
+          </button>
+        </div>
       </header>
 
       <div className="grid min-w-0 items-start gap-6 xl:grid-cols-[minmax(20rem,0.88fr)_minmax(0,1.62fr)]">
@@ -450,20 +611,24 @@ export default function Intercompany() {
       {selectedRequest && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="intercompany-detail-title">
         <div className="max-h-[90vh] w-full max-w-5xl overflow-auto rounded-xl bg-white p-5 shadow-xl">
           <div className="flex items-start justify-between gap-3">
-            <div><h2 id="intercompany-detail-title" className="text-lg font-bold">Request details</h2><p className="mt-1 text-sm text-slate-500">{companyName(selectedRequest.requesting_company_id)} → {companyName(selectedRequest.supplying_company_id)}</p></div>
-            <button type="button" onClick={() => setSelectedRequest(null)} className="rounded-md border px-3 py-1.5 text-sm">Close</button>
+            <div><h2 id="intercompany-detail-title" className="text-lg font-bold">{selectedRequest.invoice_details ? `Intercompany invoice ${selectedRequest.invoice_details.invoice.number || ""}` : "Request details"}</h2><p className="mt-1 text-sm text-slate-500">{selectedRequest.source === "direct" ? `${companyName(selectedRequest.supplying_company_id)} → ${companyName(selectedRequest.requesting_company_id)}` : `${companyName(selectedRequest.requesting_company_id)} → ${companyName(selectedRequest.supplying_company_id)}`}</p></div>
+            <button type="button" onClick={() => { setSelectedRequest(null); setGrvAssignments(null); }} className="rounded-md border px-3 py-1.5 text-sm">Close</button>
           </div>
-          <div className="mt-4 space-y-3">
-            {(selectedRequest.items || []).map((item) => <div key={item.id} className="rounded-lg border border-slate-200 p-3">
-              <div className="flex flex-wrap justify-between gap-2"><strong>{item.product} · {item.dimensions}</strong><span>Qty {item.quantity}</span></div>
-              <p className="mt-1 text-xs text-slate-500">Supplier stock available when requested: {item.available_quantity_at_request}</p>
-              {item.manual_review && selectedRequest.supplying_company_id === companyId && isAdmin && selectedRequest.status === "PENDING" && <button type="button" disabled={busy === selectedRequest.id} onClick={() => reviewItem(selectedRequest.id, item.id)} className="mt-2 rounded-md border border-amber-300 px-2.5 py-1.5 text-xs font-medium text-amber-800">Confirm product identity</button>}
-            </div>)}
-          </div>
-          {selectedRequest.notes && <p className="mt-4 whitespace-pre-wrap text-sm text-slate-700"><strong>Notes:</strong> {selectedRequest.notes}</p>}
-          {selectedRequest.rejection_reason && <p className="mt-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800"><strong>Rejection reason:</strong> {selectedRequest.rejection_reason}</p>}
+          {!selectedRequest.invoice_details && <>
+            <div className="mt-4 space-y-3">
+              {(selectedRequest.items || []).map((item) => <div key={item.id} className="rounded-lg border border-slate-200 p-3">
+                <div className="flex flex-wrap justify-between gap-2"><strong>{item.product} · {item.dimensions}</strong><span>Qty {item.quantity}</span></div>
+                <p className="mt-1 text-xs text-slate-500">Supplier stock available when requested: {item.available_quantity_at_request}</p>
+                {item.manual_review && selectedRequest.supplying_company_id === companyId && isAdmin && selectedRequest.status === "PENDING" && <button type="button" disabled={busy === selectedRequest.id} onClick={() => reviewItem(selectedRequest.id, item.id)} className="mt-2 rounded-md border border-amber-300 px-2.5 py-1.5 text-xs font-medium text-amber-800">Confirm product identity</button>}
+              </div>)}
+            </div>
+            {selectedRequest.notes && <p className="mt-4 whitespace-pre-wrap text-sm text-slate-700"><strong>Notes:</strong> {selectedRequest.notes}</p>}
+            {selectedRequest.rejection_reason && <p className="mt-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800"><strong>Rejection reason:</strong> {selectedRequest.rejection_reason}</p>}
+          </>}
           {selectedRequest.invoice_details && (() => {
             const { invoice, settings, customer } = selectedRequest.invoice_details;
+            const invoiceItems = invoiceItemsForGRV(invoice);
+            const canReceiveInvoice = selectedRequest.requesting_company_id === companyId;
             const totals = {
               subtotal: invoice.subtotal || 0,
               tax: invoice.tax_amount || 0,
@@ -476,11 +641,69 @@ export default function Intercompany() {
                   <h3 className="font-semibold">Intercompany invoice {invoice.number}</h3>
                   <p className="mt-1">{invoice.customer_name} · Total {money(invoice.total)}</p>
                 </div>
-                <button type="button" onClick={downloadInvoicePdf} disabled={invoicePdfBusy} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-60" data-testid="intercompany-invoice-download">
-                  {invoicePdfBusy ? <LoaderCircle size={16} className="animate-spin" /> : <Download size={16} />}
-                  {invoicePdfBusy ? "Preparing PDF..." : "Download PDF"}
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  {canReceiveInvoice && <button
+                    type="button"
+                    onClick={() => setGrvAssignments((current) => current === null
+                      ? Object.fromEntries(invoiceItems.map((item) => [item.key, ""]))
+                      : null)}
+                    disabled={grvBusy || invoiceItems.length === 0}
+                    className="inline-flex items-center gap-2 rounded-lg border border-emerald-800 bg-white px-3 py-2 text-sm font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
+                    data-testid="intercompany-invoice-add-grv"
+                  >
+                    <ClipboardCheck size={16} /> {grvAssignments === null ? "Add on GRV" : "Cancel GRV"}
+                  </button>}
+                  <button type="button" onClick={downloadInvoicePdf} disabled={invoicePdfBusy} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-60" data-testid="intercompany-invoice-download">
+                    {invoicePdfBusy ? <LoaderCircle size={16} className="animate-spin" /> : <Download size={16} />}
+                    {invoicePdfBusy ? "Preparing PDF..." : "Download PDF"}
+                  </button>
+                </div>
               </div>
+              {canReceiveInvoice && grvAssignments !== null && <div className="space-y-4 rounded-xl border border-emerald-200 bg-white p-4" data-testid="intercompany-grv-assignment">
+                <div>
+                  <h3 className="font-semibold text-slate-900">Choose where each invoice line should be received</h3>
+                  <p className="mt-1 text-sm text-slate-600">Select one destination per product. Separate GRV drafts will be created for each destination and can then be confirmed in the GRV section.</p>
+                </div>
+                {!invoiceItems.length && <p className="text-sm text-slate-500">This invoice has no product lines to receive.</p>}
+                <div className="space-y-3">
+                  {invoiceItems.map((item, index) => (
+                    <fieldset key={item.key} className="rounded-lg border border-slate-200 p-3">
+                      <legend className="px-1 text-sm font-semibold text-slate-800">
+                        {item.category || item.description || `Invoice line ${index + 1}`}
+                        {item.size ? ` · ${item.size}` : ""}
+                        <span className="ml-2 font-normal text-slate-500">Qty {item.qty}</span>
+                      </legend>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                        {[
+                          ["selling_product", "Selling product", "Stock"],
+                          ["raw_material", "Raw material", "Company Inventory"],
+                          ["chemical", "Chemical", "Product Management & Chemical Balance"],
+                        ].map(([value, label, destination]) => (
+                          <label key={value} className={`flex cursor-pointer items-start gap-2 rounded-lg border p-3 text-sm ${grvAssignments[item.key] === value ? "border-emerald-500 bg-emerald-50" : "border-slate-200 hover:bg-slate-50"}`}>
+                            <input
+                              type="radio"
+                              name={`intercompany-grv-line-${item.key}`}
+                              value={value}
+                              checked={grvAssignments[item.key] === value}
+                              onChange={() => setGrvAssignments((current) => ({ ...current, [item.key]: value }))}
+                              data-testid={`intercompany-grv-category-${item.key}-${value}`}
+                              className="mt-0.5 accent-emerald-700"
+                            />
+                            <span><span className="block font-semibold text-slate-800">{label}</span><span className="text-xs text-slate-500">{destination}</span></span>
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 pt-3">
+                  <button type="button" onClick={() => setGrvAssignments(null)} disabled={grvBusy} className="rounded-lg border px-3 py-2 text-sm font-medium text-slate-700 disabled:opacity-50">Cancel</button>
+                  <button type="button" onClick={createInvoiceGRVs} disabled={grvBusy || !invoiceItems.length} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50" data-testid="intercompany-grv-create-drafts">
+                    {grvBusy ? <LoaderCircle size={16} className="animate-spin" /> : <ClipboardCheck size={16} />}
+                    {grvBusy ? "Creating GRV drafts..." : "Create GRV drafts"}
+                  </button>
+                </div>
+              </div>}
               <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-100 p-3">
                 <InvoiceDocument
                   ref={invoiceDocumentRef}

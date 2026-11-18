@@ -18,7 +18,6 @@ import { PAYMENT_METHODS } from "@/lib/paymentMethods";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Textarea, Badge, Modal } from "@/components/common";
 import { Copy, Download, Save, Send, CreditCard, Plus, Trash2, ArrowLeft, Ban, Printer, AlertTriangle, Pencil, X, History, Eye, EyeOff, Archive } from "lucide-react";
-import BarcodeScanner from "@/components/BarcodeScanner";
 import {
   canonicalInvoiceCategory,
   canonicalInvoiceSize,
@@ -88,6 +87,12 @@ const auditValue = (field, value) => {
 };
 
 const emptyItem = (category = "Simple/Mix color") => ({ qty: 1, category, size: "", description: "", unit_price: 0, price_override: false, tax: false, _needsConfig: false });
+const INTERCOMPANY_COMPANIES = [
+  { id: "superiqfoam", name: "SUPERIQFOAM" },
+  { id: "iqfoam-manufactoring", name: "IQFOAM MANUFACTURING" },
+  { id: "iqfoam-whole-sallers", name: "IQFOAM WHOLESALERS" },
+  { id: "imraan-plastics", name: "IMRAAN PLASTICS" },
+];
 
 export default function InvoiceEditor({ express = false }) {
   const { user } = useAuth();
@@ -111,6 +116,7 @@ export default function InvoiceEditor({ express = false }) {
   const [prices, setPrices] = useState([]);
   const [stockItems, setStockItems] = useState([]);
   const [settings, setSettings] = useState({});
+  const [intercompanyRecipientId, setIntercompanyRecipientId] = useState("");
   const [inv, setInv] = useState({
     customer_id: "", customer_name: "", customer_phone: "", customer_city: "", date: today(), due_date: today(), zone: 1,
     payment_terms: defaultInvoicePaymentTerms(user?.company_id), reference: "", notes: "", items: [makeEmptyItem()],
@@ -428,53 +434,6 @@ export default function InvoiceEditor({ express = false }) {
     updateItem(idx, patch);
   };
 
-  const scanInvoiceProduct = async (code) => {
-    try {
-      const product = await api.post("/products/scan", {
-        code,
-        scan_id: globalThis.crypto?.randomUUID?.(),
-      });
-      const aliases = {
-        simple: "Simple/Mix color",
-      };
-      const categoryKey = canonicalInvoiceCategory(product.product);
-      const category = categoriesFor(inv.zone).find((item) =>
-        canonicalInvoiceCategory(item) === (aliases[product.product.trim().toLowerCase()] || categoryKey)
-      );
-      if (!category) {
-        toast.error(`${product.product} is not available as an invoice product in this price list`);
-        return;
-      }
-      const price = lookupPrice(inv.zone, category, product.dimensions);
-      const scannedItem = {
-        ...emptyItem(category),
-        size: product.dimensions,
-        unit_price: price.price ?? 0,
-        _needsConfig: price.needsConfig || price.missing,
-      };
-      setInv((current) => {
-        const items = [...current.items];
-        const existingIndex = items.findIndex((item) =>
-          item.category === category && item.size === product.dimensions && !item.price_override
-        );
-        if (existingIndex >= 0) {
-          items[existingIndex] = {
-            ...items[existingIndex],
-            qty: (Number(items[existingIndex].qty) || 0) + 1,
-          };
-        } else {
-          const emptyIndex = items.findIndex((item) => !item.size && !item.description);
-          if (emptyIndex >= 0) items[emptyIndex] = { ...items[emptyIndex], ...scannedItem };
-          else items.push(scannedItem);
-        }
-        return { ...current, items };
-      });
-      toast.success(`${product.product} · ${product.dimensions} added at the current price`);
-    } catch (error) {
-      toast.error(apiError(error));
-    }
-  };
-
   const repriceItems = (items, zone) => items.map((it) => {
     if (it.price_override) return it;
     const cats = categoriesFor(zone);
@@ -596,6 +555,18 @@ export default function InvoiceEditor({ express = false }) {
     zoneLookupRef.current += 1;
     setZoneFromLastInvoice(false);
     setInv((prev) => ({ ...prev, customer_id: "", customer_name: name, customer_phone: "", customer_city: "", client_number: "", destination: "" }));
+  };
+
+  const chooseIntercompanyRecipient = (recipientId) => {
+    setIntercompanyRecipientId(recipientId);
+    const recipient = INTERCOMPANY_COMPANIES.find((company) => company.id === recipientId);
+    if (!recipient) return;
+    const customer = customers.find((item) =>
+      item.active
+      && item.name.trim().toLowerCase() === recipient.name.toLowerCase()
+    );
+    if (customer) selectCustomer(customer.id);
+    else setCustomerName(recipient.name);
   };
 
   const paymentTermOptions = [...new Set([
@@ -802,7 +773,25 @@ export default function InvoiceEditor({ express = false }) {
         return;
       }
       const submitted = !id && status !== "draft";
-      toast.success(submitted ? "INVOICE SUBMITTED" : status === "draft" ? "Saved as draft" : "Invoice saved");
+      let deliveryFailed = false;
+      if (submitted && intercompanyRecipientId) {
+        try {
+          await api.post("/intercompany/invoices/send", {
+            invoice_id: res.id,
+            recipient_company_id: intercompanyRecipientId,
+          });
+        } catch (deliveryError) {
+          deliveryFailed = true;
+          toast.error(`Invoice saved, but it could not be sent to the selected company: ${apiError(deliveryError)}`);
+        }
+      }
+      if (!deliveryFailed) {
+        toast.success(
+          submitted && intercompanyRecipientId
+            ? "Invoice submitted and sent to the selected company."
+            : submitted ? "INVOICE SUBMITTED" : status === "draft" ? "Saved as draft" : "Invoice saved",
+        );
+      }
       setPendingSave(null);
       if (downloadAfterSave && submitted) {
         setInv(res);
@@ -1263,8 +1252,21 @@ export default function InvoiceEditor({ express = false }) {
 
             {(!openingBalanceOnly || editing) && <Card className="p-5">
               <h3 className="font-bold text-slate-800 mb-4 font-display">{freeformInvoiceItems ? "3. Items" : "3. Products"}</h3>
-              {!locked && !freeformInvoiceItems && <div className="mb-4 max-w-xl">
-                <BarcodeScanner onScan={scanInvoiceProduct} disabled={busy} dedupeWindowMs={0} label="Scan product to add it at the current price" />
+              {!locked && <div className="mb-4 max-w-xl space-y-4">
+                <label className="block space-y-1 text-sm font-medium text-slate-700">
+                  Send this invoice to another IQ Company?
+                  <select
+                    value={intercompanyRecipientId}
+                    onChange={(event) => chooseIntercompanyRecipient(event.target.value)}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"
+                    data-testid="invoice-intercompany-recipient"
+                  >
+                    <option value="">Do not send to another company</option>
+                    {INTERCOMPANY_COMPANIES.filter((company) => company.id !== user?.company_id).map((company) => (
+                      <option key={company.id} value={company.id}>{company.name}</option>
+                    ))}
+                  </select>
+                </label>
               </div>}
               <div className="overflow-x-auto -mx-5 px-5">
                 <table className="w-full text-sm min-w-[780px]">

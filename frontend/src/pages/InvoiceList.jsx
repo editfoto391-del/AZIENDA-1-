@@ -1,15 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { fmtMoney, fmtDate, fmtDateTime, STATUS_META, documentFilename } from "@/lib/format";
+import { fmtMoney, fmtDate, fmtDateTime, STATUS_META, documentFilename, today } from "@/lib/format";
 import { Card, Btn, Input, Badge, PageHeader, Empty, Modal } from "@/components/common";
-import { Eye, FileText, Search, Plus, Pencil, Trash2, Download, RotateCcw, Archive, MessageCircle, Link2Off } from "lucide-react";
+import { Eye, FileText, Search, Plus, Pencil, Trash2, Download, RotateCcw, Archive, MessageCircle, Link2Off, RefreshCw, LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { usesFreeformInvoiceItems, usesPriceZones } from "@/lib/company";
+import { companyProfileName, usesFreeformInvoiceItems, usesPriceZones } from "@/lib/company";
 import { resolveWhatsAppPhone } from "@/lib/whatsappPhone.mjs";
 import { InvoiceDocument } from "@/components/InvoiceDocument";
 import { elementToPdf } from "@/lib/pdf";
+
+const receivedInvoicesSeenKey = (companyId) => `received-invoices-seen:${companyId || "default"}`;
+const receivedInvoiceItems = (invoice) => (invoice?.items || [])
+  .filter((item) => (item.category || item.size || item.description)
+    && !(!item.category && !item.size && item.description?.trim().toLowerCase() === "opening balance"))
+  .map((item, index) => ({ ...item, key: String(index) }));
+const receivedInvoiceItemName = (item) => (item.category || item.description || "").trim();
+const receivedInvoiceItemMeasure = (item) => {
+  const size = String(item.size || "").trim();
+  const measure = size.match(/^(\d+(?:[.,]\d+)?)\s*([a-zA-Z]+)$/);
+  return {
+    capacity: Number(String(item.capacity ?? measure?.[1] ?? "").replace(",", ".")),
+    unit: String(item.unit || measure?.[2] || "").trim(),
+  };
+};
 
 export default function InvoiceList({ express = false }) {
   const { user } = useAuth();
@@ -21,6 +36,18 @@ export default function InvoiceList({ express = false }) {
   const priceZonesEnabled = usesPriceZones(user?.company_id);
   const freeformInvoiceItems = usesFreeformInvoiceItems(user?.company_id);
   const [list, setList] = useState([]);
+  const [section, setSection] = useState("invoices");
+  const [receivedInvoices, setReceivedInvoices] = useState([]);
+  const [receivedLoading, setReceivedLoading] = useState(false);
+  const [receivedReload, setReceivedReload] = useState(0);
+  const [receivedInvoiceReceipt, setReceivedInvoiceReceipt] = useState(null);
+  const [receivedInvoiceDetails, setReceivedInvoiceDetails] = useState(null);
+  const [receivedInvoiceLoading, setReceivedInvoiceLoading] = useState(false);
+  const [seenReceivedInvoiceIds, setSeenReceivedInvoiceIds] = useState([]);
+  const [receivedGRVAssignments, setReceivedGRVAssignments] = useState({});
+  const [receivedGRVExpanded, setReceivedGRVExpanded] = useState(false);
+  const [receivedGRVBusy, setReceivedGRVBusy] = useState(false);
+  const [receivedInvoicePdfBusy, setReceivedInvoicePdfBusy] = useState(false);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [sp] = useSearchParams();
@@ -44,9 +71,228 @@ export default function InvoiceList({ express = false }) {
   const [pdfBusyId, setPdfBusyId] = useState("");
   const detailRequest = useRef(0);
   const pdfDocumentRef = useRef(null);
+  const receivedInvoiceDocumentRef = useRef(null);
+  const receivedInvoicesLoadedRef = useRef(false);
+  const receivedInvoicesCompanyRef = useRef(user?.company_id);
   const pdfBusyRef = useRef(false);
   const pdfDownloadStartedRef = useRef("");
   const listPath = express ? "/express-invoices" : "/invoices";
+
+  useEffect(() => {
+    if (express) return undefined;
+    if (receivedInvoicesCompanyRef.current !== user?.company_id) {
+      receivedInvoicesCompanyRef.current = user?.company_id;
+      receivedInvoicesLoadedRef.current = false;
+      setReceivedInvoices([]);
+    }
+    if (section !== "receiving" && receivedInvoicesLoadedRef.current) return undefined;
+    let active = true;
+    const loadReceivedInvoices = async () => {
+      if (!receivedInvoicesLoadedRef.current) setReceivedLoading(true);
+      try {
+        const result = await api.getUncached("/intercompany/invoices/received");
+        if (!Array.isArray(result)) throw new Error("The received invoice list response is not valid.");
+        if (active) {
+          setReceivedInvoices(result);
+          receivedInvoicesLoadedRef.current = true;
+        }
+      } catch (error) {
+        if (!active) return;
+        toast.error(`Could not load received invoices: ${apiError(error)}`);
+      } finally {
+        if (active) setReceivedLoading(false);
+      }
+    };
+    loadReceivedInvoices();
+    return () => {
+      active = false;
+    };
+  }, [express, section, receivedReload, user?.company_id]);
+
+  useEffect(() => {
+    if (express) return;
+    try {
+      const saved = JSON.parse(localStorage.getItem(receivedInvoicesSeenKey(user?.company_id)) || "[]");
+      if (!Array.isArray(saved) || saved.some((id) => typeof id !== "string")) {
+        throw new Error("Saved received invoice notification state is invalid.");
+      }
+      setSeenReceivedInvoiceIds(saved);
+    } catch (error) {
+      setSeenReceivedInvoiceIds([]);
+      toast.error(`Could not load received invoice notification state: ${error.message}`);
+    }
+  }, [express, user?.company_id]);
+
+  const markReceivedInvoiceSeen = (receiptId) => {
+    const next = [...new Set([...seenReceivedInvoiceIds, receiptId])];
+    try {
+      localStorage.setItem(receivedInvoicesSeenKey(user?.company_id), JSON.stringify(next));
+      setSeenReceivedInvoiceIds(next);
+    } catch (error) {
+      toast.error(`Could not update received invoice notification state: ${error.message}`);
+    }
+  };
+
+  const openReceivedInvoice = async (receipt, openGRV = false) => {
+    setReceivedInvoiceReceipt(receipt);
+    setReceivedInvoiceDetails(null);
+    setReceivedGRVAssignments({});
+    setReceivedGRVExpanded(openGRV);
+    setReceivedInvoiceLoading(true);
+    try {
+      const details = await api.getUncached(
+        `/intercompany/invoices/received/${encodeURIComponent(receipt.id)}`,
+      );
+      const invoiceId = details.invoice_details?.invoice?.id;
+      setReceivedInvoiceDetails({
+        ...details,
+        receipt,
+        items: receivedInvoiceItems(details.invoice_details?.invoice),
+        existingGrvs: [],
+      });
+      markReceivedInvoiceSeen(receipt.id);
+      try {
+        const grvs = await api.getUncached("/grvs");
+        if (!Array.isArray(grvs)) throw new Error("The GRV list response is not valid.");
+        setReceivedInvoiceDetails((current) => current && ({
+          ...current,
+          existingGrvs: grvs.filter((grv) => grv.source_intercompany_invoice_id === invoiceId),
+        }));
+      } catch (error) {
+        toast.error(`Invoice opened, but linked GRVs could not be loaded: ${apiError(error)}`);
+      }
+    } catch (error) {
+      setReceivedInvoiceReceipt(null);
+      toast.error(`Could not open received invoice: ${apiError(error)}`);
+    } finally {
+      setReceivedInvoiceLoading(false);
+    }
+  };
+
+  const createReceivedInvoiceGRVs = async () => {
+    const selected = receivedInvoiceDetails;
+    const invoice = selected?.invoice_details?.invoice;
+    const items = selected?.items || [];
+    if (!selected || !invoice || !items.length) {
+      toast.error("This invoice has no product lines to add to a GRV.");
+      return;
+    }
+    if (items.some((item) => !receivedGRVAssignments[item.key])) {
+      toast.error("Choose a destination for every invoice line.");
+      return;
+    }
+    const groups = new Map();
+    items.forEach((item, index) => {
+      const category = receivedGRVAssignments[item.key];
+      if (!groups.has(category)) groups.set(category, []);
+      groups.get(category).push({ item, index });
+    });
+    const existingCategories = new Set(
+      (selected.existingGrvs || []).map((grv) => grv.source_intercompany_category),
+    );
+    const missingGroups = [...groups].filter(([category]) => !existingCategories.has(category));
+    if (!missingGroups.length) {
+      toast.info("A GRV already exists for each selected destination.");
+      return;
+    }
+
+    setReceivedGRVBusy(true);
+    const created = [];
+    try {
+      const needsSellingStock = missingGroups.some(([category]) => category === "selling_product");
+      const stock = needsSellingStock ? await api.getUncached("/stock") : [];
+      if (needsSellingStock && !Array.isArray(stock)) throw new Error("The stock list response is not valid.");
+      const payloads = [];
+      for (const [category, entries] of missingGroups) {
+        const isChemical = category === "chemical";
+        const lines = entries.map(({ item, index }) => {
+          const product = receivedInvoiceItemName(item);
+          const quantity = Number(item.qty);
+          if (!product || !Number.isFinite(quantity) || quantity <= 0) {
+            throw new Error(`Invoice line ${index + 1} needs a product name and a positive quantity.`);
+          }
+          const measure = receivedInvoiceItemMeasure(item);
+          if (isChemical && (!Number.isFinite(measure.capacity) || measure.capacity <= 0 || !measure.unit)) {
+            throw new Error(`Invoice line ${index + 1} needs a numeric chemical capacity and unit (for example 25 L).`);
+          }
+          const line = {
+            product,
+            size: isChemical ? String(measure.capacity) : String(item.size || "").trim(),
+            actual_received_quantity: quantity,
+            accepted_quantity: quantity,
+            rejected_quantity: 0,
+            damaged_quantity: 0,
+            unit_cost: Number(item.unit_price) || 0,
+          };
+
+          if (category === "selling_product") {
+            const existing = stock.find((candidate) =>
+              String(candidate.product || "").trim().toLowerCase() === product.toLowerCase()
+              && String(candidate.size || "").trim().toLowerCase() === line.size.toLowerCase(),
+            );
+            return existing
+              ? { ...line, stock_id: existing.id, product_code: existing.code || existing.sku || existing.id }
+              : { ...line, new_product: true };
+          }
+          return {
+            ...line,
+            category: isChemical ? "Chemical" : (item.category || "Other"),
+            unit: measure.unit || String(item.unit || "pcs").trim(),
+            container_type: item.container_type || "Barrel",
+          };
+        });
+        payloads.push({
+          purpose: category === "selling_product" ? "selling" : "raw_material",
+          is_chemical: isChemical,
+          source_intercompany_invoice_id: invoice.id,
+          source_intercompany_category: category,
+          supplier_name: selected.invoice_details.settings?.company_name
+            || companyProfileName(selected.supplying_company_id),
+          delivery_note_number: invoice.number || "",
+          received_date: invoice.date || today(),
+          received_by: user?.name || user?.email || "",
+          notes: `Created from intercompany invoice ${invoice.number || ""}`.trim(),
+          vat_rate: 0,
+          items: lines,
+        });
+      }
+      for (const payload of payloads) created.push(await api.post("/grvs", payload));
+      setReceivedInvoiceDetails((current) => current && ({
+        ...current,
+        existingGrvs: [
+          ...(current.existingGrvs || []),
+          ...created.filter((grv) => !current.existingGrvs?.some((existing) => existing.id === grv.id)),
+        ],
+      }));
+      toast.success(`${created.length} GRV draft${created.length === 1 ? "" : "s"} created.`);
+      setReceivedGRVExpanded(false);
+    } catch (error) {
+      const detail = error.response?.data?.detail;
+      const message = typeof detail === "string" ? detail : error.message || apiError(error);
+      const partial = created.length
+        ? ` ${created.length} GRV draft${created.length === 1 ? "" : "s"} were already created.`
+        : "";
+      toast.error(`${message}${partial}`);
+    } finally {
+      setReceivedGRVBusy(false);
+    }
+  };
+  const downloadReceivedInvoicePdf = async () => {
+    const invoice = receivedInvoiceDetails?.invoice_details?.invoice;
+    if (!invoice || !receivedInvoiceDocumentRef.current) return;
+    setReceivedInvoicePdfBusy(true);
+    try {
+      await elementToPdf(
+        receivedInvoiceDocumentRef.current,
+        `${documentFilename("Invoice", invoice.number, invoice.customer_name)}.pdf`,
+      );
+      toast.success("Invoice PDF downloaded.");
+    } catch (error) {
+      toast.error(error.message || "Could not download the received invoice.");
+    } finally {
+      setReceivedInvoicePdfBusy(false);
+    }
+  };
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setDebouncedQ(q);
@@ -303,6 +549,9 @@ export default function InvoiceList({ express = false }) {
   const pageCount = Math.max(1, Math.ceil(total / 50));
   const rangeStart = total === 0 ? 0 : (page - 1) * 50 + 1;
   const rangeEnd = Math.min(page * 50, total);
+  const unseenReceivedInvoiceCount = receivedInvoices.filter(
+    (receipt) => !seenReceivedInvoiceIds.includes(receipt.id),
+  ).length;
 
   return (
     <div>
@@ -310,6 +559,82 @@ export default function InvoiceList({ express = false }) {
         <Btn onClick={() => nav(`${listPath}/new`)} data-testid="new-invoice-btn"><Plus size={16} /> Create Invoice</Btn>
       </PageHeader>
 
+      {!express && <div className="mb-4 flex gap-2 border-b border-border" role="tablist" aria-label="Invoice sections">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={section === "invoices"}
+          onClick={() => setSection("invoices")}
+          className={`border-b-2 px-3 py-2 text-sm font-semibold ${section === "invoices" ? "border-primary text-primary" : "border-transparent text-slate-500"}`}
+          data-testid="invoices-section-tab"
+        >Invoices</button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={section === "receiving"}
+          onClick={() => setSection("receiving")}
+          className={`border-b-2 px-3 py-2 text-sm font-semibold ${section === "receiving" ? "border-primary text-primary" : "border-transparent text-slate-500"}`}
+          data-testid="receiving-invoices-section-tab"
+        >
+          Receiving Invoices
+          <span className="ml-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs" data-testid="received-invoice-count">
+            {receivedInvoices.length}
+          </span>
+          {unseenReceivedInvoiceCount > 0 && <span
+            className="ml-2 inline-flex items-center rounded-full border border-rose-300 bg-rose-100 px-2 py-0.5 text-[10px] font-extrabold tracking-wide text-rose-700 shadow-[0_0_8px_rgba(251,113,133,0.75)] animate-pulse"
+            role="status"
+            data-testid="new-invoice-received-alert"
+          >NEW INVOICE RECEIVED!</span>}
+        </button>
+      </div>}
+
+      {!express && section === "receiving" ? <>
+        <div className="mb-3 flex justify-end">
+          <Btn variant="outline" onClick={() => setReceivedReload((current) => current + 1)} disabled={receivedLoading} data-testid="received-invoices-refresh">
+            <RefreshCw size={15} /> Refresh
+          </Btn>
+        </div>
+        <Card className="overflow-hidden" data-testid="received-invoices-list">
+          {receivedLoading
+            ? <p className="p-6 text-sm text-slate-500" role="status">Loading received invoices...</p>
+            : receivedInvoices.length === 0
+              ? <Empty icon={FileText} title="No received invoices" hint="Invoices sent to this company will appear here." />
+              : <div className="overflow-x-auto">
+                <table className="w-full min-w-[700px] text-left text-sm">
+                  <thead><tr className="border-b border-border bg-slate-50 text-xs text-slate-500">
+                    <th className="px-4 py-3">Invoice</th>
+                    <th className="px-4 py-3">From</th>
+                    <th className="px-4 py-3">Type</th>
+                    <th className="px-4 py-3 text-right">Total</th>
+                    <th className="px-4 py-3">Received</th>
+                    <th className="px-4 py-3 text-right">Action</th>
+                  </tr></thead>
+                  <tbody>{receivedInvoices.map((receipt) => (
+                    <tr key={receipt.id} className="border-b border-border/60 last:border-0">
+                      <td className="px-4 py-3 font-semibold">{receipt.invoice_number || "Invoice"}</td>
+                      <td className="px-4 py-3">{companyProfileName(receipt.supplying_company_id)}</td>
+                      <td className="px-4 py-3">{receipt.source === "request" ? "Requested" : "Direct"}</td>
+                      <td className="px-4 py-3 text-right">{fmtMoney(receipt.invoice_total || 0)}</td>
+                      <td className="px-4 py-3 text-slate-500">{receipt.sent_at ? fmtDate(receipt.sent_at) : "—"}</td>
+                      <td className="px-4 py-3 text-right">
+                        <Btn
+                          variant="outline"
+                          onClick={() => openReceivedInvoice(receipt)}
+                          disabled={receivedInvoiceLoading}
+                          data-testid={`received-invoice-view-${receipt.id}`}
+                        ><Eye size={14} /> View invoice</Btn>
+                        <Btn
+                          onClick={() => openReceivedInvoice(receipt, true)}
+                          disabled={receivedInvoiceLoading}
+                          data-testid={`received-invoice-add-grv-${receipt.id}`}
+                        >Add on GRV</Btn>
+                      </td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>}
+        </Card>
+      </> : <>
       <Card className={`p-4 mb-4 grid grid-cols-1 ${priceZonesEnabled ? "sm:grid-cols-5" : "sm:grid-cols-4"} gap-3`}>
         <div className="relative sm:col-span-2">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
@@ -424,6 +749,7 @@ export default function InvoiceList({ express = false }) {
           <Btn variant="outline" disabled={loading || page >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))} data-testid="invoice-next-page">Next</Btn>
         </div>
       </div>
+      </>}
 
       <Modal open={viewOpen} onClose={() => setViewOpen(false)} title={`Invoice Details ${viewInvoice?.number || ""}`} wide>
         {viewLoading ? <p className="text-sm text-slate-500" role="status">Loading invoice details...</p> : viewInvoice && <div className="space-y-5 text-sm" data-testid={`invoice-details-${viewInvoice.id}`}>
@@ -487,6 +813,160 @@ export default function InvoiceList({ express = false }) {
           {viewInvoice.notes && <div><h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Notes</h4><p className="mt-1 whitespace-pre-wrap text-slate-800">{viewInvoice.notes}</p></div>}
           {viewInvoice.audit?.length > 0 && <p className="text-xs text-slate-500">Last updated: {fmtDateTime(viewInvoice.audit[viewInvoice.audit.length - 1].at)}</p>}
         </div>}
+      </Modal>
+
+      <Modal
+        open={!!receivedInvoiceReceipt}
+        onClose={() => {
+          setReceivedInvoiceReceipt(null);
+          setReceivedInvoiceDetails(null);
+          setReceivedGRVExpanded(false);
+          setReceivedGRVAssignments({});
+        }}
+        title={`${receivedGRVExpanded ? "Add on GRV · " : "Received Invoice "}${receivedInvoiceDetails?.invoice_details?.invoice?.number || receivedInvoiceReceipt?.invoice_number || ""}`}
+        wide
+      >
+        {receivedInvoiceLoading
+          ? <p className="flex items-center gap-2 text-sm text-slate-500" role="status"><LoaderCircle size={15} className="animate-spin" /> Loading invoice...</p>
+          : receivedInvoiceDetails && (() => {
+            const invoice = receivedInvoiceDetails.invoice_details.invoice;
+            const { settings, customer } = receivedInvoiceDetails.invoice_details;
+            const items = receivedInvoiceDetails.items || [];
+            const existingGrvs = receivedInvoiceDetails.existingGrvs || [];
+            const totals = {
+              subtotal: invoice.subtotal || 0,
+              tax: invoice.tax_amount || 0,
+              total: invoice.total || 0,
+              outstanding: invoice.outstanding || 0,
+            };
+            const selectedCategories = new Set(Object.values(receivedGRVAssignments).filter(Boolean));
+            const allSelectedCategoriesExist = selectedCategories.size > 0
+              && [...selectedCategories].every((category) => existingGrvs.some(
+                (grv) => grv.source_intercompany_category === category,
+              ));
+            return <div className="space-y-4">
+              {receivedGRVExpanded ? <>
+                <div className="rounded-lg bg-emerald-50 p-4">
+                  <h3 className="font-semibold">Choose a destination for each invoice product</h3>
+                  <p className="mt-1 text-sm text-slate-600">
+                    Invoice {invoice.number} · {invoice.customer_name} · Total {fmtMoney(invoice.total || 0)}
+                  </p>
+                </div>
+                {existingGrvs.length > 0 && <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
+                  <p className="text-sm font-semibold text-blue-900">GRVs already linked to this invoice</p>
+                  <div className="mt-2 space-y-1">
+                    {existingGrvs.map((grv) => <p key={grv.id} className="text-sm text-blue-800">
+                      {grv.grv_number} · {grv.source_intercompany_category?.replaceAll("_", " ") || "GRV"} · {grv.status?.replaceAll("_", " ")}
+                    </p>)}
+                  </div>
+                </div>}
+                <div className="space-y-3 rounded-lg border border-emerald-200 bg-emerald-50/50 p-3" data-testid="received-invoice-grv-assignment">
+                  <p className="text-sm font-medium text-slate-700">Select whether each product is a selling product, raw material, or chemical.</p>
+                  {items.map((item, index) => (
+                    <fieldset key={item.key} className="rounded-lg border border-slate-200 bg-white p-3">
+                      <legend className="px-1 text-sm font-semibold text-slate-800">
+                        {receivedInvoiceItemName(item) || `Invoice line ${index + 1}`}
+                        {item.size ? ` · ${item.size}` : ""}
+                        <span className="ml-2 font-normal text-slate-500">Qty {item.qty}</span>
+                      </legend>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                        {[
+                          ["selling_product", "Selling product", "Stock"],
+                          ["raw_material", "Raw material", "Company Inventory"],
+                          ["chemical", "Chemical", "Chemical inventory"],
+                        ].map(([value, label, destination]) => (
+                          <label
+                            key={value}
+                            className={`flex cursor-pointer items-start gap-2 rounded-lg border p-3 text-sm ${receivedGRVAssignments[item.key] === value ? "border-emerald-500 bg-emerald-50" : "border-slate-200 hover:bg-slate-50"}`}
+                          >
+                            <input
+                              type="radio"
+                              name={`received-invoice-grv-category-${item.key}`}
+                              value={value}
+                              checked={receivedGRVAssignments[item.key] === value}
+                              onChange={() => setReceivedGRVAssignments((current) => ({
+                                ...current,
+                                [item.key]: value,
+                              }))}
+                              className="mt-0.5 accent-emerald-700"
+                              data-testid={`received-invoice-grv-category-${item.key}-${value}`}
+                            />
+                            <span>
+                              <span className="block font-semibold text-slate-800">{label}</span>
+                              <span className="text-xs text-slate-500">{destination}</span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  ))}
+                  {allSelectedCategoriesExist && <p className="text-sm text-blue-800" role="status">
+                    A GRV already exists for each selected destination. Existing GRVs will not be duplicated.
+                  </p>}
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Btn type="button" variant="outline" onClick={() => setReceivedGRVExpanded(false)}>
+                    Back to invoice
+                  </Btn>
+                  <Btn
+                    type="button"
+                    onClick={createReceivedInvoiceGRVs}
+                    disabled={receivedGRVBusy || !items.length || allSelectedCategoriesExist}
+                    data-testid="received-invoice-create-grv-drafts"
+                  >{receivedGRVBusy ? "Creating GRV drafts..." : "Create GRV drafts"}</Btn>
+                </div>
+              </> : <>
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-emerald-50 p-4">
+                  <div className="text-sm">
+                    <h3 className="font-semibold">Received invoice {invoice.number}</h3>
+                    <p className="mt-1">{invoice.customer_name} · Total {fmtMoney(invoice.total || 0)}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Btn
+                      type="button"
+                      onClick={() => setReceivedGRVExpanded(true)}
+                      disabled={!items.length}
+                      data-testid="received-invoice-add-on-grv"
+                    >Add on GRV</Btn>
+                  <Btn
+                    type="button"
+                    onClick={downloadReceivedInvoicePdf}
+                    disabled={receivedInvoicePdfBusy}
+                    data-testid="received-invoice-download"
+                  >
+                    {receivedInvoicePdfBusy ? <LoaderCircle size={16} className="animate-spin" /> : <Download size={16} />}
+                    {receivedInvoicePdfBusy ? "Preparing PDF..." : "Download PDF"}
+                  </Btn>
+                  </div>
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-slate-200 bg-slate-100 p-3">
+                  <InvoiceDocument
+                    ref={receivedInvoiceDocumentRef}
+                    inv={invoice}
+                    totals={totals}
+                    customer={customer}
+                    settings={settings}
+                  />
+                </div>
+                {existingGrvs.length > 0 && <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
+                  <p className="text-sm font-semibold text-blue-900">GRVs already linked to this invoice</p>
+                  <div className="mt-2 space-y-1">
+                    {existingGrvs.map((grv) => <p key={grv.id} className="text-sm text-blue-800">
+                      {grv.grv_number} · {grv.source_intercompany_category?.replaceAll("_", " ") || "GRV"} · {grv.status?.replaceAll("_", " ")}
+                    </p>)}
+                  </div>
+                </div>}
+                <div className="flex justify-end">
+                  <Btn variant="outline" onClick={() => {
+                    setReceivedInvoiceReceipt(null);
+                    setReceivedInvoiceDetails(null);
+                    setReceivedGRVExpanded(false);
+                    setReceivedGRVAssignments({});
+                  }}>Close</Btn>
+                </div>
+              </>}
+            </div>;
+          })()}
       </Modal>
 
       <Modal

@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useSearchParams } from "react-router-dom";
 import {
-  Ban, Building2, ClipboardCheck, Clock3, Download, Eye, FileText, PackageCheck,
-  Pencil, Plus, RefreshCw, RotateCcw, ScanLine, ShieldAlert, Trash2,
+  Ban, Building2, ClipboardCheck, Clock3, Download, Eye, FileText, LoaderCircle, PackageCheck,
+  Pencil, Plus, RefreshCw, RotateCcw, ScanLine, Trash2,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { api, apiError } from "@/lib/api";
@@ -60,21 +60,22 @@ const lineValue = (line) => (Number(line.accepted_quantity) || 0)
   * (Number.isFinite(parseGrvDecimal(line.unit_cost)) ? parseGrvDecimal(line.unit_cost) : 0);
 const savedGrvTotals = (grv) => grvTotals(grv.items || [], grv.vat_rate || 0);
 const stockItemLabel = (item) => [item.size, item.product].filter(Boolean).join(" ");
+const intercompanyInvoiceItems = (invoice) => (invoice?.items || [])
+  .filter((item) => (item.category || item.size || item.description)
+    && !(!item.category && !item.size && item.description?.trim().toLowerCase() === "opening balance"))
+  .map((item, index) => ({ ...item, key: String(index) }));
+const intercompanyInvoiceItemName = (item) => (item.category || item.description || "").trim();
 const grvDeleteError = (message) => /product item delete from company inventory/i.test(message)
   ? "The GRV could not be deleted because Company Inventory could not be updated. Please contact an administrator."
   : message;
 
 function Metric({ label, value, icon: Icon, tone = "text-slate-800" }) {
   return (
-    <Card className="p-4" data-testid={`grv-metric-${label.toLowerCase().replaceAll(" ", "-")}`}>
-      <div className="flex items-center justify-between gap-2">
-        <div>
-          <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">{label}</p>
-          <p className={`mt-2 text-2xl font-bold font-mono ${tone}`}>{value ?? 0}</p>
-        </div>
-        <span className="rounded-lg bg-slate-50 p-2 text-primary"><Icon size={19} /></span>
-      </div>
-    </Card>
+    <div className="flex min-w-0 items-center gap-2 px-3 py-2.5" data-testid={`grv-metric-${label.toLowerCase().replaceAll(" ", "-")}`}>
+      <Icon size={17} className="shrink-0 text-slate-500" />
+      <p className="min-w-0 text-[11px] font-semibold leading-tight text-slate-500">{label}</p>
+      <p className={`ml-auto text-xl font-bold font-mono ${tone}`}>{value ?? 0}</p>
+    </div>
   );
 }
 
@@ -248,6 +249,9 @@ export default function GRV() {
   const [stockLoadKey, setStockLoadKey] = useState(0);
   const [stockSearchByLine, setStockSearchByLine] = useState({});
   const [settings, setSettings] = useState({});
+  const [intercompanyInvoices, setIntercompanyInvoices] = useState([]);
+  const [intercompanyInvoicesLoading, setIntercompanyInvoicesLoading] = useState(true);
+  const [selectedIntercompanyInvoice, setSelectedIntercompanyInvoice] = useState(null);
   const [filters, setFilters] = useState({ date_from: "", date_to: "", supplier_id: "", status: "" });
   const [draft, setDraft] = useState(null);
   const [viewTarget, setViewTarget] = useState(null);
@@ -278,9 +282,26 @@ export default function GRV() {
     }
   }, [companyId, filters]);
 
+  const loadIntercompanyInvoices = useCallback(async () => {
+    setIntercompanyInvoicesLoading(true);
+    try {
+      const received = await api.getUncached("/intercompany/invoices/received");
+      setIntercompanyInvoices(received || []);
+    } catch (error) {
+      setIntercompanyInvoices([]);
+      toast.error(`Could not load invoices from IQ Companies: ${apiError(error)}`);
+    } finally {
+      setIntercompanyInvoicesLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    loadIntercompanyInvoices();
+  }, [companyId, loadIntercompanyInvoices]);
 
   useEffect(() => {
     const grvId = searchParams.get("id");
@@ -318,6 +339,21 @@ export default function GRV() {
       });
     return () => { active = false; };
   }, [companyId, stockLoadKey]);
+
+  const openIntercompanyInvoice = async (receipt) => {
+    setWorkingId(receipt.id);
+    try {
+      const details = await api.getUncached(
+        `/intercompany/invoices/received/${encodeURIComponent(receipt.id)}`,
+      );
+      const items = intercompanyInvoiceItems(details.invoice_details?.invoice);
+      setSelectedIntercompanyInvoice({ ...details, receipt, items });
+    } catch (error) {
+      toast.error(`Could not open the received invoice: ${apiError(error)}`);
+    } finally {
+      setWorkingId("");
+    }
+  };
 
   const totalValue = useMemo(
     () => (records || []).reduce((sum, grv) => sum + savedGrvTotals(grv).total, 0),
@@ -605,7 +641,10 @@ export default function GRV() {
     try {
       if (action === "confirm") {
         await api.post(`/grvs/${grv.id}/confirm`, {});
-        toast.success("GRV confirmed and accepted quantities added to Stock");
+        const destination = grv.purpose === "raw_material"
+          ? grv.is_chemical ? "Chemical Inventory" : "Company Inventory"
+          : "Stock";
+        toast.success(`GRV confirmed and accepted quantities added to ${destination}`);
         try {
           setStock(await api.getUncached("/stock"));
         } catch (error) {
@@ -657,14 +696,11 @@ export default function GRV() {
     ["Total GRVs", dashboard?.total_grvs, FileText, "text-slate-900"],
     ["Pending GRVs", dashboard?.pending_grvs, Clock3, "text-blue-700"],
     ["Completed GRVs", dashboard?.completed_grvs, PackageCheck, "text-emerald-700"],
-    ["Partially Received", dashboard?.partially_received_grvs, ClipboardCheck, "text-amber-700"],
-    ["Discrepancies", dashboard?.discrepancy_grvs, ShieldAlert, "text-red-700"],
-    ["Rejected Items", dashboard?.rejected_items, Ban, "text-orange-700"],
   ];
 
   return (
     <div className="space-y-5" data-testid="grv-page">
-      <PageHeader title="Goods Received Vouchers" subtitle="Inspect supplier deliveries and post accepted quantities to Stock">
+      <PageHeader title="Goods Received Vouchers" subtitle="Inspect supplier deliveries and post accepted quantities to the correct inventory">
         <Btn variant="outline" onClick={refresh} disabled={records === null} data-testid="grv-refresh"><RefreshCw size={16} /> Refresh</Btn>
         <Btn onClick={() => {
           setScanReceivingMode(false);
@@ -685,25 +721,57 @@ export default function GRV() {
         <span className="text-xs text-slate-500">GRVs, suppliers, purchase orders and stock are isolated to this profile.</span>
       </Card>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {metricCards.map(([label, value, icon, tone]) => <Metric key={label} label={label} value={value} icon={icon} tone={tone} />)}
-      </div>
-
-      <Card className="overflow-hidden" data-testid="grv-recent">
-        <div className="border-b border-border px-4 py-3">
-          <h2 className="font-semibold text-slate-800">Recently Created GRVs</h2>
-          <p className="text-xs text-slate-500">Latest vouchers for the active company profile</p>
+      <Card className="overflow-hidden" data-testid="grv-intercompany-receiving">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
+          <div>
+            <h2 className="font-semibold text-slate-800">Receiving Invoices from IQ Companies</h2>
+            <p className="text-xs text-slate-500">View the products and total on invoices received from IQ Companies.</p>
+          </div>
+          <Btn variant="outline" onClick={loadIntercompanyInvoices} disabled={intercompanyInvoicesLoading} data-testid="grv-intercompany-refresh">
+            {intercompanyInvoicesLoading ? <LoaderCircle size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+            Refresh invoices
+          </Btn>
         </div>
-        {!dashboard?.recent_grvs?.length
-          ? <p className="p-4 text-sm text-slate-500">No recent GRVs match these filters.</p>
-          : <div className="divide-y divide-border/70">
-            {dashboard.recent_grvs.slice(0, 5).map((grv) => (
-              <div key={grv.id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-3" data-testid={`grv-recent-${grv.id}`}>
-                <div><p className="text-sm font-semibold text-slate-800">{grv.grv_number} · {grv.supplier_name}</p><p className="text-xs text-slate-500">{fmtDate(grv.received_date)} · {grv.purchase_order_reference || "Standalone receipt"}</p></div>
-                <Badge cls={STATUS_STYLE[grv.status] || STATUS_STYLE.draft}>{statusLabel(grv.status)}</Badge>
-              </div>
-            ))}
-          </div>}
+        {intercompanyInvoicesLoading
+          ? <p className="flex items-center gap-2 p-4 text-sm text-slate-500" role="status"><LoaderCircle size={16} className="animate-spin" /> Loading received invoices...</p>
+          : intercompanyInvoices.length === 0
+            ? <p className="p-4 text-sm text-slate-500">No invoices have been received from IQ Companies.</p>
+            : <div className="overflow-x-auto">
+              <table className="w-full min-w-[700px] text-left text-sm">
+                <thead><tr className="border-b border-border bg-slate-50 text-xs text-slate-500">
+                  <th className="px-4 py-3">Invoice</th>
+                  <th className="px-4 py-3">From</th>
+                  <th className="px-4 py-3">Received via</th>
+                  <th className="px-4 py-3">Total</th>
+                  <th className="px-4 py-3">Received date</th>
+                  <th className="px-4 py-3 text-right">Action</th>
+                </tr></thead>
+                <tbody>{intercompanyInvoices.map((receipt) => (
+                  <tr key={receipt.id} className="border-b border-border/60 last:border-0">
+                    <td className="px-4 py-3 font-semibold">{receipt.invoice_number || "Invoice"}</td>
+                    <td className="px-4 py-3">{companyProfileName(receipt.supplying_company_id)}</td>
+                    <td className="px-4 py-3">{receipt.source === "request" ? "Order request" : "Direct"}</td>
+                    <td className="px-4 py-3">{fmtMoney(receipt.invoice_total || 0)}</td>
+                    <td className="px-4 py-3">{receipt.sent_at ? new Date(receipt.sent_at).toLocaleDateString() : "—"}</td>
+                    <td className="px-4 py-3 text-right">
+                      <Btn
+                        variant="outline"
+                        onClick={() => openIntercompanyInvoice(receipt)}
+                        disabled={workingId === receipt.id}
+                        data-testid={`grv-intercompany-open-${receipt.id}`}
+                      >
+                        {workingId === receipt.id ? <LoaderCircle size={14} className="animate-spin" /> : <Eye size={14} />}
+                        View invoice
+                      </Btn>
+                    </td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>}
+      </Card>
+
+      <Card className="grid grid-cols-1 divide-y divide-border sm:grid-cols-3 sm:divide-x sm:divide-y-0" data-testid="grv-metrics">
+        {metricCards.map(([label, value, icon, tone]) => <Metric key={label} label={label} value={value} icon={icon} tone={tone} />)}
       </Card>
 
       <Card className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-5" data-testid="grv-filters">
@@ -818,6 +886,61 @@ export default function GRV() {
         )}
       </Card>
       <p className="text-xs text-slate-500">GRVs are receiving documents only. They do not create supplier payments, expenses or Buying records. Document file attachments are not enabled in this deployment; delivery note numbers and notes remain available.</p>
+
+      <Modal
+        open={!!selectedIntercompanyInvoice}
+        onClose={() => setSelectedIntercompanyInvoice(null)}
+        title={selectedIntercompanyInvoice?.invoice_details?.invoice?.number
+          ? `Invoice ${selectedIntercompanyInvoice.invoice_details.invoice.number}`
+          : "Received invoice"}
+      >
+        {selectedIntercompanyInvoice && (() => {
+          const invoice = selectedIntercompanyInvoice.invoice_details.invoice;
+          const items = selectedIntercompanyInvoice.items;
+          return <div className="space-y-4">
+            {!items.length
+              ? <p className="text-sm text-slate-500">This invoice has no product lines.</p>
+              : <div className="overflow-x-auto rounded-lg border border-border">
+                <table className="w-full min-w-[420px] text-left text-sm">
+                  <thead>
+                    <tr className="border-b border-border bg-slate-50 text-xs text-slate-500">
+                      <th className="px-3 py-2.5">Product</th>
+                      <th className="px-3 py-2.5 text-right">Qty</th>
+                      <th className="px-3 py-2.5 text-right">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((item, index) => {
+                      const lineTotal = Number(
+                        item.line_total ?? item.amount
+                          ?? (Number(item.qty || 0) * Number(item.unit_price || 0)),
+                      );
+                      return <tr key={item.key} className="border-b border-border/60 last:border-0">
+                        <td className="px-3 py-2.5 font-medium text-slate-800">
+                          {intercompanyInvoiceItemName(item) || `Invoice line ${index + 1}`}
+                          {item.size ? <span className="block text-xs font-normal text-slate-500">{item.size}</span> : null}
+                        </td>
+                        <td className="px-3 py-2.5 text-right">{item.qty ?? 0}</td>
+                        <td className="px-3 py-2.5 text-right">
+                          {fmtMoney(Number.isFinite(lineTotal) ? lineTotal : 0)}
+                        </td>
+                      </tr>;
+                    })}
+                  </tbody>
+                </table>
+              </div>}
+            <div className="flex items-center justify-between border-t border-slate-100 pt-3">
+              <span className="text-sm font-semibold text-slate-700">Invoice total</span>
+              <span className="text-lg font-bold text-slate-900">{fmtMoney(invoice.total || 0)}</span>
+            </div>
+            <div className="flex justify-end">
+              <Btn type="button" variant="outline" onClick={() => setSelectedIntercompanyInvoice(null)}>
+                Close
+              </Btn>
+            </div>
+          </div>;
+        })()}
+      </Modal>
 
       <Modal open={!!draft} onClose={() => !saving && setDraft(null)} title={draft?.id ? `Edit ${draft.grv_number}` : scanReceivingMode ? "Receive stock by scanning" : "Create Goods Received Voucher"} wide>
         {draft && <form onSubmit={saveDraft} className="space-y-4 p-1">
@@ -1037,7 +1160,7 @@ export default function GRV() {
             <p><span className="font-semibold">Supplier:</span> {viewTarget.supplier_name || "-"}</p>
             <p><span className="font-semibold">Received:</span> {fmtDate(viewTarget.received_date)}</p>
             <p><span className="font-semibold">Status:</span> {statusLabel(viewTarget.status)}</p>
-            <p><span className="font-semibold">Type:</span> {viewTarget.purpose === "raw_material" ? "Company Inventory" : "Selling / Stock"}</p>
+            <p><span className="font-semibold">Type:</span> {viewTarget.purpose === "raw_material" ? viewTarget.is_chemical ? "Chemical Inventory" : "Company Inventory" : "Selling / Stock"}</p>
           </div>
           <div
             className="grv-horizontal-scroll min-w-0 max-w-full overflow-x-auto overscroll-x-contain touch-pan-x rounded border border-border"
