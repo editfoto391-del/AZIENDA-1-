@@ -322,6 +322,92 @@ def test_acceptance_rejects_unreviewed_but_allows_insufficient_stock_until_invoi
         server.active_company_id.reset(company_token)
 
 
+def test_superiqfoam_acceptance_creates_idempotent_order(monkeypatch):
+    request = {
+        "id": "ICR-SUPER",
+        "requesting_company_id": "iqfoam-whole-sallers",
+        "requesting_company_name": "IQFOAM WHOLESALERS",
+        "supplying_company_id": "superiqfoam",
+        "supplying_company_name": "SUPERIQFOAM",
+        "status": "PENDING",
+        "created_by": "requester",
+        "notes": "Deliver on Friday",
+        "items": [{
+            "id": "item-super",
+            "stock_id": "ribbon-stock",
+            "product": "Ribbon Black",
+            "product_type": "Ribbon Black",
+            "dimensions": "910x100",
+            "description": "Ribbon Black 910x100",
+            "quantity": 12,
+            "manual_review": False,
+        }],
+    }
+    request_collection = AtomicCollection([request])
+    supplier_db = Database(
+        stock=Collection([{
+            "id": "ribbon-stock",
+            "company_id": "superiqfoam",
+            "product": "Ribbon Black",
+            "size": "910x100",
+            "opening": 20,
+        }]),
+        orders=Collection(),
+        intercompany_customer_mappings=Collection([{
+            "requesting_company_id": "iqfoam-whole-sallers",
+            "company_id": "superiqfoam",
+            "customer_id": "wholesaler-customer",
+        }]),
+        customers=Collection([{
+            "id": "wholesaler-customer",
+            "company_id": "superiqfoam",
+            "name": "IQFOAM WHOLESALERS",
+            "address": "1 Test Road",
+            "phone": "123",
+            "email": "buyer@example.com",
+            "active": True,
+        }]),
+    )
+    monkeypatch.setattr(
+        server,
+        "base_db",
+        Database(intercompany_order_requests=request_collection),
+    )
+    monkeypatch.setattr(server, "tenant_database", lambda *_args: supplier_db)
+    monkeypatch.setattr(
+        server,
+        "intercompany_available_stock",
+        lambda *_args: asyncio.sleep(0, result={"ribbon-stock": 20}),
+    )
+    monkeypatch.setattr(server, "next_ref", lambda *_args: asyncio.sleep(0, result="ORD-2026-0001"))
+    monkeypatch.setattr(server, "notify_intercompany_company", lambda *_args, **_kwargs: asyncio.sleep(0))
+    user = {"id": "supplier-admin", "company_roles": {"superiqfoam": "admin"}}
+    company_token = server.active_company_id.set("superiqfoam")
+    try:
+        accepted = asyncio.run(server.accept_intercompany_request("ICR-SUPER", user))
+        assert accepted["status"] == "ACCEPTED"
+        assert len(supplier_db.orders.documents) == 1
+        order = supplier_db.orders.documents[0]
+        assert order["reference"] == "ORD-2026-0001"
+        assert order["status"] == "To Send"
+        assert order["customer_name"] == "IQFOAM WHOLESALERS"
+        assert order["destination"] == "1 Test Road"
+        assert order["items"] == [{
+            "qty": 12,
+            "category": "Ribbon Black",
+            "size": "910x100",
+            "description": "Ribbon Black 910x100",
+        }]
+        assert order["source_intercompany_request_id"] == "ICR-SUPER"
+
+        request_collection.documents[0]["status"] = "PENDING"
+        accepted_again = asyncio.run(server.accept_intercompany_request("ICR-SUPER", user))
+        assert accepted_again["status"] == "ACCEPTED"
+        assert len(supplier_db.orders.documents) == 1
+    finally:
+        server.active_company_id.reset(company_token)
+
+
 def test_acceptance_relinks_recreated_supplier_stock_item(monkeypatch):
     request = {
         "id": "ICR-RELINK",

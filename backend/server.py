@@ -11475,6 +11475,65 @@ async def accept_intercompany_request(request_id: str, user=Depends(get_current_
     )
     if not updated:
         raise HTTPException(409, "Request status changed; reload before accepting")
+    if company_id == DEFAULT_COMPANY_ID:
+        existing_order = await supplier_db.orders.find_one(
+            {"source_intercompany_request_id": request_id},
+            {"_id": 0},
+        )
+        if not existing_order:
+            requesting_profile = next(
+                (profile for profile in COMPANY_PROFILES if profile["id"] == updated["requesting_company_id"]),
+                None,
+            )
+            customer_name = (requesting_profile or {}).get("name") or updated["requesting_company_name"]
+            customer = None
+            mapping = await supplier_db.intercompany_customer_mappings.find_one(
+                {
+                    "requesting_company_id": updated["requesting_company_id"],
+                    "company_id": company_id,
+                },
+                {"_id": 0},
+            )
+            if mapping:
+                customer = await supplier_db.customers.find_one(
+                    {"id": mapping["customer_id"], "company_id": company_id, "active": {"$ne": False}},
+                    {"_id": 0},
+                )
+            order_items = [{
+                "qty": item["quantity"],
+                "category": item.get("product_type") or item["product"],
+                "size": item["dimensions"],
+                "description": item.get("description") or item["product"],
+            } for item in resolved_items]
+            reference = await next_ref("ord", "ORD")
+            order_record = {
+                "id": new_id(),
+                "reference": reference,
+                "customer_id": (customer or {}).get("id", ""),
+                "customer_name": (customer or {}).get("name") or customer_name,
+                "customer_address": (customer or {}).get("address", ""),
+                "customer_phone": (customer or {}).get("phone", ""),
+                "customer_email": (customer or {}).get("email", ""),
+                "invoice_id": "",
+                "invoice_number": "",
+                "destination": (customer or {}).get("address", ""),
+                "products": ", ".join(
+                    f"{item['category']} {item['size']} x {item['qty']:g}"
+                    for item in order_items
+                ),
+                "items": order_items,
+                "priority": "Normal",
+                "status": "To Send",
+                "expected_ship_date": None,
+                "vehicle_id": "",
+                "notes": (
+                    f"Created automatically from intercompany request {request_id}"
+                    + (f"\n{updated.get('notes', '').strip()}" if updated.get("notes", "").strip() else "")
+                ),
+                "source_intercompany_request_id": request_id,
+                "created_at": now,
+            }
+            await supplier_db.orders.insert_one(order_record)
     await notify_intercompany_company(
         updated["requesting_company_id"],
         f"intercompany:{request_id}:accepted",
