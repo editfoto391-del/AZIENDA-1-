@@ -172,9 +172,9 @@ export default function MonthlyChemicalSheet() {
             ...line,
             product: line.product || grvLine.product,
             container_type: grvLine.container_type,
-            container_capacity: grvLine.capacity,
+            container_capacity: grvLine.capacity_kg,
             container_count: grvLine.accepted_quantity,
-            unit: grvLine.unit,
+            unit: "kg",
             quantity_kg: grvLine.quantity_kg ?? line.quantity_kg,
           };
         });
@@ -255,9 +255,9 @@ export default function MonthlyChemicalSheet() {
         chemical_key: grvMappings[line.line_index],
         product: line.product,
         container_type: line.container_type,
-        container_capacity: line.capacity,
+        container_capacity: line.capacity_kg,
         container_count: line.accepted_quantity,
-        unit: line.unit,
+        unit: "kg",
         quantity_kg: line.quantity_kg,
       }));
     if (!lines.length) {
@@ -477,7 +477,7 @@ export default function MonthlyChemicalSheet() {
                 </td>
               </tr>)}</tbody>
             </table>
-            <p className="mt-2 text-xs text-slate-500">Map each GRV line to its chemical, then select “Add GRV”. Imported kg and each chemical’s total arrivals update immediately; save the sheet to keep the change. Do not enter GRV-imported quantities again as manual arrivals.</p>
+            <p className="mt-2 text-xs text-slate-500">Litres are converted to kg at 1 L = 1 kg. Map each GRV line to its chemical, then select “Add GRV”. Imported kg and each chemical’s total arrivals update immediately; save the sheet to keep the change. Do not enter GRV-imported quantities again as manual arrivals.</p>
           </div>}
           {sheet.arrival_sources.length > 0 && <div className="space-y-2" data-testid="monthly-sheet-imported-grvs">
             {sheet.arrival_sources.map((source) => <div key={source.grv_id}

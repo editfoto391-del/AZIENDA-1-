@@ -3515,6 +3515,37 @@ async def get_monthly_chemical_sheet(month: str = Query(pattern=r"^\d{4}-(0[1-9]
     }
 
 
+def monthly_chemical_capacity_kg(capacity, unit):
+    normalized_unit = str(unit or "").strip().casefold()
+    if normalized_unit in {"kg", "kgs", "kilogram", "kilograms"}:
+        return capacity
+    if normalized_unit in {"l", "liter", "liters", "litre", "litres"}:
+        # Use the sheet's 1 L = 1 kg convention where no chemical density is stored.
+        return capacity
+    return None
+
+
+def monthly_chemical_grv_line(line_index, line):
+    try:
+        capacity = float(line.get("size", 0) or 0)
+        accepted = float(line.get("accepted_quantity", 0) or 0)
+    except (TypeError, ValueError):
+        capacity, accepted = 0, 0
+    capacity_kg = monthly_chemical_capacity_kg(capacity, line.get("unit", ""))
+    valid_capacity_kg = capacity_kg if capacity_kg is not None and capacity_kg > 0 else None
+    return {
+        "line_index": line_index,
+        "product": line.get("product", ""),
+        "accepted_quantity": accepted,
+        "capacity": capacity,
+        "capacity_kg": valid_capacity_kg,
+        "container_type": line.get("container_type") or "Container",
+        "unit": line.get("unit", ""),
+        "quantity_kg": round(accepted * valid_capacity_kg, 4)
+        if valid_capacity_kg is not None and accepted > 0 else None,
+    }
+
+
 @api.get("/production/monthly-chemical-sheet/grvs")
 @api.get("/warehouses/production-chemical-balance/grvs")
 async def get_monthly_chemical_sheet_grvs(
@@ -3539,21 +3570,7 @@ async def get_monthly_chemical_sheet_grvs(
         "received_date": grv.get("received_date", ""),
         "supplier_name": grv.get("supplier_name", ""),
         "items": [
-            {
-                "line_index": index,
-                "product": line.get("product", ""),
-                "accepted_quantity": float(line.get("accepted_quantity", 0) or 0),
-                "capacity": float(line.get("size", 0) or 0),
-                "container_type": line.get("container_type") or "Container",
-                "unit": line.get("unit", ""),
-                "accepted_quantity": float(line.get("accepted_quantity", 0) or 0),
-                "quantity_kg": round(
-                    float(line.get("accepted_quantity", 0) or 0) * float(line.get("size", 0) or 0),
-                    4,
-                ) if str(line.get("unit", "")).strip().casefold() in {
-                    "kg", "kgs", "kilogram", "kilograms",
-                } and float(line.get("size", 0) or 0) > 0 else None,
-            }
+            monthly_chemical_grv_line(index, line)
             for index, line in enumerate(grv.get("items", []))
         ],
     } for grv in records]
@@ -3582,17 +3599,18 @@ async def validate_monthly_sheet_arrival_sources(month, sources):
                 accepted = float(line.get("accepted_quantity", 0) or 0)
             except (TypeError, ValueError):
                 capacity, accepted = 0, 0
-            if unit not in {"kg", "kgs", "kilogram", "kilograms"} or capacity <= 0 or accepted <= 0:
+            capacity_kg = monthly_chemical_capacity_kg(capacity, unit)
+            if capacity_kg is None or capacity_kg <= 0 or accepted <= 0:
                 raise HTTPException(422, f"GRV line {mapping.line_index + 1} must have accepted quantity and capacity in kg")
             mapped_lines.append({
                 "line_index": mapping.line_index,
                 "chemical_key": mapping.chemical_key,
                 "product": line.get("product", ""),
                 "container_type": line.get("container_type") or "Container",
-                "container_capacity": capacity,
+                "container_capacity": capacity_kg,
                 "container_count": accepted,
-                "unit": line.get("unit", ""),
-                "quantity_kg": round(accepted * capacity, 4),
+                "unit": "kg",
+                "quantity_kg": round(accepted * capacity_kg, 4),
             })
         validated.append({
             "grv_id": grv["id"],

@@ -216,7 +216,86 @@ def test_confirmed_superiqfoam_chemical_grv_is_available_to_monthly_sheet(monkey
     assert result[0]["items"][0]["quantity_kg"] == 600
     assert result[0]["items"][0]["accepted_quantity"] == 3
     assert result[0]["items"][0]["capacity"] == 200
+    assert result[0]["items"][0]["capacity_kg"] == 200
     assert result[0]["items"][0]["container_type"] == "Barrel"
+
+
+def test_monthly_chemical_sheet_converts_liter_grv_capacity_to_kg(monkeypatch):
+    class FakeGrvs:
+        async def find_one(self, query, projection):
+            return {
+                "id": "grv-liters",
+                "grv_number": "GRV-L",
+                "received_date": "2026-11-12",
+                "supplier_name": "Chemical Supplier",
+                "status": "completed",
+                "purpose": "raw_material",
+                "is_chemical": True,
+                "items": [{
+                    "product": "PPG (Polyol)",
+                    "size": "1000",
+                    "container_type": "Barrel",
+                    "unit": "L",
+                    "accepted_quantity": 2,
+                }],
+            }
+
+    monkeypatch.setattr(server, "db", SimpleNamespace(grvs=FakeGrvs()))
+    source = server.MonthlySheetArrivalSourceIn(
+        grv_id="grv-liters",
+        lines=[{"line_index": 0, "chemical_key": "ppg"}],
+    )
+
+    result = asyncio.run(server.validate_monthly_sheet_arrival_sources("2026-11", [source]))
+
+    assert result[0]["lines"][0] == {
+        "line_index": 0,
+        "chemical_key": "ppg",
+        "product": "PPG (Polyol)",
+        "container_type": "Barrel",
+        "container_capacity": 1000,
+        "container_count": 2,
+        "unit": "kg",
+        "quantity_kg": 2000,
+    }
+
+
+def test_confirmed_chemical_grv_exposes_liter_amount_as_kg(monkeypatch):
+    class FakeCursor:
+        def sort(self, fields):
+            return self
+
+        async def to_list(self, length):
+            return [{
+                "id": "grv-liters",
+                "grv_number": "GRV-L",
+                "received_date": "2026-11-12",
+                "supplier_name": "Chemical Supplier",
+                "status": "completed",
+                "purpose": "raw_material",
+                "is_chemical": True,
+                "items": [{
+                    "product": "PPG (Polyol)",
+                    "size": "1000",
+                    "container_type": "Barrel",
+                    "unit": "L",
+                    "accepted_quantity": 2,
+                }],
+            }]
+
+    class FakeGrvs:
+        def find(self, query, projection):
+            return FakeCursor()
+
+    monkeypatch.setattr(server, "db", SimpleNamespace(grvs=FakeGrvs()))
+    user = {"_active_company_id": "superiqfoam"}
+
+    result = asyncio.run(server.get_monthly_chemical_sheet_grvs("2026-11", user))
+
+    assert result[0]["items"][0]["capacity"] == 1000
+    assert result[0]["items"][0]["capacity_kg"] == 1000
+    assert result[0]["items"][0]["unit"] == "L"
+    assert result[0]["items"][0]["quantity_kg"] == 2000
 
 
 def test_monthly_chemical_sheet_rejects_negative_values_and_unknown_fields():
