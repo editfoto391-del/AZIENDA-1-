@@ -99,8 +99,10 @@ export default function InvoiceEditor({ express = false }) {
   const isInvoiceOwner = user?.is_owner || user?.is_company_owner || user?.role === "owner";
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const priceZonesEnabled = usesPriceZones(user?.company_id);
-  const freeformInvoiceItems = usesFreeformInvoiceItems(user?.company_id);
-  const makeEmptyItem = () => emptyItem(freeformInvoiceItems ? "" : undefined);
+  const imraanStockBackedItems = user?.company_id === "imraan-plastics";
+  const manualInvoicePrices = usesFreeformInvoiceItems(user?.company_id);
+  const freeformInvoiceItems = manualInvoicePrices && !imraanStockBackedItems;
+  const makeEmptyItem = () => emptyItem(manualInvoicePrices ? "" : undefined);
   const { id } = useParams();
   const nav = useNavigate();
   const invoicesPath = express ? "/express-invoices" : "/invoices";
@@ -688,7 +690,7 @@ export default function InvoiceEditor({ express = false }) {
       toast.error("Enter a description for every invoice item");
       return false;
     }
-    if (freeformInvoiceItems && status !== "draft" && enteredItems.some((item) => !(Number(item.unit_price) > 0))) {
+    if (manualInvoicePrices && status !== "draft" && enteredItems.some((item) => !(Number(item.unit_price) > 0))) {
       toast.error("Enter a unit price for every invoice item before issuing");
       return false;
     }
@@ -708,7 +710,7 @@ export default function InvoiceEditor({ express = false }) {
     }
     if (!id && saveNewEntries === null) {
       const knownCustomer = customers.some((customer) => customer.active && customer.name.trim().toLowerCase() === inv.customer_name.trim().toLowerCase());
-      const newProducts = [...new Map(invoiceItems
+      const newProducts = manualInvoicePrices ? [] : [...new Map(invoiceItems
         .filter((item) => item.category?.trim() && item.size?.trim())
         .filter((item) => !prices.some((price) => price.zone === inv.zone &&
           sameInvoicePriceCategory(price.category, item.category, unifiedPriceList)
@@ -1307,7 +1309,7 @@ export default function InvoiceEditor({ express = false }) {
                             className={`w-24 rounded-md border px-2 py-2 text-right text-sm font-mono ${it._needsConfig && it.size && !(it.price_override && Number(it.unit_price) > 0) ? "border-red-400 bg-red-50" : it.price_override ? "border-amber-400 bg-amber-50" : "border-input bg-white"}`} />
                           {it.price_override && <span title="Manual override" className="text-[10px] font-bold text-amber-600">M</span>}
                         </div>
-                        {it._needsConfig && it.size && <span className="text-[10px] text-red-600 flex items-center gap-0.5 mt-0.5" data-testid={`item-needs-config-${idx}`}><AlertTriangle size={10} /> {isManualInvoicePrice(it.category, it.size, unifiedPriceList) ? "Manual price required" : "Requires administrator confirmation"}</span>}
+                        {it._needsConfig && it.size && !(it.price_override && Number(it.unit_price) > 0) && <span className="text-[10px] text-red-600 flex items-center gap-0.5 mt-0.5" data-testid={`item-needs-config-${idx}`}><AlertTriangle size={10} /> {manualInvoicePrices || isManualInvoicePrice(it.category, it.size, unifiedPriceList) ? "Manual price required" : "Requires administrator confirmation"}</span>}
                       </td>
                       <td className="px-2 py-2 text-right font-mono font-semibold text-slate-800">{fmtMoney((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
                       <td className="px-2 py-2 text-right">

@@ -84,6 +84,29 @@ test("category and size lists include canonical aliases without crossing zones",
   assert.deepEqual(invoiceSizesFor(2, "Simple/Mix color", true, prices, []), ["910x100"]);
 });
 
+test("Imraan invoice selectors are populated from its stock and keep manual pricing", () => {
+  const imraanStock = [
+    { product: "Ribbon Pink", size: "1070x120" },
+    { product: "Custom Film", size: "Roll" },
+  ];
+
+  const categories = invoiceCategoriesFor(1, false, [], imraanStock);
+  assert.ok(categories.includes("Ribbon Pink"));
+  assert.ok(categories.includes("Custom Film"));
+  assert.deepEqual(invoiceSizesFor(1, "Ribbon Pink", false, [], imraanStock, "imraan-plastics"), ["1070x120"]);
+
+  const manualLine = {
+    category: "Ribbon Pink",
+    size: "1070x120",
+    unit_price: 125,
+    price_override: true,
+  };
+  assert.deepEqual(resolveInvoiceLineForIssue(manualLine, 1, false, []), {
+    unitPrice: 125,
+    needsConfig: false,
+  });
+});
+
 test("Super IQ-Foam invoice sizes retain x50, x75 and x125 options", () => {
   assert.deepEqual(
     invoiceSizesFor(1, "Simple/Mix color", false, [], [], "superiqfoam"),

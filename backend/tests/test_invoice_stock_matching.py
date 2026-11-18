@@ -75,6 +75,43 @@ def test_invoice_stock_prefers_canonical_product_when_alias_rows_also_exist(monk
     assert deductions[0]["stock_id"] == "canonical"
 
 
+def test_imraan_invoice_lines_deduct_from_imraan_stock(monkeypatch):
+    async def list_stock(collection, **kwargs):
+        assert collection == "stock"
+        assert server.active_company_id.get() == "imraan-plastics"
+        return [{
+            "id": "imraan-ribbon",
+            "company_id": "imraan-plastics",
+            "product": "Ribbon Pink",
+            "size": "1070x120",
+        }]
+
+    async def stock_current(stock):
+        stock["current"] = stock.get("opening", 0)
+        return stock
+
+    monkeypatch.setattr(server, "listall", list_stock)
+    monkeypatch.setattr(server, "stock_current", stock_current)
+    token = server.active_company_id.set("imraan-plastics")
+    try:
+        deductions = asyncio.run(server.invoice_stock_deductions({
+            "items": [{
+                "category": "Ribbon Pink",
+                "size": "1070 x 120",
+                "qty": 1,
+            }],
+        }))
+    finally:
+        server.active_company_id.reset(token)
+
+    assert deductions == [{
+        "stock_id": "imraan-ribbon",
+        "product": "Ribbon Pink",
+        "size": "1070x120",
+        "quantity": server.D("1"),
+    }]
+
+
 def test_candy_invoice_does_not_deduct_ribbon_black_stock(monkeypatch):
     deductions = asyncio.run(resolve_deductions(
         monkeypatch,
