@@ -277,7 +277,7 @@ def test_intercompany_notifications_reach_admins_authorized_for_the_supplier_com
     }
 
 
-def test_acceptance_rejects_unreviewed_or_insufficient_stock_without_mutation(monkeypatch):
+def test_acceptance_rejects_unreviewed_but_allows_insufficient_stock_until_invoice_creation(monkeypatch):
     request = {
         "id": "ICR-2",
         "requesting_company_id": "superiqfoam",
@@ -294,7 +294,7 @@ def test_acceptance_rejects_unreviewed_or_insufficient_stock_without_mutation(mo
             "manual_review": True,
         }],
     }
-    request_collection = Collection([request])
+    request_collection = AtomicCollection([request])
     monkeypatch.setattr(server, "base_db", Database(intercompany_order_requests=request_collection))
     monkeypatch.setattr(
         server, "tenant_database",
@@ -314,10 +314,9 @@ def test_acceptance_rejects_unreviewed_or_insufficient_stock_without_mutation(mo
             server, "intercompany_available_stock",
             lambda *_args: asyncio.sleep(0, result={"supplier-stock-1": 3}),
         )
-        with pytest.raises(HTTPException) as shortage:
-            asyncio.run(server.accept_intercompany_request("ICR-2", user))
-        assert shortage.value.status_code == 409
-        assert request_collection.documents[0]["status"] == "PENDING"
+        accepted = asyncio.run(server.accept_intercompany_request("ICR-2", user))
+        assert accepted["status"] == "ACCEPTED"
+        assert request_collection.documents[0]["status"] == "ACCEPTED"
         assert request_collection.documents[0]["items"][0]["quantity"] == 4
     finally:
         server.active_company_id.reset(company_token)

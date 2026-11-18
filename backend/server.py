@@ -11450,18 +11450,6 @@ async def accept_intercompany_request(request_id: str, user=Depends(get_current_
     resolved_items, available, relinked = await resolve_intercompany_request_stock(
         supplier_db, company_id, request["items"], available,
     )
-    shortages = [
-        {
-            "product": item["product"],
-            "dimensions": item["dimensions"],
-            "available": available.get(item["stock_id"], 0),
-            "requested": item["quantity"],
-        }
-        for item in resolved_items
-        if D(available.get(item["stock_id"], 0)) < D(item["quantity"])
-    ]
-    if shortages:
-        raise HTTPException(409, {"message": "Insufficient supplier stock; no stock was reserved or deducted", "shortages": shortages})
     now = now_iso()
     updated = await base_db.intercompany_order_requests.find_one_and_update(
         {
