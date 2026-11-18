@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, ContactRound, ReceiptText, Package, Factory, CalendarCheck,
-  ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined, ShoppingCart,
+  ShoppingBag, HandCoins, CarFront, Receipt, ChartNoAxesCombined,
   Building2, Handshake, Settings as Cog, ClipboardCheck,
   Warehouse, Boxes, ClipboardList,
 } from "lucide-react";
@@ -23,7 +23,6 @@ export const NAV_GROUPS = [
     { to: "/intercompany", label: "Intercompany", icon: Building2, section: "intercompany" },
     { to: "/grv", label: "GRV", icon: ClipboardCheck, section: "grv" },
     { to: "/suppliers", label: "Suppliers", icon: Handshake, section: "suppliers" },
-    { to: "/buyings", label: "Buyings", icon: ShoppingCart, section: "buyings" },
   ] },
   { id: "operations", label: "Operations", items: [
     { to: "/stock", label: "Stock", icon: Package, section: "stock" },

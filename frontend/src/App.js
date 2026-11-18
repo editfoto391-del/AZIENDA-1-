@@ -19,7 +19,6 @@ const Customers = lazy(pageLoaders["/customers"]);
 const Suppliers = lazy(pageLoaders["/suppliers"]);
 const ClientPayments = lazy(pageLoaders["/client-payments"]);
 const ExpressClientPayments = lazy(pageLoaders["/express-client-payments"]);
-const Buyings = lazy(pageLoaders["/buyings"]);
 const Intercompany = lazy(pageLoaders["/intercompany"]);
 const InvoiceList = lazy(pageLoaders["/invoices"]);
 const InvoiceEditor = lazy(pageLoaders["/invoices/new"]);
@@ -127,7 +126,6 @@ function Protected({ children }) {
         : location.pathname.startsWith("/invoices") ? "invoices"
       : location.pathname.startsWith("/customers") ? "customers"
         : location.pathname.startsWith("/suppliers") ? "suppliers"
-          : location.pathname.startsWith("/buyings") ? "buyings"
             : location.pathname.startsWith("/orders") ? "orders"
               : location.pathname.startsWith("/stock") ? "stock"
                 : location.pathname.startsWith("/production/monthly-sheet") ? "superiqfoam-monthly-sheet"
@@ -155,7 +153,6 @@ function Protected({ children }) {
         ["invoices", "/invoices"],
         ["customers", "/customers"],
         ["suppliers", "/suppliers"],
-        ["buyings", "/buyings"],
         ["orders", "/orders"],
         ["stock", "/stock"],
         ["company-inventory", "/company-inventory"],
@@ -370,7 +367,6 @@ function AppRouter() {
             <Route path="/suppliers" element={<Suppliers />} />
             <Route path="/client-payments" element={<ClientPayments />} />
             <Route path="/express-client-payments" element={<ExpressClientPayments express />} />
-            <Route path="/buyings" element={<Buyings />} />
             <Route path="/intercompany" element={<Intercompany />} />
             <Route path="/invoices" element={<InvoiceList />} />
             <Route path="/invoices/new" element={<InvoiceEditor />} />

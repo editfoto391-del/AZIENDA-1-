@@ -128,7 +128,6 @@ WORKER_SUPERVISOR_ACTIONS = set(WORKER_SUPERVISOR_ACTION_SECTIONS)
 WORKER_SECTION_PREFIXES = {
     "customers": "customers",
     "suppliers": "suppliers",
-    "buyings": "buyings",
     "invoices": "invoices",
     "express-invoices": "express-invoices",
     "express-client-payments": "express-client-payments",
@@ -495,7 +494,7 @@ async def find_worker_by_access_token(token):
 USER_PROJ = {"_id": 0, "password_hash": 0}
 OWNER_EMAIL_ALIASES = {"2j2skp87z8@privaterelay.appleid.com"}
 WORKER_SECTIONS = {
-    "customers", "suppliers", "buyings", "invoices", "orders", "stock",
+    "customers", "suppliers", "invoices", "orders", "stock",
     "production", "attendance", "deliveries", "fleet", "expenses",
     "costs", "grv", "daily-report", "client-payments", "settings", "warehouses",
     "express-invoices", "express-client-payments", "intercompany", "company-inventory",
@@ -757,7 +756,6 @@ def enforce_worker_api_access(request, user):
         "express-invoices": [
             ("customers", "GET"), ("prices", "GET"), ("settings", "GET"), ("drivers", "GET"),
         ],
-        "buyings": [("suppliers", "GET"), ("stock", "GET")],
         "grv": [
             ("suppliers", "GET"), ("stock", "GET"),
             ("purchase-orders", "GET"), ("settings", "GET"),
@@ -12639,7 +12637,7 @@ INTERFACE_NAV_GROUPS = {
     "overview": ("dashboard",),
     "sales": ("customers", "orders", "invoices", "client-payments"),
     "express": ("express-invoices", "express-client-payments"),
-    "purchasing": ("intercompany", "grv", "suppliers", "buyings"),
+    "purchasing": ("intercompany", "grv", "suppliers"),
     "operations": ("stock", "fleet"),
     "company-inventory": ("company-inventory",),
     "production": ("production", "superiqfoam-monthly-sheet"),
@@ -12664,7 +12662,6 @@ INTERFACE_CUSTOM_LINKS = {
     "/intercompany": "intercompany",
     "/grv": "grv",
     "/suppliers": "suppliers",
-    "/buyings": "buyings",
     "/stock": "stock",
     "/fleet": "fleet",
     "/company-inventory": "company-inventory",

@@ -26,7 +26,7 @@ const QUICK = [
 
 const MANUFACTURING_COMPANY_ID = "iqfoam-manufactoring";
 const WORKER_SECTION_OPTIONS = [
-  ["customers", "Customers"], ["suppliers", "Suppliers"], ["buyings", "Buyings"],
+  ["customers", "Customers"], ["suppliers", "Suppliers"],
   ["invoices", "Invoice"], ["express-invoices", "Express Website Invoices"],
   ["orders", "Orders"], ["intercompany", "Intercompany"],
   ["stock", "Stock"],   ["company-inventory", "Company Inventory"],
@@ -54,7 +54,6 @@ const SUPERVISOR_ACTION_SECTIONS = {
 const WORKER_SECTION_OPERATIONS = {
   customers: [["create", "Add customer"], ["update", "Edit customer"], ["delete", "Delete customer"]],
   suppliers: [["create", "Add supplier"], ["update", "Edit supplier"], ["delete", "Delete supplier"]],
-  buyings: [["create", "Record purchase"], ["update", "Edit purchase"], ["delete", "Delete purchase"]],
   invoices: [["create", "Create invoice"], ["update", "Edit / void invoice"], ["delete", "Delete invoice"]],
   "express-invoices": [["create", "Create invoice"], ["update", "Edit / void invoice"], ["delete", "Delete invoice"]],
   orders: [["create", "Create order"], ["update", "Edit order"], ["delete", "Delete order"]],
@@ -970,7 +969,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3" data-testid="dashboard-financial-kpis">
           <KPI title="Total Invoiced" value={fmtMoney(periodProfit.total_invoiced)} comparison={comparison(periodProfit.total_invoiced, previousProfit.total_invoiced)} icon={Receipt} tint="bg-blue-50 text-blue-600" onClick={() => nav("/invoices")} sparkline="blue" />
           <KPI title="Payments Received · Revenue" value={fmtMoney(periodProfit.revenue)} comparison={comparison(periodProfit.revenue, previousProfit.revenue)} icon={TrendingUp} tint="bg-emerald-50 text-emerald-600" onClick={() => nav("/invoices")} sparkline="up" />
-          <KPI title="Buyings" value={fmtMoney(periodProfit.buyings)} comparison={comparison(periodProfit.buyings, previousProfit.buyings)} icon={Boxes} tint="bg-violet-50 text-violet-600" onClick={() => nav("/buyings")} />
+          <KPI title="Buyings" value={fmtMoney(periodProfit.buyings)} comparison={comparison(periodProfit.buyings, previousProfit.buyings)} icon={Boxes} tint="bg-violet-50 text-violet-600" />
           <KPI title="GRV Purchases" value={fmtMoney(periodProfit.grv_expenses)} comparison={comparison(periodProfit.grv_expenses, previousProfit.grv_expenses)} icon={Boxes} tint="bg-indigo-50 text-indigo-600" onClick={() => nav("/grv")} sparkline="zigzag" />
           <KPI title="Calculated Salaries" value={fmtMoney(periodProfit.salaries)} comparison={comparison(periodProfit.salaries, previousProfit.salaries)} icon={Banknote} tint="bg-amber-50 text-amber-600" onClick={() => nav("/attendance")} sparkline="down" />
           <KPI title="Expenses" value={fmtMoney(periodProfit.expenses)} comparison={comparison(periodProfit.expenses, previousProfit.expenses)} icon={Banknote} tint="bg-orange-50 text-orange-600" onClick={() => nav("/expenses")} sparkline="down" />
