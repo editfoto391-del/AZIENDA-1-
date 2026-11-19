@@ -45,6 +45,7 @@ export default function InvoiceList({ express = false }) {
   const [receivedInvoiceDetails, setReceivedInvoiceDetails] = useState(null);
   const [receivedInvoiceLoading, setReceivedInvoiceLoading] = useState(false);
   const [seenReceivedInvoiceIds, setSeenReceivedInvoiceIds] = useState([]);
+  const [newReceivedInvoiceIds, setNewReceivedInvoiceIds] = useState([]);
   const [receivedGRVAssignments, setReceivedGRVAssignments] = useState({});
   const [receivedGRVExpanded, setReceivedGRVExpanded] = useState(false);
   const [receivedGRVBusy, setReceivedGRVBusy] = useState(false);
@@ -79,8 +80,10 @@ export default function InvoiceList({ express = false }) {
   const detailRequest = useRef(0);
   const pdfDocumentRef = useRef(null);
   const receivedInvoiceDocumentRef = useRef(null);
-  const receivedInvoicesReloadedRef = useRef("");
+  const receivedInvoiceRequestsRef = useRef(new Map());
   const receivedInvoicesCompanyRef = useRef(user?.company_id);
+  const activeSectionRef = useRef(section);
+  activeSectionRef.current = section;
   const pdfBusyRef = useRef(false);
   const pdfDownloadStartedRef = useRef("");
   const batchPrintRefs = useRef(new Map());
@@ -90,58 +93,71 @@ export default function InvoiceList({ express = false }) {
     if (express) return undefined;
     if (receivedInvoicesCompanyRef.current !== user?.company_id) {
       receivedInvoicesCompanyRef.current = user?.company_id;
-      receivedInvoicesReloadedRef.current = "";
       setReceivedInvoices([]);
+      setNewReceivedInvoiceIds([]);
     }
-    const requestKey = `${user?.company_id || "default"}:${section}:${receivedReload}`;
-    if (receivedInvoicesReloadedRef.current === requestKey) return undefined;
-    receivedInvoicesReloadedRef.current = requestKey;
+    const requestKey = `${user?.company_id || "default"}:${receivedReload}`;
     let active = true;
-    const loadReceivedInvoices = async () => {
+    let request = receivedInvoiceRequestsRef.current.get(requestKey);
+    if (!request) {
       setReceivedLoading(true);
-      try {
-        const result = await api.getUncached("/intercompany/invoices/received");
+      request = api.getUncached("/intercompany/invoices/received");
+      receivedInvoiceRequestsRef.current.set(requestKey, request);
+      request.then(
+        () => {
+          if (receivedInvoiceRequestsRef.current.get(requestKey) === request) {
+            receivedInvoiceRequestsRef.current.delete(requestKey);
+          }
+        },
+        () => {
+          if (receivedInvoiceRequestsRef.current.get(requestKey) === request) {
+            receivedInvoiceRequestsRef.current.delete(requestKey);
+          }
+        },
+      );
+    }
+    request.then((result) => {
         if (!Array.isArray(result)) throw new Error("The received invoice list response is not valid.");
         if (active) {
           setReceivedInvoices(result);
-          if (section === "invoices") {
-            try {
-              const notified = JSON.parse(localStorage.getItem(receivedInvoicesNotifiedKey(user?.company_id)) || "[]");
-              const seen = JSON.parse(localStorage.getItem(receivedInvoicesSeenKey(user?.company_id)) || "[]");
-              if (
-                !Array.isArray(notified) || notified.some((id) => typeof id !== "string")
-                || !Array.isArray(seen) || seen.some((id) => typeof id !== "string")
-              ) {
-                throw new Error("Saved received invoice notification state is invalid.");
-              }
-              const alreadyNotified = new Set([...notified, ...seen]);
-              const newInvoices = result.filter((receipt) => !alreadyNotified.has(receipt.id));
+          try {
+            const notified = JSON.parse(localStorage.getItem(receivedInvoicesNotifiedKey(user?.company_id)) || "[]");
+            const seen = JSON.parse(localStorage.getItem(receivedInvoicesSeenKey(user?.company_id)) || "[]");
+            if (
+              !Array.isArray(notified) || notified.some((id) => typeof id !== "string")
+              || !Array.isArray(seen) || seen.some((id) => typeof id !== "string")
+            ) {
+              throw new Error("Saved received invoice notification state is invalid.");
+            }
+            if (activeSectionRef.current === "receiving") {
+              setNewReceivedInvoiceIds([]);
+              markReceivedInvoicesSeen(result.map((receipt) => receipt.id));
+            } else {
+              const unseen = result.filter((receipt) => !seen.includes(receipt.id));
+              setNewReceivedInvoiceIds(unseen.map((receipt) => receipt.id));
+              const newInvoices = unseen.filter((receipt) => !notified.includes(receipt.id));
               if (newInvoices.length) {
-                toast.info(
-                  `${newInvoices.length} new invoice${newInvoices.length === 1 ? "" : "s"} received. Open Receiving Invoices to review.`,
-                );
+                toast.info(`NEW INVOICE RECEIVED! (${newInvoices.length})`);
                 localStorage.setItem(
                   receivedInvoicesNotifiedKey(user?.company_id),
-                  JSON.stringify([...new Set([...notified, ...result.map((receipt) => receipt.id)])]),
+                  JSON.stringify([...new Set([...notified, ...newInvoices.map((receipt) => receipt.id)])]),
                 );
               }
-            } catch (error) {
-              toast.error(`Could not update received invoice notification state: ${error.message}`);
             }
+          } catch (error) {
+            toast.error(`Could not update received invoice notification state: ${error.message}`);
           }
         }
-      } catch (error) {
+      }).catch((error) => {
         if (!active) return;
         toast.error(`Could not load received invoices: ${apiError(error)}`);
-      } finally {
+      }).finally(() => {
         if (active) setReceivedLoading(false);
-      }
-    };
-    loadReceivedInvoices();
+      });
     return () => {
       active = false;
     };
-  }, [express, section, receivedReload, user?.company_id]);
+  }, [express, receivedReload, user?.company_id]);
 
   useEffect(() => {
     if (express) return;
@@ -157,15 +173,20 @@ export default function InvoiceList({ express = false }) {
     }
   }, [express, user?.company_id]);
 
-  const markReceivedInvoiceSeen = (receiptId) => {
-    const next = [...new Set([...seenReceivedInvoiceIds, receiptId])];
+  const markReceivedInvoicesSeen = (receiptIds) => {
     try {
+      const saved = JSON.parse(localStorage.getItem(receivedInvoicesSeenKey(user?.company_id)) || "[]");
+      if (!Array.isArray(saved) || saved.some((id) => typeof id !== "string")) {
+        throw new Error("Saved received invoice notification state is invalid.");
+      }
+      const next = [...new Set([...saved, ...seenReceivedInvoiceIds, ...receiptIds])];
       localStorage.setItem(receivedInvoicesSeenKey(user?.company_id), JSON.stringify(next));
       setSeenReceivedInvoiceIds(next);
     } catch (error) {
       toast.error(`Could not update received invoice notification state: ${error.message}`);
     }
   };
+  const markReceivedInvoiceSeen = (receiptId) => markReceivedInvoicesSeen([receiptId]);
 
   const openReceivedInvoice = async (receipt, openGRV = false) => {
     setReceivedInvoiceReceipt(receipt);
@@ -664,10 +685,6 @@ export default function InvoiceList({ express = false }) {
   const pageCount = Math.max(1, Math.ceil(total / 50));
   const rangeStart = total === 0 ? 0 : (page - 1) * 50 + 1;
   const rangeEnd = Math.min(page * 50, total);
-  const unseenReceivedInvoiceCount = receivedInvoices.filter(
-    (receipt) => !seenReceivedInvoiceIds.includes(receipt.id),
-  ).length;
-
   return (
     <div>
       <PageHeader title={express ? "Express Website Invoices" : "Invoices"} subtitle={loading ? "Loading invoices..." : `Showing ${rangeStart}–${rangeEnd} of ${total} invoices`}>
@@ -679,7 +696,10 @@ export default function InvoiceList({ express = false }) {
           type="button"
           role="tab"
           aria-selected={section === "invoices"}
-          onClick={() => setSection("invoices")}
+          onClick={() => {
+            setSection("invoices");
+            setReceivedReload((current) => current + 1);
+          }}
           className={`border-b-2 px-3 py-2 text-sm font-semibold ${section === "invoices" ? "border-primary text-primary" : "border-transparent text-slate-500"}`}
           data-testid="invoices-section-tab"
         >Invoices</button>
@@ -687,7 +707,11 @@ export default function InvoiceList({ express = false }) {
           type="button"
           role="tab"
           aria-selected={section === "receiving"}
-          onClick={() => setSection("receiving")}
+          onClick={() => {
+            setSection("receiving");
+            setNewReceivedInvoiceIds([]);
+            markReceivedInvoicesSeen(receivedInvoices.map((receipt) => receipt.id));
+          }}
           className={`border-b-2 px-3 py-2 text-sm font-semibold ${section === "receiving" ? "border-primary text-primary" : "border-transparent text-slate-500"}`}
           data-testid="receiving-invoices-section-tab"
         >
@@ -695,8 +719,8 @@ export default function InvoiceList({ express = false }) {
           <span className="ml-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs" data-testid="received-invoice-count">
             {receivedInvoices.length}
           </span>
-          {unseenReceivedInvoiceCount > 0 && <span
-            className="ml-2 inline-flex items-center rounded-full border border-rose-300 bg-rose-100 px-2 py-0.5 text-[10px] font-extrabold tracking-wide text-rose-700 shadow-[0_0_8px_rgba(251,113,133,0.75)] animate-pulse"
+          {newReceivedInvoiceIds.length > 0 && <span
+            className="ml-2 inline-flex items-center rounded-full border-2 border-red-300 bg-red-600 px-2.5 py-1 text-[10px] font-black tracking-wide text-white shadow-[0_0_6px_2px_rgba(239,68,68,0.85)] animate-pulse"
             role="status"
             data-testid="new-invoice-received-alert"
           >NEW INVOICE RECEIVED!</span>}

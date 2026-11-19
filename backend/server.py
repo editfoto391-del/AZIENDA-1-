@@ -12174,14 +12174,16 @@ async def send_intercompany_invoice(
 async def list_received_intercompany_invoices(user=Depends(get_current_user)):
     company_id = active_company_id.get()
     require_intercompany_company_access(user, company_id)
-    request_invoices = await base_db.intercompany_order_requests.find(
-        {"requesting_company_id": company_id, "invoice_sent": True},
-        {"_id": 0},
-    ).sort("sent_at", -1).to_list(100)
-    direct_deliveries = await base_db.intercompany_invoice_deliveries.find(
-        {"recipient_company_id": company_id},
-        {"_id": 0},
-    ).sort("sent_at", -1).to_list(100)
+    request_invoices, direct_deliveries = await asyncio.gather(
+        base_db.intercompany_order_requests.find(
+            {"requesting_company_id": company_id, "invoice_sent": True},
+            {"_id": 0},
+        ).sort("sent_at", -1).to_list(100),
+        base_db.intercompany_invoice_deliveries.find(
+            {"recipient_company_id": company_id},
+            {"_id": 0},
+        ).sort("sent_at", -1).to_list(100),
+    )
     received = [{
         "id": f"request:{request['id']}",
         "source": "request",
@@ -12192,28 +12194,45 @@ async def list_received_intercompany_invoices(user=Depends(get_current_user)):
         "invoice_total": request.get("invoice_total"),
         "sent_at": request.get("sent_at"),
     } for request in request_invoices if request.get("invoice_id")]
+    allowed_senders = {profile["id"] for profile in COMPANY_PROFILES}
+    deliveries_by_sender = {}
     for delivery in direct_deliveries:
         sender_company_id = delivery.get("sender_company_id")
-        if sender_company_id not in {profile["id"] for profile in COMPANY_PROFILES}:
-            continue
+        invoice_id = delivery.get("invoice_id")
+        if sender_company_id in allowed_senders and invoice_id:
+            deliveries_by_sender.setdefault(sender_company_id, []).append(delivery)
+
+    async def load_sender_invoices(sender_company_id, deliveries):
         supplier_db = tenant_database(client, base_db, sender_company_id)
-        invoice = await supplier_db.invoices.find_one(
-            {"id": delivery.get("invoice_id")},
-            {"_id": 0, "number": 1, "total": 1, "customer_name": 1},
-        )
-        if not invoice:
-            continue
-        received.append({
-            "id": f"direct:{delivery['id']}",
-            "source": "direct",
-            "requesting_company_id": company_id,
-            "supplying_company_id": sender_company_id,
-            "invoice_id": delivery["invoice_id"],
-            "invoice_number": invoice.get("number") or delivery.get("invoice_number"),
-            "invoice_total": invoice.get("total"),
-            "customer_name": invoice.get("customer_name", ""),
-            "sent_at": delivery.get("sent_at"),
-        })
+        invoice_ids = list({delivery["invoice_id"] for delivery in deliveries})
+        invoices = await supplier_db.invoices.find(
+            {"id": {"$in": invoice_ids}},
+            {"_id": 0, "id": 1, "number": 1, "total": 1, "customer_name": 1},
+        ).to_list(len(invoice_ids))
+        return sender_company_id, {invoice["id"]: invoice for invoice in invoices}
+
+    sender_invoices = await asyncio.gather(*(
+        load_sender_invoices(sender_company_id, deliveries)
+        for sender_company_id, deliveries in deliveries_by_sender.items()
+    ))
+    invoices_by_sender = dict(sender_invoices)
+    for sender_company_id, deliveries in deliveries_by_sender.items():
+        invoices = invoices_by_sender[sender_company_id]
+        for delivery in deliveries:
+            invoice = invoices.get(delivery["invoice_id"])
+            if not invoice:
+                continue
+            received.append({
+                "id": f"direct:{delivery['id']}",
+                "source": "direct",
+                "requesting_company_id": company_id,
+                "supplying_company_id": sender_company_id,
+                "invoice_id": delivery["invoice_id"],
+                "invoice_number": invoice.get("number") or delivery.get("invoice_number"),
+                "invoice_total": invoice.get("total"),
+                "customer_name": invoice.get("customer_name", ""),
+                "sent_at": delivery.get("sent_at"),
+            })
     received.sort(key=lambda item: item.get("sent_at") or "", reverse=True)
     return received
 
