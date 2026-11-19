@@ -5378,6 +5378,67 @@ class PriceIn(BaseModel):
             raise ValueError("Category and size are required")
         return value
 
+class CustomerInvoicePriceIn(BaseModel):
+    zone: int = Field(ge=1, le=2)
+    category: str = Field(min_length=1, max_length=100)
+    size: str = Field(min_length=1, max_length=100)
+    price: float = Field(ge=0, allow_inf_nan=False)
+
+    @field_validator("category", "size")
+    @classmethod
+    def customer_price_label_required(cls, value):
+        value = value.strip()
+        if not value:
+            raise ValueError("Category and size are required")
+        return value
+
+class CustomerInvoicePricesIn(BaseModel):
+    items: List[CustomerInvoicePriceIn] = Field(default_factory=list, max_length=500)
+
+@api.get("/invoices/customer-prices/{cid}")
+async def get_customer_invoice_prices(cid: str, user=Depends(get_current_user)):
+    if (active_company_id.get() or DEFAULT_COMPANY_ID) != DEFAULT_COMPANY_ID:
+        raise HTTPException(404, "Customer-specific invoice prices are not available")
+    customer = await db.customers.find_one({"id": cid}, {"_id": 0, "invoice_prices": 1})
+    if customer is None:
+        raise HTTPException(404, "Customer not found")
+    return customer.get("invoice_prices", [])
+
+@api.put("/invoices/customer-prices/{cid}")
+async def save_customer_invoice_prices(
+    cid: str,
+    body: CustomerInvoicePricesIn,
+    user=Depends(get_current_user),
+):
+    if (active_company_id.get() or DEFAULT_COMPANY_ID) != DEFAULT_COMPANY_ID:
+        raise HTTPException(404, "Customer-specific invoice prices are not available")
+    before = await db.customers.find_one({"id": cid}, {"_id": 0, "invoice_prices": 1})
+    if before is None:
+        raise HTTPException(404, "Customer not found")
+    prices = [item.model_dump() for item in body.items]
+    keys = [
+        (item["zone"], item["category"].casefold(), item["size"].casefold())
+        for item in prices
+    ]
+    if len(keys) != len(set(keys)):
+        raise HTTPException(422, "Each customer price must have a unique zone, category and size")
+    merged = {
+        (item["zone"], item["category"].casefold(), item["size"].casefold()): item
+        for item in before.get("invoice_prices", [])
+    }
+    merged.update(dict(zip(keys, prices)))
+    saved = sorted(
+        merged.values(),
+        key=lambda item: (item["zone"], item["category"].casefold(), item["size"].casefold()),
+    )
+    await update_doc("customers", cid, {"invoice_prices": saved})
+    await log_audit(
+        "customer", cid, "invoice_prices_updated", user,
+        before={"invoice_prices": before.get("invoice_prices", [])},
+        after={"invoice_prices": saved},
+    )
+    return saved
+
 @api.get("/prices")
 async def get_prices(user=Depends(get_current_user)):
     return await listall("prices", sort=("zone", 1))
@@ -6378,8 +6439,26 @@ async def validate_invoice_order_ids(order_ids, customer_id, customer_name):
     return normalized_ids
 
 
-async def link_invoice_orders(invoice):
+async def link_invoice_orders(invoice, user=None):
     for order_id in invoice.get("order_ids") or []:
+        before = await db.orders.find_one({"id": order_id}, {"_id": 0})
+        if not before:
+            raise HTTPException(409, "Selected order no longer exists")
+        auto_archive = (
+            (active_company_id.get() or DEFAULT_COMPANY_ID) == DEFAULT_COMPANY_ID
+            and invoice.get("status") != "draft"
+        )
+        order_updates = {
+            "invoice_id": invoice["id"],
+            "invoice_number": invoice.get("number") or invoice.get("reference") or "",
+            "updated_at": now_iso(),
+        }
+        if auto_archive and not before.get("archived"):
+            order_updates.update({
+                "archived": True,
+                "archived_at": now_iso(),
+                "archived_by": (user or {}).get("id"),
+            })
         result = await db.orders.update_one(
             {
                 "id": order_id,
@@ -6388,14 +6467,18 @@ async def link_invoice_orders(invoice):
                     {"invoice_id": invoice["id"]},
                 ],
             },
-            {"$set": {
-                "invoice_id": invoice["id"],
-                "invoice_number": invoice.get("number") or invoice.get("reference") or "",
-                "updated_at": now_iso(),
-            }},
+            {"$set": order_updates},
         )
         if result.matched_count == 0:
             raise HTTPException(409, "Selected order is already linked to another invoice")
+        if auto_archive and not before.get("archived"):
+            archived = {**before, **order_updates}
+            await log_audit(
+                "order", order_id, "archived_after_invoice", user,
+                before=before, after=archived,
+                reason="Automatically archived after invoicing its delivery note",
+            )
+            await emit_workflow_event("order.updated", archived)
 
 
 async def _prepare_invoice(body: InvoiceIn, user=None, existing=None):
@@ -6546,7 +6629,7 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
         if existing_submission:
             if existing_submission.get("submission_payload_hash") != invoice_submission_hash(body):
                 raise HTTPException(409, "This invoice submission key was already used for different invoice data")
-            await link_invoice_orders(existing_submission)
+            await link_invoice_orders(existing_submission, user)
             return invoice_for_user(existing_submission, user)
 
     deduct_stock = body.deduct_stock
@@ -6586,9 +6669,9 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
                 raise
             if existing_submission.get("submission_payload_hash") != invoice_submission_hash(body):
                 raise HTTPException(409, "This invoice submission key was already used for different invoice data") from error
-            await link_invoice_orders(existing_submission)
+            await link_invoice_orders(existing_submission, user)
             return invoice_for_user(existing_submission, user)
-        await link_invoice_orders(record)
+        await link_invoice_orders(record, user)
         await emit_workflow_event("invoice.created", record)
         if record.get("status") != "draft":
             await emit_workflow_event("invoice.issued", record)
@@ -6612,11 +6695,11 @@ async def create_invoice(body: InvoiceIn, user=Depends(get_current_user)):
                 raise
             if existing_submission.get("submission_payload_hash") != invoice_submission_hash(body):
                 raise HTTPException(409, "This invoice submission key was already used for different invoice data") from error
-            await link_invoice_orders(existing_submission)
+            await link_invoice_orders(existing_submission, user)
             return invoice_for_user(existing_submission, user)
         await post_invoice_stock_deductions(rec, deductions, user)
         rec = await update_doc("invoices", rec["id"], {"stock_deducted": True})
-    await link_invoice_orders(rec)
+    await link_invoice_orders(rec, user)
     await emit_workflow_event("invoice.created", rec)
     if rec.get("status") != "draft":
         await emit_workflow_event("invoice.issued", rec)
@@ -6706,6 +6789,8 @@ async def update_invoice(iid: str, body: InvoiceIn, user=Depends(get_current_use
             rec = await update_doc("invoices", iid, inv)
             await post_invoice_stock_changes(rec, stock_changes, stocks, user)
             rec = await update_doc("invoices", iid, {"stock_deducted": True, "stock_restored": False})
+    if existing.get("status") == "draft" and rec.get("status") != "draft":
+        await link_invoice_orders(rec, user)
     if "opening_balance" in existing and body.opening_balance is False:
         await db.invoices.update_one({"id": iid}, {"$unset": {"opening_balance": ""}})
         rec.pop("opening_balance", None)
@@ -6840,6 +6925,7 @@ async def issue_invoice(iid: str, body: InvoiceIssueIn = InvoiceIssueIn(), user=
             rec = await update_doc("invoices", iid, upd)
             await post_invoice_stock_deductions(rec, deductions, user)
             rec = await update_doc("invoices", iid, {"stock_deducted": True})
+    await link_invoice_orders({**inv, **upd}, user)
     await emit_workflow_event("invoice.issued", rec)
     await log_audit(
         "invoice", iid, "invoice_issued", user,
@@ -18375,23 +18461,7 @@ async def get_orders(
         }
         cursor = db.orders.aggregate([
             {"$match": query},
-            {"$addFields": {
-                "_priority_rank": {"$switch": {
-                    "branches": [
-                        {"case": {"$eq": ["$priority", "Urgent"]}, "then": 0},
-                        {"case": {"$eq": ["$priority", "High"]}, "then": 1},
-                        {"case": {"$eq": ["$priority", "Normal"]}, "then": 2},
-                        {"case": {"$eq": ["$priority", "Low"]}, "then": 3},
-                    ],
-                    "default": 9,
-                }},
-                "_ship_date_sort": {"$cond": [
-                    {"$eq": [{"$ifNull": ["$expected_ship_date", ""]}, ""]},
-                    "9",
-                    "$expected_ship_date",
-                ]},
-            }},
-            {"$sort": {"_priority_rank": 1, "_ship_date_sort": 1, "id": 1}},
+            {"$sort": {"created_at": -1, "id": -1}},
             {"$skip": (page - 1) * page_size},
             {"$limit": page_size},
             {"$project": {

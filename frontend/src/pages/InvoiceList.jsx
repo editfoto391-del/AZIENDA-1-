@@ -12,6 +12,7 @@ import { InvoiceDocument } from "@/components/InvoiceDocument";
 import { elementToPdf, printElements } from "@/lib/pdf";
 
 const receivedInvoicesSeenKey = (companyId) => `received-invoices-seen:${companyId || "default"}`;
+const receivedInvoicesNotifiedKey = (companyId) => `received-invoices-notified:${companyId || "default"}`;
 const receivedInvoiceItems = (invoice) => (invoice?.items || [])
   .filter((item) => (item.category || item.size || item.description)
     && !(!item.category && !item.size && item.description?.trim().toLowerCase() === "opening balance"))
@@ -78,8 +79,7 @@ export default function InvoiceList({ express = false }) {
   const detailRequest = useRef(0);
   const pdfDocumentRef = useRef(null);
   const receivedInvoiceDocumentRef = useRef(null);
-  const receivedInvoicesLoadedRef = useRef(false);
-  const receivedInvoicesReloadedRef = useRef(-1);
+  const receivedInvoicesReloadedRef = useRef("");
   const receivedInvoicesCompanyRef = useRef(user?.company_id);
   const pdfBusyRef = useRef(false);
   const pdfDownloadStartedRef = useRef("");
@@ -87,27 +87,48 @@ export default function InvoiceList({ express = false }) {
   const listPath = express ? "/express-invoices" : "/invoices";
 
   useEffect(() => {
-    if (express || section !== "receiving") return undefined;
+    if (express) return undefined;
     if (receivedInvoicesCompanyRef.current !== user?.company_id) {
       receivedInvoicesCompanyRef.current = user?.company_id;
-      receivedInvoicesLoadedRef.current = false;
-      receivedInvoicesReloadedRef.current = -1;
+      receivedInvoicesReloadedRef.current = "";
       setReceivedInvoices([]);
     }
-    if (
-      receivedInvoicesLoadedRef.current
-      && receivedInvoicesReloadedRef.current === receivedReload
-    ) return undefined;
-    receivedInvoicesReloadedRef.current = receivedReload;
+    const requestKey = `${user?.company_id || "default"}:${section}:${receivedReload}`;
+    if (receivedInvoicesReloadedRef.current === requestKey) return undefined;
+    receivedInvoicesReloadedRef.current = requestKey;
     let active = true;
     const loadReceivedInvoices = async () => {
-      if (!receivedInvoicesLoadedRef.current) setReceivedLoading(true);
+      setReceivedLoading(true);
       try {
         const result = await api.getUncached("/intercompany/invoices/received");
         if (!Array.isArray(result)) throw new Error("The received invoice list response is not valid.");
         if (active) {
           setReceivedInvoices(result);
-          receivedInvoicesLoadedRef.current = true;
+          if (section === "invoices") {
+            try {
+              const notified = JSON.parse(localStorage.getItem(receivedInvoicesNotifiedKey(user?.company_id)) || "[]");
+              const seen = JSON.parse(localStorage.getItem(receivedInvoicesSeenKey(user?.company_id)) || "[]");
+              if (
+                !Array.isArray(notified) || notified.some((id) => typeof id !== "string")
+                || !Array.isArray(seen) || seen.some((id) => typeof id !== "string")
+              ) {
+                throw new Error("Saved received invoice notification state is invalid.");
+              }
+              const alreadyNotified = new Set([...notified, ...seen]);
+              const newInvoices = result.filter((receipt) => !alreadyNotified.has(receipt.id));
+              if (newInvoices.length) {
+                toast.info(
+                  `${newInvoices.length} new invoice${newInvoices.length === 1 ? "" : "s"} received. Open Receiving Invoices to review.`,
+                );
+                localStorage.setItem(
+                  receivedInvoicesNotifiedKey(user?.company_id),
+                  JSON.stringify([...new Set([...notified, ...result.map((receipt) => receipt.id)])]),
+                );
+              }
+            } catch (error) {
+              toast.error(`Could not update received invoice notification state: ${error.message}`);
+            }
+          }
         }
       } catch (error) {
         if (!active) return;

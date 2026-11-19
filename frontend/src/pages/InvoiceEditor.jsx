@@ -134,10 +134,12 @@ export default function InvoiceEditor({ express = false }) {
   const [payModal, setPayModal] = useState(null);
   const [nextNum, setNextNum] = useState("");
   const [pendingSave, setPendingSave] = useState(null);
+  const [pendingCustomerPriceSave, setPendingCustomerPriceSave] = useState(null);
   const [pendingStockSubmit, setPendingStockSubmit] = useState(null);
   const [pendingNegativeStock, setPendingNegativeStock] = useState(null);
   const [pendingUnmatchedStock, setPendingUnmatchedStock] = useState(null);
   const [printTemplate, setPrintTemplate] = useState(null);
+  const [customerPrices, setCustomerPrices] = useState([]);
   const [pendingPrintConfirmation, setPendingPrintConfirmation] = useState(null);
   const [downloadIssuedDraft, setDownloadIssuedDraft] = useState(false);
   const [pdfAutoDownload, setPdfAutoDownload] = useState(false);
@@ -429,6 +431,29 @@ export default function InvoiceEditor({ express = false }) {
     return lookupInvoicePrice(zone, cat, size, unifiedPriceList, prices);
   };
 
+  const customerPriceFor = (zone, category, size, priceList = customerPrices) => priceList.find((item) =>
+    Number(item.zone) === Number(zone)
+      && sameInvoicePriceCategory(item.category, category, unifiedPriceList)
+      && canonicalInvoiceSize(item.size) === canonicalInvoiceSize(size),
+  );
+  const applyCustomerPrice = (item, zone, priceList = customerPrices) => {
+    const savedPrice = customerPriceFor(zone, item.category, item.size, priceList);
+    return savedPrice
+      ? { ...item, unit_price: savedPrice.price, price_override: true, _customerPrice: true, _needsConfig: false }
+      : item;
+  };
+  const loadCustomerPrices = async (customerId) => {
+    if (user?.company_id !== "superiqfoam" || !customerId) return [];
+    try {
+      const result = await api.getUncached(`/invoices/customer-prices/${encodeURIComponent(customerId)}`);
+      if (!Array.isArray(result)) throw new Error("Customer price list response is not valid.");
+      return result;
+    } catch (error) {
+      toast.error(`Could not load this customer's saved invoice prices: ${apiError(error)}`);
+      return [];
+    }
+  };
+
   const updateItem = (idx, patch) => {
     setInv((prev) => {
       const items = [...prev.items];
@@ -440,20 +465,33 @@ export default function InvoiceEditor({ express = false }) {
   const onCatSize = (idx, patch) => {
     const it = { ...inv.items[idx], ...patch };
     patch.price_override = false;
+    patch._customerPrice = false;
+    patch._priceBeforeManualEdit = null;
     if (it.category && it.size) {
-      const r = lookupPrice(inv.zone, it.category, it.size);
-      patch.unit_price = r.price ?? 0;
-      patch._needsConfig = r.needsConfig || r.missing;
+      const customerPrice = customerPriceFor(inv.zone, it.category, it.size);
+      if (customerPrice) {
+        patch.unit_price = customerPrice.price;
+        patch.price_override = true;
+        patch._customerPrice = true;
+        patch._needsConfig = false;
+      } else {
+        const r = lookupPrice(inv.zone, it.category, it.size);
+        patch.unit_price = r.price ?? 0;
+        patch._needsConfig = r.needsConfig || r.missing;
+      }
     } else { patch.unit_price = 0; patch._needsConfig = false; }
     updateItem(idx, patch);
   };
 
-  const repriceItems = (items, zone) => items.map((it) => {
-    if (it.price_override) return it;
+  const repriceItems = (items, zone, priceList = customerPrices) => items.map((it) => {
+    if (it.price_override && !it._customerPrice) return it;
     const cats = categoriesFor(zone);
     const cat = cats.find((item) => canonicalInvoiceCategory(item) === canonicalInvoiceCategory(it.category)) || cats[0];
     const r = lookupPrice(zone, cat, it.size);
-    return { ...it, category: cat, unit_price: r.price ?? 0, _needsConfig: !!it.size && (r.needsConfig || r.missing) };
+    return applyCustomerPrice({
+      ...it, category: cat, unit_price: r.price ?? 0, price_override: false,
+      _customerPrice: false, _needsConfig: !!it.size && (r.needsConfig || r.missing),
+    }, zone, priceList);
   });
 
   const confirmReprice = (items, next) => {
@@ -467,7 +505,7 @@ export default function InvoiceEditor({ express = false }) {
     zoneLookupRef.current += 1;
     setZoneFromLastInvoice(false);
     const next = repriceItems(inv.items, zone);
-    if (!confirmReprice(inv.items, next)) return;
+    if (user?.company_id !== "superiqfoam" && !confirmReprice(inv.items, next)) return;
     setInv({ ...inv, zone, items: next });
   };
 
@@ -491,20 +529,43 @@ export default function InvoiceEditor({ express = false }) {
     if (!c) {
       zoneLookupRef.current += 1;
       setZoneFromLastInvoice(false);
-      setInv((prev) => ({ ...prev, customer_id: "", customer_name: "" }));
+      setCustomerPrices([]);
+      setInv((prev) => ({
+        ...prev,
+        customer_id: "",
+        customer_name: "",
+        items: repriceItems(
+          prev.items.map((item) => item._customerPrice
+            ? { ...item, price_override: false, _customerPrice: false }
+            : item),
+          prev.zone,
+          [],
+        ),
+      }));
       return;
     }
     const lookupId = ++zoneLookupRef.current;
     setZoneFromLastInvoice(false);
-    const lastZone = await lastInvoiceZoneForCustomer(c);
+    const [lastZone, savedPrices] = await Promise.all([
+      lastInvoiceZoneForCustomer(c),
+      loadCustomerPrices(c.id),
+    ]);
     if (lookupId !== zoneLookupRef.current) return;
+    setCustomerPrices(savedPrices);
     const zone = priceZonesEnabled ? lastZone.zone : 1;
-    let items = inv.items;
+    const customerChanged = inv.customer_id !== cid;
+    const sourceItems = customerChanged
+      ? inv.items.map((item) => item._customerPrice
+        ? { ...item, price_override: false, _customerPrice: false }
+        : item)
+      : inv.items;
+    let items = repriceItems(sourceItems, zone, savedPrices);
     let selectedZone = zone;
     if (priceZonesEnabled && zone !== inv.zone) {
-      const next = repriceItems(inv.items, zone);
-      if (confirmReprice(inv.items, next)) items = next;
-      else selectedZone = inv.zone;
+      if (user?.company_id !== "superiqfoam" && !confirmReprice(inv.items, items)) selectedZone = inv.zone;
+    }
+    if (selectedZone !== zone) {
+      items = repriceItems(sourceItems, selectedZone, savedPrices);
     }
     setZoneFromLastInvoice(priceZonesEnabled && lastZone.fromLastInvoice && selectedZone === zone);
     setInv({ ...inv, customer_id: cid, customer_name: c.name, customer_phone: c.phone || "", customer_city: c.city || "", client_number: c.client_number || "", payment_terms: user?.company_id === "superiqfoam" ? defaultInvoicePaymentTerms(user.company_id) : c.payment_terms, zone: selectedZone, items, destination: inv.destination || c.city || "" });
@@ -528,8 +589,12 @@ export default function InvoiceEditor({ express = false }) {
 
     const customer = customers.find((item) => item.id === order.customer_id)
       || customers.find((item) => item.name.trim().toLowerCase() === String(order.customer_name || "").trim().toLowerCase());
-    const lastZone = await lastInvoiceZoneForCustomer(customer);
+    const [lastZone, savedPrices] = await Promise.all([
+      lastInvoiceZoneForCustomer(customer),
+      loadCustomerPrices(customer?.id),
+    ]);
     if (lookupId !== zoneLookupRef.current) return;
+    setCustomerPrices(savedPrices);
     const zone = priceZonesEnabled ? Number(customer ? lastZone.zone : inv.zone) : 1;
     const noteItems = orderLines(order).map((item) => ({
       ...makeEmptyItem(),
@@ -541,7 +606,9 @@ export default function InvoiceEditor({ express = false }) {
         : item.description || "",
     }));
     const items = noteItems.length
-      ? noteItems.map((item) => item.category ? repriceItems([item], zone)[0] : item)
+      ? noteItems.map((item) => item.category
+        ? repriceItems([item], zone, savedPrices)[0]
+        : item)
       : [makeEmptyItem()];
 
     setInv((current) => ({
@@ -568,7 +635,23 @@ export default function InvoiceEditor({ express = false }) {
     }
     zoneLookupRef.current += 1;
     setZoneFromLastInvoice(false);
-    setInv((prev) => ({ ...prev, customer_id: "", customer_name: name, customer_phone: "", customer_city: "", client_number: "", destination: "" }));
+    setCustomerPrices([]);
+    setInv((prev) => ({
+      ...prev,
+      customer_id: "",
+      customer_name: name,
+      customer_phone: "",
+      customer_city: "",
+      client_number: "",
+      destination: "",
+      items: repriceItems(
+        prev.items.map((item) => item._customerPrice
+          ? { ...item, price_override: false, _customerPrice: false }
+          : item),
+        prev.zone,
+        [],
+      ),
+    }));
   };
 
   const chooseIntercompanyRecipient = (recipientId) => {
@@ -714,7 +797,37 @@ export default function InvoiceEditor({ express = false }) {
     return true;
   };
 
-  const save = async (status, saveNewEntries = null, downloadAfterSave = false, deductStock = null, allowNegativeStock = false, resolvedCustomerId = null) => {
+  const customerPricesToSave = (status) => {
+    if (user?.company_id !== "superiqfoam" || !inv.customer_id || status === "draft") return [];
+    const changed = inv.items.filter((item) => {
+      if (!item.price_override || item._customerPrice || !item.category || !item.size) return false;
+      const price = Number(item.unit_price);
+      if (!Number.isFinite(price) || price <= 0) return false;
+      const originalPrice = item._priceBeforeManualEdit == null
+        ? lookupPrice(inv.zone, item.category, item.size).price
+        : item._priceBeforeManualEdit;
+      return originalPrice == null || Math.round(price * 100) !== Math.round(Number(originalPrice) * 100);
+    }).map((item) => ({
+      zone: inv.zone,
+      category: invoicePriceCategory(item.category, unifiedPriceList),
+      size: item.size.trim(),
+      price: Number(item.unit_price),
+    }));
+    return [...new Map(changed.map((item) => [
+      `${item.zone}|${canonicalInvoiceCategory(item.category)}|${canonicalInvoiceSize(item.size)}`,
+      item,
+    ])).values()];
+  };
+
+  const save = async (
+    status,
+    saveNewEntries = null,
+    downloadAfterSave = false,
+    deductStock = null,
+    allowNegativeStock = false,
+    resolvedCustomerId = null,
+    saveCustomerPrices = null,
+  ) => {
     if (!validate(status) || busy || saveLockRef.current) return;
     if (status !== "draft" && deductStock === null) {
       setPendingStockSubmit({ action: "save", status, downloadAfterSave });
@@ -732,6 +845,14 @@ export default function InvoiceEditor({ express = false }) {
         setPendingSave({ status, newCustomer: !knownCustomer, newProducts, downloadAfterSave, deductStock });
         return;
       }
+    }
+    const changedCustomerPrices = customerPricesToSave(status);
+    if (saveCustomerPrices === null && changedCustomerPrices.length) {
+      setPendingCustomerPriceSave({
+        status, saveNewEntries, downloadAfterSave, deductStock,
+        allowNegativeStock, resolvedCustomerId, items: changedCustomerPrices,
+      });
+      return;
     }
     saveLockRef.current = true;
     setBusy(true);
@@ -778,6 +899,21 @@ export default function InvoiceEditor({ express = false }) {
         }));
         if (savedPrices.length) setPrices((current) => [...current, ...savedPrices]);
       }
+      if (saveCustomerPrices && changedCustomerPrices.length) {
+        const saved = await api.put(`/invoices/customer-prices/${encodeURIComponent(customerId)}`, {
+          items: changedCustomerPrices,
+        });
+        setCustomerPrices(saved);
+        const savedKeys = new Set(changedCustomerPrices.map((item) =>
+          `${item.zone}|${canonicalInvoiceCategory(item.category)}|${canonicalInvoiceSize(item.size)}`,
+        ));
+        setInv((current) => ({
+          ...current,
+          items: current.items.map((item) => savedKeys.has(
+            `${inv.zone}|${canonicalInvoiceCategory(invoicePriceCategory(item.category, unifiedPriceList))}|${canonicalInvoiceSize(item.size)}`,
+          ) ? { ...item, price_override: true, _customerPrice: true, _priceBeforeManualEdit: null } : item),
+        }));
+      }
       setPendingSave(null);
       const payload = { ...buildPayload(status), customer_id: customerId, customer_name: inv.customer_name.trim(), deduct_stock: !!deductStock, allow_negative_stock: allowNegativeStock };
       const res = id ? await api.put(`/invoices/${id}`, { ...payload, supervisor_authorization: editAuthorization }) : await api.post("/invoices", payload);
@@ -787,6 +923,7 @@ export default function InvoiceEditor({ express = false }) {
         return;
       }
       const submitted = !id && status !== "draft";
+      const triggeredPrint = submitted && printTemplate?.print_trigger === "on_issue";
       let deliveryFailed = false;
       if (submitted && intercompanyRecipientId) {
         try {
@@ -799,7 +936,7 @@ export default function InvoiceEditor({ express = false }) {
           toast.error(`Invoice saved, but it could not be sent to the selected company: ${apiError(deliveryError)}`);
         }
       }
-      if (!deliveryFailed) {
+      if (!deliveryFailed && !triggeredPrint) {
         toast.success(
           submitted && intercompanyRecipientId
             ? "Invoice submitted and sent to the selected company."
@@ -807,7 +944,6 @@ export default function InvoiceEditor({ express = false }) {
         );
       }
       setPendingSave(null);
-      const triggeredPrint = submitted && printTemplate?.print_trigger === "on_issue";
       if (triggeredPrint) {
         nav(`${invoicesPath}/${res.id}`, { state: { confirmInvoicePrint: true } });
       } else if (downloadAfterSave && submitted) {
@@ -829,6 +965,21 @@ export default function InvoiceEditor({ express = false }) {
         requestMissingStock(detail, () => save(status, false, downloadAfterSave, false, false, customerId));
       } else toast.error(apiError(e));
     } finally { saveLockRef.current = false; setBusy(false); }
+  };
+
+  const resolveCustomerPriceSave = (savePrices) => {
+    if (!pendingCustomerPriceSave) return;
+    const pending = pendingCustomerPriceSave;
+    setPendingCustomerPriceSave(null);
+    save(
+      pending.status,
+      pending.saveNewEntries ?? false,
+      pending.downloadAfterSave,
+      pending.deductStock,
+      pending.allowNegativeStock,
+      pending.resolvedCustomerId,
+      savePrices,
+    );
   };
 
   const saveEdit = async (targetStatus = inv.status === "draft" ? "draft" : "issued") => {
@@ -866,9 +1017,11 @@ export default function InvoiceEditor({ express = false }) {
       }
       setInv(res); setPayRecords(res.payment_records || []); setEditing(false); setEditAuthorization("");
       refreshInvoiceAudit();
-      toast.success(targetStatus === "draft" ? "Invoice updated" : "Invoice issued");
-      if (targetStatus !== "draft" && snapshot?.status === "draft" && printTemplate?.print_trigger === "on_issue") {
+      const triggeredPrint = targetStatus !== "draft" && snapshot?.status === "draft" && printTemplate?.print_trigger === "on_issue";
+      if (triggeredPrint) {
         setPendingPrintConfirmation(res);
+      } else {
+        toast.success(targetStatus === "draft" ? "Invoice updated" : "Invoice issued");
       }
     } catch (e) {
       const detail = e.response?.data?.detail;
@@ -902,7 +1055,6 @@ export default function InvoiceEditor({ express = false }) {
       const triggeredPrint = inv.status === "draft" && printTemplate?.print_trigger === "on_issue";
       if (triggeredPrint) {
         setPendingPrintConfirmation(res);
-        toast.success("Invoice issued. Confirm whether to print it.");
       } else if (action === "download") {
         setPdfAutoDownload(true);
         setDownloadIssuedDraft(true);
@@ -1169,7 +1321,14 @@ export default function InvoiceEditor({ express = false }) {
       toast.error("Allow pop-ups to print this invoice.");
       return;
     }
+    toast.success("INVOICE SUBMITTED");
     setPendingPrintConfirmation(null);
+  };
+  const cancelTriggeredInvoicePrint = () => {
+    if (!pendingPrintConfirmation) return;
+    setPendingPrintConfirmation(null);
+    toast.success("INVOICE SUBMITTED");
+    nav(invoicesPath);
   };
 
   const st = STATUS_META[inv.status] || STATUS_META.draft;
@@ -1178,7 +1337,7 @@ export default function InvoiceEditor({ express = false }) {
     <div className={pdfAutoDownload ? "invoice-auto-download" : ""} aria-busy={pdfAutoDownload}>
       <Modal
         open={!!pendingPrintConfirmation}
-        onClose={() => setPendingPrintConfirmation(null)}
+        onClose={cancelTriggeredInvoicePrint}
         title="Invoice ready to print"
       >
         <div className="space-y-4" data-testid="invoice-print-confirmation">
@@ -1189,7 +1348,7 @@ export default function InvoiceEditor({ express = false }) {
             {" "}Print this invoice now?
           </p>
           <div className="flex justify-end gap-2">
-            <Btn variant="outline" onClick={() => setPendingPrintConfirmation(null)} data-testid="cancel-triggered-invoice-print">Cancel</Btn>
+            <Btn variant="outline" onClick={cancelTriggeredInvoicePrint} data-testid="cancel-triggered-invoice-print">Cancel</Btn>
             <Btn onClick={printTriggeredInvoice} data-testid="confirm-triggered-invoice-print"><Printer size={16} /> Print Now</Btn>
           </div>
         </div>
@@ -1353,7 +1512,12 @@ export default function InvoiceEditor({ express = false }) {
                         <div className="flex items-center gap-1">
                           <input type="number" step="0.01" value={it.unit_price} placeholder="0.00"
                             readOnly={invoiceItemPriceLocked}
-                            onChange={(e) => updateItem(idx, { unit_price: e.target.value, price_override: true })} data-testid={`item-price-${idx}`}
+                            onChange={(e) => updateItem(idx, {
+                              unit_price: e.target.value,
+                              price_override: true,
+                              _customerPrice: false,
+                              _priceBeforeManualEdit: it._priceBeforeManualEdit ?? it.unit_price,
+                            })} data-testid={`item-price-${idx}`}
                             className={`w-24 rounded-md border px-2 py-2 text-right text-sm font-mono ${it._needsConfig && it.size && !(it.price_override && Number(it.unit_price) > 0) ? "border-red-400 bg-red-50" : it.price_override ? "border-amber-400 bg-amber-50" : "border-input bg-white"}`} />
                           {it.price_override && <span title="Manual override" className="text-[10px] font-bold text-amber-600">M</span>}
                         </div>
@@ -1551,6 +1715,27 @@ export default function InvoiceEditor({ express = false }) {
           <div className="flex flex-wrap justify-end gap-2">
             <Btn variant="outline" disabled={busy} onClick={() => { const { status, downloadAfterSave, deductStock } = pendingSave; setPendingSave(null); save(status, false, downloadAfterSave, deductStock); }} data-testid="invoice-dont-save-new-entry">Don't save it</Btn>
             <Btn disabled={busy} onClick={() => save(pendingSave.status, true, pendingSave.downloadAfterSave, pendingSave.deductStock)} data-testid="invoice-save-new-entry">Save it</Btn>
+          </div>
+        </div>}
+      </Modal>
+      <Modal
+        open={!!pendingCustomerPriceSave}
+        onClose={() => resolveCustomerPriceSave(false)}
+        title="Save customer prices?"
+      >
+        {pendingCustomerPriceSave && <div className="space-y-4">
+          <p className="text-sm text-slate-600">Do you want to save these prices for this client?</p>
+          <ul className="list-inside list-disc text-sm text-slate-700">
+            {pendingCustomerPriceSave.items.map((item) => (
+              <li key={`${item.zone}-${item.category}-${item.size}`}>
+                {item.category} · {item.size} · {fmtMoney(item.price)}
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs text-slate-500">Only the manually changed items will be saved. They will be marked M on this client&apos;s future invoices.</p>
+          <div className="flex justify-end gap-2">
+            <Btn variant="outline" disabled={busy} onClick={() => resolveCustomerPriceSave(false)} data-testid="invoice-dont-save-customer-prices">No</Btn>
+            <Btn disabled={busy} onClick={() => resolveCustomerPriceSave(true)} data-testid="invoice-save-customer-prices">Yes</Btn>
           </div>
         </div>}
       </Modal>
