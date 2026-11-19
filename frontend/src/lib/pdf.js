@@ -72,15 +72,25 @@ export async function elementToPdf(el, filename = "document.pdf") {
 }
 
 export function printElement(el, title) {
+  return printElements([el], title);
+}
+
+export function printElements(elements, title) {
+  const documents = elements.filter(Boolean);
+  if (!documents.length) return false;
   const w = window.open("", "_blank");
   if (!w) return false;
-  w.document.write(`<html><head><title>${title}</title>${document.head.innerHTML}<style>
+  const safeTitle = String(title || "Document").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
+  w.document.write(`<html><head><title>${safeTitle}</title>${document.head.innerHTML}<style>
     @page{size:A4 portrait;margin:0}
     html,body{margin:0!important;padding:0!important;width:210mm;background:#fff!important}
     [data-testid="invoice-document"],[data-testid="delivery-note"]{width:210mm!important;max-width:210mm!important;margin:0!important;box-sizing:border-box!important}
     [data-testid="delivery-note"]{min-height:296mm!important;height:auto!important}
     .no-print{display:none!important}
-  </style></head><body>${el.outerHTML}</body></html>`);
+    [data-testid="invoice-document"]+ [data-testid="invoice-document"]{break-before:page;page-break-before:always}
+  </style></head><body>${documents.map((element) => element.outerHTML).join("")}</body></html>`);
   w.document.close();
   setTimeout(() => { w.focus(); w.print(); }, 600);
   return true;

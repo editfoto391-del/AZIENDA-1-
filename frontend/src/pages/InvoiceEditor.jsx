@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo, useRef } from "react";
 import { InvoiceDocument } from "@/components/InvoiceDocument";
 import { DeliveryNote, orderLines } from "@/components/DeliveryNote";
 import { elementToPdf, printElement } from "@/lib/pdf";
-import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, fmtDateTime, today, newKey, STATUS_META, documentFilename } from "@/lib/format";
@@ -105,6 +105,7 @@ export default function InvoiceEditor({ express = false }) {
   const makeEmptyItem = () => emptyItem(manualInvoicePrices ? "" : undefined);
   const { id } = useParams();
   const nav = useNavigate();
+  const location = useLocation();
   const invoicesPath = express ? "/express-invoices" : "/invoices";
   const [customers, setCustomers] = useState([]);
   const [zoneFromLastInvoice, setZoneFromLastInvoice] = useState(false);
@@ -136,6 +137,8 @@ export default function InvoiceEditor({ express = false }) {
   const [pendingStockSubmit, setPendingStockSubmit] = useState(null);
   const [pendingNegativeStock, setPendingNegativeStock] = useState(null);
   const [pendingUnmatchedStock, setPendingUnmatchedStock] = useState(null);
+  const [printTemplate, setPrintTemplate] = useState(null);
+  const [pendingPrintConfirmation, setPendingPrintConfirmation] = useState(null);
   const [downloadIssuedDraft, setDownloadIssuedDraft] = useState(false);
   const [pdfAutoDownload, setPdfAutoDownload] = useState(false);
   const docRef = useRef(null);
@@ -177,9 +180,10 @@ export default function InvoiceEditor({ express = false }) {
   };
 
   useEffect(() => {
-    Promise.all([api.get("/customers"), api.getUncached("/prices"), api.get("/settings"), api.get("/drivers")])
-      .then(([c, p, s, d]) => {
+    Promise.all([api.get("/customers"), api.getUncached("/prices"), api.get("/settings"), api.get("/drivers"), api.getUncached("/print-templates")])
+      .then(([c, p, s, d, template]) => {
         setCustomers(c); setPrices(p); setSettings(s); setDrivers(d.filter((driver) => driver.active !== false));
+        setPrintTemplate(template);
         if (!id) setInv((prev) => ({ ...prev, tax_enabled: s.tax_enabled, tax_rate: s.tax_rate }));
       })
       .catch((error) => toast.error(apiError(error)));
@@ -225,6 +229,14 @@ export default function InvoiceEditor({ express = false }) {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, user?.can_edit_invoices_without_supervisor, isInvoiceOwner, express, priceZonesEnabled, freeformInvoiceItems]);
+
+  useEffect(() => {
+    if (!location.state?.confirmInvoicePrint || !id || inv.id !== id || !printTemplate) return;
+    if (inv.status === "issued" && printTemplate.print_trigger === "on_issue") {
+      setPendingPrintConfirmation(inv);
+    }
+    nav(location.pathname, { replace: true, state: null });
+  }, [id, inv, location.pathname, location.state, nav, printTemplate]);
 
   useEffect(() => {
     if (!id || !inv.customer_id) return;
@@ -795,7 +807,10 @@ export default function InvoiceEditor({ express = false }) {
         );
       }
       setPendingSave(null);
-      if (downloadAfterSave && submitted) {
+      const triggeredPrint = submitted && printTemplate?.print_trigger === "on_issue";
+      if (triggeredPrint) {
+        nav(`${invoicesPath}/${res.id}`, { state: { confirmInvoicePrint: true } });
+      } else if (downloadAfterSave && submitted) {
         setInv(res);
         setPdfAutoDownload(true);
         setDownloadIssuedDraft(true);
@@ -852,6 +867,9 @@ export default function InvoiceEditor({ express = false }) {
       setInv(res); setPayRecords(res.payment_records || []); setEditing(false); setEditAuthorization("");
       refreshInvoiceAudit();
       toast.success(targetStatus === "draft" ? "Invoice updated" : "Invoice issued");
+      if (targetStatus !== "draft" && snapshot?.status === "draft" && printTemplate?.print_trigger === "on_issue") {
+        setPendingPrintConfirmation(res);
+      }
     } catch (e) {
       const detail = e.response?.data?.detail;
       if (detail?.code === "INSUFFICIENT_STOCK") {
@@ -881,7 +899,11 @@ export default function InvoiceEditor({ express = false }) {
         return;
       }
       setInv(res);
-      if (action === "download") {
+      const triggeredPrint = inv.status === "draft" && printTemplate?.print_trigger === "on_issue";
+      if (triggeredPrint) {
+        setPendingPrintConfirmation(res);
+        toast.success("Invoice issued. Confirm whether to print it.");
+      } else if (action === "download") {
         setPdfAutoDownload(true);
         setDownloadIssuedDraft(true);
         toast.success("Invoice issued");
@@ -1141,11 +1163,37 @@ export default function InvoiceEditor({ express = false }) {
     );
   }, [downloadIssuedDraft, inv]);
   const printInvoice = () => { if (!printElement(docRef.current, inv.number || "Invoice")) toast.error("Allow pop-ups to print"); };
+  const printTriggeredInvoice = () => {
+    if (!pendingPrintConfirmation) return;
+    if (!printElement(docRef.current, pendingPrintConfirmation.number || "Invoice")) {
+      toast.error("Allow pop-ups to print this invoice.");
+      return;
+    }
+    setPendingPrintConfirmation(null);
+  };
 
   const st = STATUS_META[inv.status] || STATUS_META.draft;
 
   return (
     <div className={pdfAutoDownload ? "invoice-auto-download" : ""} aria-busy={pdfAutoDownload}>
+      <Modal
+        open={!!pendingPrintConfirmation}
+        onClose={() => setPendingPrintConfirmation(null)}
+        title="Invoice ready to print"
+      >
+        <div className="space-y-4" data-testid="invoice-print-confirmation">
+          <p className="text-sm text-slate-600">
+            Invoice <strong>{pendingPrintConfirmation?.number || "DRAFT"}</strong> for{" "}
+            <strong>{pendingPrintConfirmation?.customer_name || "Customer"}</strong>
+            {" · "}{fmtMoney(pendingPrintConfirmation?.total || 0)}.
+            {" "}Print this invoice now?
+          </p>
+          <div className="flex justify-end gap-2">
+            <Btn variant="outline" onClick={() => setPendingPrintConfirmation(null)} data-testid="cancel-triggered-invoice-print">Cancel</Btn>
+            <Btn onClick={printTriggeredInvoice} data-testid="confirm-triggered-invoice-print"><Printer size={16} /> Print Now</Btn>
+          </div>
+        </div>
+      </Modal>
       {pdfAutoDownload && <p className="invoice-auto-download-status" role="status" data-testid="invoice-auto-download-status">Preparing invoice download…</p>}
       <div className="flex items-center justify-between mb-5 no-print">
         <button onClick={() => nav(invoicesPath)} className="flex items-center gap-2 text-sm font-semibold text-slate-500 hover:text-slate-800">
@@ -1440,7 +1488,7 @@ export default function InvoiceEditor({ express = false }) {
               <button onClick={downloadPDF} disabled={busy || pdfBusy} className="rounded-md py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50" data-testid="tab-pdf">{busy ? "Issuing..." : pdfBusy ? "Generating PDF..." : "Download PDF"}</button>
             </div>
             <Card className="p-3 overflow-hidden"><FitPreview>
-              <InvoiceDocument inv={inv} totals={totals} settings={settings} customer={custObj} previousInvoices={previousInvoices} customerBalanceBeforeInvoice={customerBalanceBeforeInvoice} showCustomerBalance={showCustomerBalance} />
+              <InvoiceDocument inv={inv} totals={totals} settings={settings} customer={custObj} previousInvoices={previousInvoices} customerBalanceBeforeInvoice={customerBalanceBeforeInvoice} showCustomerBalance={showCustomerBalance} printTemplate={printTemplate} />
             </FitPreview></Card>
           </div>
           {loadingPreviousInvoices && !id && inv.customer_id && <p className="no-print text-xs text-slate-500" role="status">Loading previous invoice balances...</p>}
@@ -1458,9 +1506,9 @@ export default function InvoiceEditor({ express = false }) {
               ))}
             </ul>
           </div>}
-          <div style={{ position: "fixed", left: -10000, top: 0 }} aria-hidden="true"><InvoiceDocument ref={docRef} inv={inv} totals={totals} settings={settings} customer={custObj} previousInvoices={previousInvoices} customerBalanceBeforeInvoice={customerBalanceBeforeInvoice} showCustomerBalance={showCustomerBalance} /></div>
+          <div style={{ position: "fixed", left: -10000, top: 0 }} aria-hidden="true"><InvoiceDocument ref={docRef} inv={inv} totals={totals} settings={settings} customer={custObj} previousInvoices={previousInvoices} customerBalanceBeforeInvoice={customerBalanceBeforeInvoice} showCustomerBalance={showCustomerBalance} printTemplate={printTemplate} /></div>
           <div style={{ position: "fixed", left: -10000, top: 0 }} aria-hidden="true">
-            <DeliveryNote ref={deliveryNoteRef} order={invoiceDeliveryNote} settings={settings} />
+            <DeliveryNote ref={deliveryNoteRef} order={invoiceDeliveryNote} settings={settings} printTemplate={printTemplate} />
           </div>
         </div>
       </div>

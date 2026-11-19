@@ -1,22 +1,24 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDateTime } from "@/lib/format";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader } from "@/components/common";
-import { Building2, Receipt, Tag, Truck, Save, Pencil, Plus, ShieldCheck, Fuel, MapPin, Smartphone, Trash2, UserPlus, CirclePause, CirclePlay, KeyRound, Database, RotateCcw, Search, X } from "lucide-react";
+import { Building2, Receipt, Tag, Truck, Save, Pencil, Plus, ShieldCheck, MapPin, Smartphone, Trash2, UserPlus, CirclePause, CirclePlay, KeyRound, Database, RotateCcw, Search, X, Printer } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { usesFreeformInvoiceItems, usesUnifiedPriceList } from "@/lib/company";
 import shop2shopQr from "@/assets/shop2shop-n29rxh.png";
+
+const PrintTemplatesDesigner = lazy(() => import("@/pages/PrintTemplatesDesigner"));
 
 const TABS = [
   { k: "company", l: "Company", icon: Building2 },
   { k: "invoice", l: "Invoice and Tax", icon: Receipt },
   { k: "prices", l: "Price List and Products", icon: Tag },
   { k: "drivers", l: "Drivers", icon: Truck },
-  { k: "diesel", l: "Diesel", icon: Fuel },
   { k: "access", l: "Access", icon: ShieldCheck },
   { k: "profiles", l: "Credentials", icon: KeyRound },
   { k: "backups", l: "Backups", icon: Database },
+  { k: "print-templates", l: "Print Templates", icon: Printer },
 ];
 
 function AccessTab({ users, companies, loading, currentUserId, isPrimaryOwner, onRoleChange, onStatusChange, onRemove, onCreate, onMakeOwner }) {
@@ -211,8 +213,6 @@ export default function Settings() {
   const freeformInvoiceItems = usesFreeformInvoiceItems(user?.company_id);
   const [tab, setTab] = useState("company");
   const [s, setS] = useState(null);
-  const [dieselPrice, setDieselPrice] = useState("");
-  const [dieselSaving, setDieselSaving] = useState(false);
   const [prices, setPrices] = useState([]);
   const [showUnpricedPrices, setShowUnpricedPrices] = useState(false);
   const [showPriceSearch, setShowPriceSearch] = useState(false);
@@ -246,13 +246,13 @@ export default function Settings() {
   const visibleTabs = TABS.filter((item) =>
     (canManageCompanySettings || !["company", "invoice", "profiles"].includes(item.k))
     && (item.k !== "prices" || !freeformInvoiceItems)
-    && (item.k !== "diesel" || user?.is_admin)
     && (item.k !== "access" || user?.is_owner)
     && (item.k !== "backups" || user?.is_primary_owner)
+    && (item.k !== "print-templates" || (user?.is_primary_owner && user?.is_owner && !user?.is_worker))
   );
   useEffect(() => {
     if (!visibleTabs.some((item) => item.k === tab)) setTab(visibleTabs[0]?.k || "company");
-  }, [tab, canManageCompanySettings, freeformInvoiceItems, user?.is_admin, user?.is_owner, user?.is_primary_owner]);
+  }, [tab, canManageCompanySettings, freeformInvoiceItems, user?.is_admin, user?.is_owner, user?.is_primary_owner, user?.is_worker]);
   useEffect(() => {
     let active = true;
     setS(null);
@@ -265,7 +265,6 @@ export default function Settings() {
     ]).then(([settings, loadedPrices, loadedDrivers]) => {
       if (!active) return;
       setS(settings);
-      setDieselPrice(settings.diesel_price == null ? "" : String(settings.diesel_price));
       setPrices(loadedPrices);
       setDrivers(loadedDrivers);
     }).catch((error) => {
@@ -479,18 +478,6 @@ export default function Settings() {
     catch (e) { toast.error(apiError(e)); }
   };
 
-  const saveDieselPrice = async () => {
-    const price = Number(dieselPrice);
-    if (!Number.isFinite(price) || price <= 0) return toast.error("Enter a valid diesel price");
-    setDieselSaving(true);
-    try {
-      const r = await api.put("/settings/diesel", { price_per_l: price });
-      setS((current) => ({ ...current, ...r }));
-      setDieselPrice(String(r.diesel_price));
-      toast.success("Diesel price updated");
-    } catch (e) { toast.error(apiError(e)); } finally { setDieselSaving(false); }
-  };
-
   const savePrice = async () => {
     if (priceSaving) return;
     try {
@@ -697,16 +684,10 @@ export default function Settings() {
         </div>
       )}
 
-      {tab === "diesel" && user?.is_admin && (
-        <Card className="p-6 max-w-2xl space-y-4" data-testid="diesel-settings-tab">
-          <div>
-            <h3 className="font-bold text-slate-800 font-display">Diesel price · Kokstad</h3>
-            <p className="text-sm text-slate-500 mt-1">Check the current local price on <a href="https://petrolprices.co.za/" target="_blank" rel="noreferrer" className="font-semibold text-primary underline">PetrolPrices.co.za</a>, then enter it here. Only an administrator can save a new price.</p>
-          </div>
-          <Input label="Diesel price per litre (R)" type="number" min="0" step="0.01" value={dieselPrice} onChange={(e) => setDieselPrice(e.target.value)} data-testid="diesel-price-input" />
-          <p className="text-xs text-slate-500">Last updated: {s.diesel_updated_at ? fmtDateTime(s.diesel_updated_at) : "Never"}</p>
-          <div><Btn onClick={saveDieselPrice} disabled={dieselSaving} data-testid="save-diesel-price-btn"><Save size={16} /> {dieselSaving ? "Saving..." : "Save Diesel Price"}</Btn></div>
-        </Card>
+      {tab === "print-templates" && user?.is_primary_owner && user?.is_owner && !user?.is_worker && (
+        <Suspense fallback={<p className="text-sm text-slate-500" role="status">Loading print template designer...</p>}>
+          <PrintTemplatesDesigner />
+        </Suspense>
       )}
 
       {tab === "access" && user?.is_owner && <AccessTab users={accessUsers} companies={companies} loading={accessLoading} currentUserId={user.id} isPrimaryOwner={user.is_primary_owner} onRoleChange={changeRole} onStatusChange={changeStatus} onRemove={setRemoveUser} onCreate={createAccessUser} onMakeOwner={makeOwner} />}

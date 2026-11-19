@@ -34,16 +34,26 @@ export const pageLoaders = {
 
 const pageData = {
   "/": ["/dashboard"],
-  "/customers": [],
+  "/customers": [["/customers", { page: 1, page_size: 50, q: "", active_filter: "all" }]],
   "/suppliers": ["/suppliers"],
   "/client-payments": ["/customers"],
   "/express-client-payments": ["/customers", "/invoices?express=true"],
   "/intercompany": ["/intercompany/requests"],
-  "/invoices": [],
+  "/invoices": [["/invoices", {
+    express: false, include_archived: false, page: 1, page_size: 50, q: "",
+    status: "all", zone: undefined, invoice_date: undefined,
+  }]],
   "/invoices/new": ["/customers", "/prices", "/settings"],
-  "/express-invoices": [],
+  "/express-invoices": [["/invoices", {
+    express: true, include_archived: false, page: 1, page_size: 50, q: "",
+    status: "all", zone: undefined, invoice_date: undefined,
+  }]],
   "/express-invoices/new": ["/customers", "/prices", "/settings"],
-  "/orders": ["/vehicles", "/settings"],
+  "/orders": [
+    ["/orders", { page: 1, page_size: 50, status: "open", order_date: undefined, q: "" }],
+    "/vehicles",
+    "/settings",
+  ],
   "/stock": ["/stock", "/stock/movements"],
   "/production": ["/production/daily?page=1&page_size=50"],
   "/warehouses": [],
@@ -63,5 +73,8 @@ export function preloadPage(path) {
     : pathname.startsWith("/invoices/") ? "/invoices/new"
       : pathname.startsWith("/warehouses/") ? "/warehouses" : pathname;
   pageLoaders[route]?.().catch(() => {});
-  pageData[route]?.forEach((endpoint) => api.get(endpoint).catch(() => {}));
+  pageData[route]?.forEach((request) => {
+    const [endpoint, params] = Array.isArray(request) ? request : [request, undefined];
+    api.get(endpoint, params).catch(() => {});
+  });
 }

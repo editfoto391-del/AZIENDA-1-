@@ -8,6 +8,7 @@ import {
   MONTHLY_SHEET_CHEMICALS,
   monthlyWeekCount,
   monthlySheetPayload,
+  suggestedChemicalKey,
 } from "./monthlyChemicalSheet.mjs";
 
 test("monthly sheet chemical names are displayed in English", () => {
@@ -19,6 +20,23 @@ test("monthly sheet chemical names are displayed in English", () => {
     "Amine 52",
     "MCL",
   ]);
+});
+
+test("GRV chemical aliases are recognized without matching partial words", () => {
+  for (const [product, expected] of [
+    ["PPG", "ppg"],
+    ["Polyol", "ppg"],
+    ["TDI", "tdi"],
+    ["T-9 Catalyst", "t9"],
+    ["MCL", "mcl"],
+    ["AMI", "amine52"],
+    ["Amine 52", "amine52"],
+    ["SILI (SILICONE)", "silicone"],
+  ]) {
+    assert.equal(suggestedChemicalKey(product), expected, product);
+  }
+  assert.equal(suggestedChemicalKey("amine catalyst"), "");
+  assert.equal(suggestedChemicalKey("some catalyst material"), "");
 });
 
 test("monthly sheet uses the selected month's Monday-based calendar weeks", () => {

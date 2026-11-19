@@ -62,17 +62,19 @@ export default function Expenses() {
   const [supervisorPassword, setSupervisorPassword] = useState("");
 
   const load = () => {
-    api.get("/expenses").then(setList).catch((e) => { toast.error(apiError(e)); setList([]); });
-    if (isSuperIqFoam) {
-      api.get("/expenses", { include_voided: true }).then((expenses) => {
-        const cities = new Map();
-        expenses.forEach((expense) => {
-          const city = expense.destination_city?.trim();
-          if (city && !cities.has(city.toLocaleLowerCase())) cities.set(city.toLocaleLowerCase(), city);
-        });
-        setRegisteredCities([...cities.values()].sort((a, b) => a.localeCompare(b)));
-      }).catch((e) => toast.error(apiError(e)));
-    }
+    api.get("/expenses", isSuperIqFoam ? { include_voided: true } : undefined)
+      .then((expenses) => {
+        setList(isSuperIqFoam ? expenses.filter((expense) => !expense.voided) : expenses);
+        if (isSuperIqFoam) {
+          const cities = new Map();
+          expenses.forEach((expense) => {
+            const city = expense.destination_city?.trim();
+            if (city && !cities.has(city.toLocaleLowerCase())) cities.set(city.toLocaleLowerCase(), city);
+          });
+          setRegisteredCities([...cities.values()].sort((a, b) => a.localeCompare(b)));
+        }
+      })
+      .catch((e) => { toast.error(apiError(e)); setList([]); });
     api.get("/reports/profit").then(setReport); api.get("/reports/costs").then(setCosts);
   };
   useEffect(() => { load(); api.get("/vehicles").then(setVehicles); }, []);

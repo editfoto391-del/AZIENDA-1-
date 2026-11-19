@@ -127,14 +127,21 @@ function NoteModal({ order, vehicleName, settings, onClose }) {
   const [invoiceSnapshot, setInvoiceSnapshot] = useState(null);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [invoiceError, setInvoiceError] = useState(false);
+  const [printTemplate, setPrintTemplate] = useState(null);
   useEffect(() => {
     if (!order?.id) return undefined;
     let active = true;
     setSignature(null);
     setInvoiceSnapshot(null);
     setInvoiceError(false);
+    setPrintTemplate(null);
     setInvoiceLoading(Boolean(order.invoice_id));
     setSignatureLoading(true);
+    api.getUncached("/print-templates")
+      .then((template) => { if (active) setPrintTemplate(template); })
+      .catch((error) => {
+        if (active) toast.error(`Delivery note opened, but its approved print template could not be loaded: ${apiError(error)}`);
+      });
     api.get(`/orders/${order.id}/driver-confirmation`)
       .then((result) => {
         if (!active) return;
@@ -191,7 +198,7 @@ function NoteModal({ order, vehicleName, settings, onClose }) {
           : signature
           ? <p className="text-sm text-emerald-700">Confirmed by driver {signature.driver_name} on {new Date(signature.confirmed_at).toLocaleString()}</p>
           : <SignatureCapture onSave={saveDriverConfirmation} />}
-        <div className="overflow-x-auto bg-slate-100 p-4 rounded-lg"><div className="shadow-md w-fit mx-auto"><DeliveryNote ref={ref} order={signedOrder} signature={signature} invoiceSnapshot={invoiceSnapshot} lang={lang} vehicleName={vehicleName} settings={settings} /></div></div>
+        <div className="overflow-x-auto bg-slate-100 p-4 rounded-lg"><div className="shadow-md w-fit mx-auto"><DeliveryNote ref={ref} order={signedOrder} signature={signature} invoiceSnapshot={invoiceSnapshot} lang={lang} vehicleName={vehicleName} settings={settings} printTemplate={printTemplate} /></div></div>
       </div>}
     </Modal>
   );

@@ -715,7 +715,7 @@ def enforce_worker_api_access(request, user):
         raise HTTPException(403, "This stock-only account cannot access other sections or destructive stock actions")
 
     if "invoices" in allowed:
-        if path in {"customers", "prices", "settings"} and method == "GET":
+        if path in {"customers", "prices", "settings", "print-templates"} and method == "GET":
             return
         if re.fullmatch(r"customers/[^/]+/summary", path) and method == "GET":
             return
@@ -752,9 +752,10 @@ def enforce_worker_api_access(request, user):
         return
 
     support_rules = {
-        "invoices": [("drivers", "GET")],
+        "invoices": [("drivers", "GET"), ("print-templates", "GET")],
         "express-invoices": [
-            ("customers", "GET"), ("prices", "GET"), ("settings", "GET"), ("drivers", "GET"),
+            ("customers", "GET"), ("prices", "GET"), ("settings", "GET"),
+            ("drivers", "GET"), ("print-templates", "GET"),
         ],
         "grv": [
             ("suppliers", "GET"), ("stock", "GET"),
@@ -770,10 +771,11 @@ def enforce_worker_api_access(request, user):
         "attendance": [("piece-production", "GET"), ("piece-production", "POST")],
         "orders": [
             ("customers", "GET"), ("prices", "GET"), ("settings", "GET"),
-            ("stock", "GET"), ("vehicles", "GET"),
+            ("stock", "GET"), ("vehicles", "GET"), ("print-templates", "GET"),
         ],
         "deliveries": [
-            ("customers", "GET"), ("drivers", "GET"), ("vehicles", "GET"), ("stock", "GET"),
+            ("customers", "GET"), ("drivers", "GET"), ("vehicles", "GET"),
+            ("stock", "GET"), ("print-templates", "GET"),
         ],
         "expenses": [("vehicles", "GET"), ("reports/profit", "GET"), ("reports/costs", "GET")],
         "client-payments": [
@@ -3601,7 +3603,7 @@ async def validate_monthly_sheet_arrival_sources(month, sources):
                 capacity, accepted = 0, 0
             capacity_kg = monthly_chemical_capacity_kg(capacity, unit)
             if capacity_kg is None or capacity_kg <= 0 or accepted <= 0:
-                raise HTTPException(422, f"GRV line {mapping.line_index + 1} must have accepted quantity and capacity in kg")
+                raise HTTPException(422, f"GRV line {mapping.line_index + 1} must have accepted quantity and capacity in kg or L")
             mapped_lines.append({
                 "line_index": mapping.line_index,
                 "chemical_key": mapping.chemical_key,
@@ -12725,6 +12727,8 @@ def normalize_interface_config(config, company_id=None, allow_legacy_fields=Fals
         labels = config.get(key, {})
         if not isinstance(labels, dict):
             raise HTTPException(422, f"{key} must be an object")
+        if key == "section_labels" and "buyings" in labels:
+            labels = {name: value for name, value in labels.items() if name != "buyings"}
         if any(not isinstance(name, str) or name not in allowed for name in labels):
             raise HTTPException(422, f"{key} contains an unknown menu item")
         normalized = {}
@@ -12774,6 +12778,8 @@ def normalize_interface_config(config, company_id=None, allow_legacy_fields=Fals
             custom_order = [
                 section for section in custom_order if section not in removed_chemical_sections
             ]
+        if group == "purchasing" and isinstance(custom_order, list):
+            custom_order = [section for section in custom_order if section != "buyings"]
         if not isinstance(custom_order, list) or any(
             not isinstance(section, str) or section not in sections
             for section in custom_order
@@ -12820,6 +12826,8 @@ def normalize_interface_config(config, company_id=None, allow_legacy_fields=Fals
 
     custom_section_ids = {f"custom:{section['id']}" for section in normalized_custom_sections}
     hidden_sections = config.get("hidden_sections", [])
+    if isinstance(hidden_sections, list):
+        hidden_sections = [section for section in hidden_sections if section != "buyings"]
     if not isinstance(hidden_sections, list) or any(
         not isinstance(section, str)
         or (
@@ -12877,6 +12885,109 @@ async def update_interface_settings(
         after=config,
     )
     return config
+
+
+class PrintTemplateUpdate(BaseModel):
+    name: str = Field(default="Default invoice", min_length=1, max_length=80)
+    logo_data_url: str = Field(default="", max_length=350_000)
+    font_family: Literal["Arial", "Helvetica", "Georgia", "Times New Roman"] = "Arial"
+    font_size: int = Field(default=14, ge=10, le=18)
+    primary_color: str = "#1e293b"
+    margin_mm: int = Field(default=6, ge=4, le=25)
+    spacing: float = Field(default=1, ge=0.8, le=1.6)
+    header_text: str = Field(default="", max_length=200)
+    footer_text: str = Field(default="", max_length=300)
+    signature_text: str = Field(default="", max_length=100)
+    show_company_details: bool = True
+    alignment: Literal["left", "center", "right"] = "left"
+    columns: List[Literal["category", "size", "quantity", "unit_price", "total"]] = Field(default_factory=list)
+    print_trigger: Literal["manual", "on_issue"] = "manual"
+
+    @field_validator("primary_color")
+    @classmethod
+    def validate_print_template_color(cls, value):
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("Use a six-digit hexadecimal color")
+        return value
+
+    @field_validator("logo_data_url")
+    @classmethod
+    def validate_print_template_logo(cls, value):
+        if value and not re.fullmatch(r"data:image/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}", value):
+            raise ValueError("Logo must be a base64 PNG, JPEG, or WebP image")
+        return value
+
+    @field_validator("columns")
+    @classmethod
+    def validate_print_template_columns(cls, value):
+        if value and ("category" not in value or "total" not in value):
+            raise ValueError("Invoice columns must include Category and Total")
+        if len(set(value)) != len(value):
+            raise ValueError("Invoice columns must not contain duplicates")
+        return value
+
+
+def default_print_template(company_id):
+    return {
+        "company_id": company_id,
+        "is_configured": False,
+        "name": "Default invoice",
+        "logo_data_url": "",
+        "font_family": "Arial",
+        "font_size": 14,
+        "primary_color": "#1e293b",
+        "margin_mm": 6,
+        "spacing": 1,
+        "header_text": "",
+        "footer_text": "",
+        "signature_text": "",
+        "show_company_details": True,
+        "alignment": "left",
+        "columns": [],
+        "print_trigger": "manual",
+    }
+
+
+@api.get("/print-templates")
+async def get_print_template(
+    user=Depends(get_current_user), company_id: Optional[str] = None,
+):
+    company_id = _interface_settings_company_id(company_id, user)
+    saved = await base_db.print_templates.find_one({"id": company_id}, {"_id": 0})
+    approved_fields = default_print_template(company_id)
+    if saved:
+        approved_fields.update({
+            key: value for key, value in saved.items()
+            if key in approved_fields
+        })
+        approved_fields["is_configured"] = True
+    return approved_fields
+
+
+@api.put("/print-templates")
+async def update_print_template(
+    body: PrintTemplateUpdate, user=Depends(get_current_user),
+    company_id: Optional[str] = None,
+):
+    require_global_owner(user)
+    company_id = _interface_settings_company_id(company_id, user)
+    template = body.model_dump()
+    before = await base_db.print_templates.find_one({"id": company_id}, {"_id": 0})
+    saved = {
+        "id": company_id,
+        **template,
+        "company_id": company_id,
+        "updated_at": now_iso(),
+        "updated_by": user.get("email", ""),
+    }
+    await base_db.print_templates.update_one(
+        {"id": company_id}, {"$set": saved}, upsert=True,
+    )
+    await log_audit(
+        "print_templates", company_id, "updated", user,
+        before=before or default_print_template(company_id), after=template,
+    )
+    return {**template, "company_id": company_id, "is_configured": True}
 
 
 def _interface_settings_company_id(requested_company_id, user):

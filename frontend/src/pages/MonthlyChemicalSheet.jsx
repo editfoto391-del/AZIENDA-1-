@@ -16,6 +16,7 @@ import {
   MONTHLY_SHEET_BLOCKS,
   MONTHLY_SHEET_CHEMICALS,
   monthlySheetPayload,
+  suggestedChemicalKey,
 } from "@/lib/monthlyChemicalSheet.mjs";
 
 const displayQty = (value) => value == null
@@ -80,17 +81,6 @@ function NumberCell({ label, value, onChange, disabled, testId, step = "any" }) 
       data-testid={testId}
     />
   );
-}
-
-function suggestedChemical(product) {
-  const name = String(product || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (name.includes("ppg") || name.includes("poliol")) return "ppg";
-  if (name.includes("tdi") || name.includes("isocianato")) return "tdi";
-  if (name.includes("t9") || name.includes("catalizzatore")) return "t9";
-  if (name.includes("silicone")) return "silicone";
-  if (name.includes("amine52") || name.includes("amina52")) return "amine52";
-  if (name === "mcl" || name.includes("mcl")) return "mcl";
-  return "";
 }
 
 export default function MonthlyChemicalSheet() {
@@ -261,7 +251,7 @@ export default function MonthlyChemicalSheet() {
         quantity_kg: line.quantity_kg,
       }));
     if (!lines.length) {
-      toast.error("Map at least one GRV line with a valid kg capacity before adding it.");
+      toast.error("Map at least one GRV line with a valid kg or L capacity before adding it.");
       return;
     }
     updateSheet({ arrival_sources: [...sheet.arrival_sources, {
@@ -422,7 +412,7 @@ export default function MonthlyChemicalSheet() {
                 const record = grvs.find((grv) => grv.id === nextId);
                 setGrvMappings(Object.fromEntries((record?.items || []).map((line) => [
                   line.line_index,
-                  line.quantity_kg > 0 ? suggestedChemical(line.product) : "",
+                  line.quantity_kg > 0 ? suggestedChemicalKey(line.product) : "",
                 ])));
               }}
               data-testid="monthly-sheet-grv-select">
@@ -442,7 +432,7 @@ export default function MonthlyChemicalSheet() {
             Only a company owner can import chemical GRVs into this sheet.
           </p>}
           {!grvLoading && !grvError && canEdit && grvs.length === 0 && <p className="text-sm text-slate-600" role="status">
-            No confirmed chemical GRVs were found for {month}. In GRV, mark the receipt as Raw material and Chemical, enter capacity in kg, then confirm it.
+            No confirmed chemical GRVs were found for {month}. In GRV, mark the receipt as Raw material and Chemical, enter capacity in kg or L, then confirm it.
           </p>}
           {!grvLoading && !grvError && canEdit && grvs.length > 0 && availableGrvs.length === 0 && <p className="text-sm text-slate-600" role="status">
             All confirmed chemical GRVs for {month} are already included in this sheet.

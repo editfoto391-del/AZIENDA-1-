@@ -45,6 +45,22 @@ def test_interface_settings_default_to_the_original_menu():
     ]
 
 
+def test_legacy_buyings_section_is_removed_from_purchasing_order():
+    config = server.normalize_interface_config({
+        "hidden_sections": ["buyings", "grv"],
+        "section_labels": {"buyings": "Old Buyings", "grv": "Goods Receipt"},
+        "section_order": {
+            "purchasing": ["intercompany", "buyings", "grv", "suppliers"],
+        },
+    })
+
+    assert config["hidden_sections"] == ["grv"]
+    assert config["section_labels"] == {"grv": "Goods Receipt"}
+    assert config["section_order"]["purchasing"] == [
+        "intercompany", "grv", "suppliers",
+    ]
+
+
 def test_only_global_owner_can_save_sitewide_interface_settings(monkeypatch):
     _install_interface_settings(monkeypatch)
     monkeypatch.setenv("ADMIN_EMAIL", "global-owner@example.test")

@@ -28,7 +28,9 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
   previousInvoices = [],
   customerBalanceBeforeInvoice = 0,
   showCustomerBalance = false,
+  printTemplate = null,
 }, ref) {
+  const activePrintTemplate = printTemplate?.is_configured ? printTemplate : null;
   const rows = (inv.items || []).filter((it) => (it.category || it.size || it.description) &&
     !(!it.category && !it.size && it.description?.trim().toLowerCase() === "opening balance"));
   const shipTo = inv.destination || customer.city || customer.address || "";
@@ -36,6 +38,30 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
   const isSuperIqFoam = /super/i.test(companyName) && /iq\s*[- ]?foam/i.test(companyName);
   const companyAddress = settings.address || (isSuperIqFoam ? COMPANY.address.join(", ") : "");
   const companyTelephone = settings.telephone || (isSuperIqFoam ? COMPANY.phones : "");
+  const customColumns = Array.isArray(activePrintTemplate?.columns) && activePrintTemplate.columns.length > 0
+    ? activePrintTemplate.columns
+    : null;
+  const defaultColumnWidths = settings.freeform_invoice_items
+    ? { category: 44, size: 15, quantity: 10, unit_price: 20.5, total: 20.5 }
+    : { category: 30, size: 15, quantity: 8, unit_price: 21, total: 21 };
+  const customColumnWidthTotal = customColumns?.reduce(
+    (total, column) => total + (defaultColumnWidths[column] || 0),
+    0,
+  ) || 1;
+  const templateColumnLabels = {
+    category: settings.freeform_invoice_items ? "Product / Service" : "Category",
+    size: "Size",
+    quantity: "Qty",
+    unit_price: "Unit Price",
+    total: "Total",
+  };
+  const templateColumnValues = {
+    category: (item) => item.category || item.description,
+    size: (item) => item.size || "—",
+    quantity: (item) => item.qty,
+    unit_price: (item) => fmtMoney(item.unit_price),
+    total: (item) => fmtMoney((Number(item.qty) || 0) * (Number(item.unit_price) || 0)),
+  };
   const customerBalanceLabels = invoiceCustomerBalanceLabels(companyName);
   const previousInvoicesBalance = previousInvoices.reduce(
     (total, invoice) => total + (Number(invoice.outstanding) || 0),
@@ -47,9 +73,20 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
         /iq\s*[- ]?foam/i.test(companyName) ? { blue: "IQFOAM", black: "" } : { blue: "", black: companyName };
   const L = ({ k, v }) => (v ? <p className="leading-5"><span className="font-semibold text-slate-900">{k}</span> <span className="text-slate-800">{v}</span></p> : null);
   return (
-    <div ref={ref} className="invoice-document bg-white text-slate-950 p-6 text-[14px]" style={{ width: 794, fontFamily: "Arial, sans-serif" }} data-testid="invoice-document">
+    <div ref={ref} className="invoice-document bg-white text-slate-950" style={{
+      width: 794,
+      boxSizing: activePrintTemplate ? "border-box" : undefined,
+      padding: activePrintTemplate ? `${activePrintTemplate.margin_mm}mm` : "24px",
+      fontFamily: activePrintTemplate ? `${activePrintTemplate.font_family}, sans-serif` : "Arial, sans-serif",
+      fontSize: `${activePrintTemplate?.font_size || 14}px`,
+      lineHeight: activePrintTemplate?.spacing || undefined,
+      textAlign: activePrintTemplate?.alignment || undefined,
+    }} data-testid="invoice-document">
+      {activePrintTemplate?.header_text && <p className="mb-2 whitespace-pre-line font-semibold" style={{ textAlign: activePrintTemplate.alignment || "left" }}>{activePrintTemplate.header_text}</p>}
       <div className="flex items-center gap-2">
-        <Logo />
+        {activePrintTemplate?.logo_data_url
+          ? <img src={activePrintTemplate.logo_data_url} alt="" className="h-11 max-w-36 object-contain" />
+          : <Logo />}
         <div>
           <p className="text-[24px] font-extrabold leading-tight tracking-tight"><span className="text-blue-700">{invoiceBrand.blue}</span>{invoiceBrand.blue && invoiceBrand.black ? " " : ""}<span className="text-slate-950">{invoiceBrand.black}</span></p>
         </div>
@@ -57,10 +94,12 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
       <div className="flex justify-between items-start mt-3">
         <div className="leading-5 text-slate-800">
           <p className="font-bold text-slate-950">{companyName}</p>
-          {companyAddress && <p className="whitespace-pre-line">{companyAddress}</p>}
-          {companyTelephone && <p>Tel: {companyTelephone}</p>}
-          {settings.email && <p>Email: {settings.email}</p>}
-          {settings.tax_number && <p>VAT No: {settings.tax_number}</p>}
+          {activePrintTemplate?.show_company_details !== false && <>
+            {companyAddress && <p className="whitespace-pre-line">{companyAddress}</p>}
+            {companyTelephone && <p>Tel: {companyTelephone}</p>}
+            {settings.email && <p>Email: {settings.email}</p>}
+            {settings.tax_number && <p>VAT No: {settings.tax_number}</p>}
+          </>}
         </div>
         <div className="text-right"><p className="text-[24px] font-extrabold">INVOICE</p><p className="text-[16px] font-bold font-mono" data-testid="doc-invoice-number">{inv.number || "DRAFT"}</p></div>
       </div>
@@ -101,18 +140,23 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
         data-testid="invoice-items-table"
       >
         <colgroup>
-          {(settings.freeform_invoice_items
+          {(customColumns
+            ? ["5%", ...customColumns.map((column) => `${95 * (defaultColumnWidths[column] || 0) / customColumnWidthTotal}%`)]
+            : settings.freeform_invoice_items
             ? ["5%", "44%", "10%", "20.5%", "20.5%"]
             : ["5%", "30%", "15%", "8%", "21%", "21%"]
           ).map((width, index) => <col key={index} style={{ width }} />)}
         </colgroup>
         <thead style={{ display: "table-header-group" }}>
           <tr className="text-left text-white">
-            {["#", settings.freeform_invoice_items ? "Product / Service" : "Category", ...(!settings.freeform_invoice_items ? ["Size"] : []), "Qty", "Unit Price", "Total"].map((h, i) => (
+            {(customColumns
+              ? ["#", ...customColumns.map((column) => templateColumnLabels[column])]
+              : ["#", settings.freeform_invoice_items ? "Product / Service" : "Category", ...(!settings.freeform_invoice_items ? ["Size"] : []), "Qty", "Unit Price", "Total"]
+            ).map((h, i) => (
               <th
                 key={h}
-                className={`px-2 py-2 font-bold ${i >= (settings.freeform_invoice_items ? 2 : 3) ? "text-right" : ""}`}
-                style={{ backgroundColor: "#1e293b" }}
+                className={`px-2 py-2 font-bold ${customColumns ? (i > 0 && !["category", "size"].includes(customColumns[i - 1]) ? "text-right" : "") : i >= (settings.freeform_invoice_items ? 2 : 3) ? "text-right" : ""}`}
+                style={{ backgroundColor: activePrintTemplate?.primary_color || "#1e293b" }}
               >
                 {h}
               </th>
@@ -121,8 +165,10 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
         </thead>
         <tbody>{rows.map((it, i) => (
           <tr key={i} className={`border-t border-slate-200 ${i % 2 ? "bg-slate-50" : "bg-white"}`} style={{ breakInside: "avoid", pageBreakInside: "avoid" }}>
-            <td className="px-2 py-2 text-slate-500">{i + 1}</td><td className="break-words px-2 py-2 font-semibold" style={{ overflowWrap: "anywhere" }}>{it.category || it.description}</td>{!settings.freeform_invoice_items && <td className="break-words px-2 py-2" style={{ overflowWrap: "anywhere" }}>{it.size || "—"}</td>}
-            <td className="px-2 py-2 text-right tabular-nums">{it.qty}</td><td className="px-2 py-2 text-right tabular-nums">{fmtMoney(it.unit_price)}</td><td className="px-2 py-2 text-right font-bold tabular-nums">{fmtMoney((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td>
+            <td className="px-2 py-2 text-slate-500">{i + 1}</td>{customColumns
+              ? customColumns.map((column) => <td key={column} className={`break-words px-2 py-2 ${["category", "size"].includes(column) ? "" : "text-right tabular-nums"} ${column === "category" ? "font-semibold" : ""} ${column === "total" ? "font-bold" : ""}`} style={{ overflowWrap: "anywhere" }}>{templateColumnValues[column](it)}</td>)
+              : <><td className="break-words px-2 py-2 font-semibold" style={{ overflowWrap: "anywhere" }}>{it.category || it.description}</td>{!settings.freeform_invoice_items && <td className="break-words px-2 py-2" style={{ overflowWrap: "anywhere" }}>{it.size || "—"}</td>}
+                <td className="px-2 py-2 text-right tabular-nums">{it.qty}</td><td className="px-2 py-2 text-right tabular-nums">{fmtMoney(it.unit_price)}</td><td className="px-2 py-2 text-right font-bold tabular-nums">{fmtMoney((Number(it.qty) || 0) * (Number(it.unit_price) || 0))}</td></>}
           </tr>))}</tbody>
       </table>}
       <div className="mt-2 flex items-start justify-between gap-3">
@@ -176,6 +222,11 @@ export const InvoiceDocument = forwardRef(function InvoiceDocument({
         </div>
         <p className="italic text-slate-700 text-[12px]">Thank you for your business!</p>
       </div>
+      {activePrintTemplate?.signature_text && <div className="mt-5 max-w-64">
+        <p className="mb-6 text-xs">{activePrintTemplate.signature_text}</p>
+        <p className="border-b border-slate-400" />
+      </div>}
+      {activePrintTemplate?.footer_text && <p className="mt-3 whitespace-pre-line text-xs" style={{ textAlign: activePrintTemplate.alignment || "left" }}>{activePrintTemplate.footer_text}</p>}
     </div>
   );
 });

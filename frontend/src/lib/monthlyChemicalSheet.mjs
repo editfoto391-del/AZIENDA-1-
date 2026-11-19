@@ -15,6 +15,29 @@ export const MONTHLY_SHEET_BLOCKS = [
   { key: "small_blue_block", label: "Small Blue Block" },
 ];
 
+const CHEMICAL_ALIASES = new Map([
+  ["ppg", ["ppg", "polyol", "poliol"]],
+  ["tdi", ["tdi", "isocyanate", "isocianato"]],
+  ["t9", ["t9"]],
+  ["silicone", ["sili", "silicone"]],
+  ["amine52", ["ami", "amine52", "amina52"]],
+  ["mcl", ["mcl"]],
+]);
+
+export function suggestedChemicalKey(product) {
+  const tokens = new Set(String(product || "").toLowerCase().match(/[a-z0-9]+/g) || []);
+  for (const [chemicalKey, aliases] of CHEMICAL_ALIASES) {
+    if (aliases.some((alias) => tokens.has(alias))) return chemicalKey;
+    if (chemicalKey === "t9" && tokens.has("t") && tokens.has("9")) return chemicalKey;
+    if (
+      chemicalKey === "amine52"
+      && (tokens.has("amine") || tokens.has("amina"))
+      && tokens.has("52")
+    ) return chemicalKey;
+  }
+  return "";
+}
+
 const blankChemicalValues = () => Object.fromEntries(
   MONTHLY_SHEET_CHEMICALS.map(({ key }) => [key, ""]),
 );
