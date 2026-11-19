@@ -171,31 +171,6 @@ export default function Stock() {
     finally { setUpdatingRightStock(false); }
   };
 
-  const updateSuppliedRightStock = async () => {
-    if (busy || updatingRightStock) return;
-    const confirmed = window.confirm(
-      "Apply the supplied SuperIQFoam stock quantities by category and size? "
-      + "This records audit-tracked stock movements and keeps all invoices and existing history. "
-      + "Negative quantities (Ribbon Black backorders and White Drum) will be retained. "
-      + "The per-size list will be used; its printed summary totals do not match the listed lines.",
-    );
-    if (!confirmed) return;
-    setUpdatingRightStock(true);
-    try {
-      const result = await api.post("/stock/update-right-stock", {});
-      toast.success(
-        `Supplied stock applied: ${result.adjusted_items} adjustment(s), `
-        + `${result.created_items} new size(s), ${result.duplicate_records_zeroed} duplicate row(s) set to zero. `
-        + `Mattress quantity from listed sizes: ${result.net_mattress_stock}.`,
-      );
-      load();
-    } catch (error) {
-      toast.error(`Could not apply supplied stock: ${apiError(error)}`);
-    } finally {
-      setUpdatingRightStock(false);
-    }
-  };
-
   const getTotalsByCategory = () => {
     const totals = {};
     getCanonicalStock().forEach((s) => {
@@ -367,15 +342,6 @@ export default function Stock() {
                 data-testid="update-daily-stock"
               >
                 {loadingDailyCount ? "Loading..." : "COMPILE STOCK UPDATE"}
-              </Btn>
-              <Btn
-                type="button"
-                variant="outline"
-                onClick={updateSuppliedRightStock}
-                disabled={updatingRightStock || busy || list === null}
-                data-testid="update-right-stock"
-              >
-                {updatingRightStock && !loadingDailyCount ? "Updating..." : "UPDATE STOCK"}
               </Btn>
             </>
           )}
