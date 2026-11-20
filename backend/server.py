@@ -10111,6 +10111,40 @@ class SalaryPaymentIn(BaseModel):
     def salary_payment_dates_valid(cls, value):
         return validate_iso_date(value)
 
+
+class WeeklySalaryPaymentPlanIn(BaseModel):
+    period_start: str
+    period_end: str
+    friday_employee_ids: List[str] = Field(default_factory=list, max_length=1000)
+
+    @field_validator("period_start", "period_end")
+    @classmethod
+    def weekly_salary_plan_dates_valid(cls, value):
+        return validate_iso_date(value)
+
+
+class WeeklySalaryPaymentIn(BaseModel):
+    employee_id: str = Field(min_length=1, max_length=120)
+    period_start: str
+    period_end: str
+    payment_date: str
+    amount: float = Field(gt=0, allow_inf_nan=False)
+    idempotency_key: str = Field(min_length=8, max_length=120)
+    notes: Optional[str] = Field(default="", max_length=1000)
+
+    @field_validator("period_start", "period_end", "payment_date")
+    @classmethod
+    def weekly_salary_payment_dates_valid(cls, value):
+        return validate_iso_date(value)
+
+    @field_validator("amount")
+    @classmethod
+    def weekly_salary_payment_amount_is_cents(cls, value):
+        decimal_amount = Decimal(str(value))
+        if decimal_amount != decimal_amount.quantize(Decimal("0.01")):
+            raise ValueError("Payment amount must not include fractions of a cent")
+        return value
+
 class PieceProductionIn(BaseModel):
     employee_id: str
     date: str
@@ -10503,6 +10537,358 @@ def salary_payroll_key(period_type, period_start, period_end):
     raise HTTPException(400, "Unsupported payroll period type")
 
 
+def require_superiqfoam_weekly_salary_access(user):
+    require_admin(user)
+    company_id = active_company_id.get() or user.get("_active_company_id") or DEFAULT_COMPANY_ID
+    if company_id != DEFAULT_COMPANY_ID:
+        raise HTTPException(404, "Weekly split salary payments are only available for SuperIQFoam")
+
+
+def superiqfoam_weekly_salary_period(period_start, period_end):
+    payroll_key = salary_payroll_key("weekly", period_start, period_end)
+    monday = date.fromisoformat(period_start)
+    return {
+        "payroll_key": payroll_key,
+        "period_start": period_start,
+        "period_end": period_end,
+        "friday_date": (monday + timedelta(days=4)).isoformat(),
+        "saturday_date": (monday + timedelta(days=5)).isoformat(),
+    }
+
+
+def salary_amount_to_cents(value):
+    return int((D(value or 0) * D(100)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def weekly_salary_payment_summary(
+    employees, friday_employee_ids, payment_accounts, legacy_payments,
+    period_start, period_end,
+):
+    period = superiqfoam_weekly_salary_period(period_start, period_end)
+    friday_ids = set(friday_employee_ids or [])
+    accounts_by_employee = {account.get("employee_id"): account for account in payment_accounts}
+    legacy_by_employee = {payment.get("employee_id"): payment for payment in legacy_payments}
+    rows = []
+    for employee in employees:
+        if employee.get("pay_frequency") == "monthly_fixed":
+            continue
+        employee_id = employee["employee_id"]
+        account = accounts_by_employee.get(employee_id) or {}
+        legacy = legacy_by_employee.get(employee_id)
+        legacy_group = (
+            "friday" if legacy and legacy.get("payment_date") == period["friday_date"]
+            else "saturday" if legacy and legacy.get("payment_date") == period["saturday_date"]
+            else None
+        )
+        group = account.get("payment_group") or legacy_group or (
+            "friday" if employee_id in friday_ids else "saturday"
+        )
+        calculated_due_cents = max(0, salary_amount_to_cents(
+            employee.get("net_salary", D(employee.get("gross_salary", 0)) - D(employee.get("cut", 0))),
+        ))
+        due_cents = int(account.get("due_amount_cents") or 0) if account else 0
+        if due_cents <= 0:
+            due_cents = salary_amount_to_cents(legacy.get("net_amount", 0)) if legacy else calculated_due_cents
+        due_cents = max(0, due_cents)
+        if legacy:
+            payment_history = [{
+                "id": legacy.get("id"),
+                "amount_cents": salary_amount_to_cents(legacy.get("net_amount", 0)),
+                "payment_date": legacy.get("payment_date", ""),
+                "notes": legacy.get("notes", ""),
+                "legacy": True,
+            }]
+        else:
+            payment_history = list(account.get("payments") or [])
+        paid_cents = sum(max(0, int(payment.get("amount_cents") or 0)) for payment in payment_history)
+        remaining_cents = max(0, due_cents - paid_cents)
+        status = (
+            "Paid" if due_cents > 0 and paid_cents >= due_cents
+            else "Partially Paid" if paid_cents > 0
+            else "Scheduled" if due_cents > 0
+            else "Pending"
+        )
+        rows.append({
+            "employee_id": employee_id,
+            "employee_name": employee.get("name", ""),
+            "department": employee.get("department", ""),
+            "salary_rate_missing": bool(employee.get("salary_rate_missing")),
+            "due_cents": due_cents,
+            "paid_cents": paid_cents,
+            "remaining_cents": remaining_cents,
+            "payment_group": group,
+            "payment_status": status,
+            "payment_history": payment_history,
+        })
+
+    def summarize_group(group):
+        group_rows = [row for row in rows if row["payment_group"] == group]
+        due_cents = sum(row["due_cents"] for row in group_rows)
+        paid_cents = sum(
+            int(payment.get("amount_cents") or 0)
+            for row in group_rows
+            for payment in row["payment_history"]
+            if payment.get("payment_date") == period[f"{group}_date"]
+        )
+        return {
+            "employee_count": len(group_rows),
+            "due_cents": due_cents,
+            "cash_required_cents": sum(row["remaining_cents"] for row in group_rows),
+            "actually_paid_cents": paid_cents,
+            "employees": group_rows,
+        }
+
+    friday = summarize_group("friday")
+    saturday = summarize_group("saturday")
+    total_salaries_cents = sum(row["due_cents"] for row in rows)
+    total_paid_cents = sum(row["paid_cents"] for row in rows)
+    return {
+        **period,
+        "friday_employee_ids": sorted(friday_ids),
+        "friday": friday,
+        "saturday": saturday,
+        "total_salaries_cents": total_salaries_cents,
+        "total_paid_cents": total_paid_cents,
+        "outstanding_cents": max(0, total_salaries_cents - total_paid_cents),
+    }
+
+
+async def superiqfoam_weekly_salary_data(period_start, period_end):
+    period = superiqfoam_weekly_salary_period(period_start, period_end)
+    report = await salary_report(period_start, period_end, include_monthly_salaries=True)
+    employees = [
+        employee for employee in report["employees"]
+        if employee.get("pay_frequency") != "monthly_fixed"
+    ]
+    plan = await db.salary_weekly_payment_plans.find_one(
+        {"id": period["payroll_key"]}, {"_id": 0},
+    )
+    friday_employee_ids = (plan or {}).get("friday_employee_ids", [])
+    accounts = await listall(
+        "salary_weekly_payment_accounts", {"payroll_key": period["payroll_key"]},
+    )
+    legacy_payments = await listall(
+        "salary_payments", {"payroll_key": period["payroll_key"]},
+    )
+    return weekly_salary_payment_summary(
+        employees,
+        friday_employee_ids,
+        accounts,
+        legacy_payments,
+        period_start,
+        period_end,
+    ), employees, plan
+
+
+@api.get("/salaries/weekly-plan")
+async def get_weekly_salary_plan(
+    period_start: str, period_end: str, user=Depends(get_current_user),
+):
+    require_superiqfoam_weekly_salary_access(user)
+    summary, _employees, plan = await superiqfoam_weekly_salary_data(period_start, period_end)
+    return {**summary, "plan_saved": bool(plan)}
+
+
+@api.put("/salaries/weekly-plan")
+async def save_weekly_salary_plan(
+    body: WeeklySalaryPaymentPlanIn, user=Depends(get_current_user),
+):
+    require_superiqfoam_weekly_salary_access(user)
+    period = superiqfoam_weekly_salary_period(body.period_start, body.period_end)
+    if len(body.friday_employee_ids) != len(set(body.friday_employee_ids)):
+        raise HTTPException(400, "A salary employee can only be assigned to Friday once")
+    summary, employees, current_plan = await superiqfoam_weekly_salary_data(
+        body.period_start, body.period_end,
+    )
+    employee_ids = {employee["employee_id"] for employee in employees}
+    if not set(body.friday_employee_ids).issubset(employee_ids):
+        raise HTTPException(400, "Friday selection contains an employee outside this weekly payroll")
+    previous_friday_ids = set((current_plan or {}).get("friday_employee_ids", []))
+    next_friday_ids = set(body.friday_employee_ids)
+    paid_accounts = await listall(
+        "salary_weekly_payment_accounts", {"payroll_key": period["payroll_key"]},
+    )
+    for account in paid_accounts:
+        if int(account.get("paid_amount_cents") or 0) > 0:
+            employee_id = account.get("employee_id")
+            old_group = account.get("payment_group") or ("friday" if employee_id in previous_friday_ids else "saturday")
+            new_group = "friday" if employee_id in next_friday_ids else "saturday"
+            if old_group != new_group:
+                raise HTTPException(409, "Payment group cannot be changed after a payment has been recorded")
+    legacy_paid_ids = {
+        payment.get("employee_id") for payment in await listall(
+            "salary_payments", {"payroll_key": period["payroll_key"]},
+        )
+    }
+    for employee_id in legacy_paid_ids:
+        old_group = "friday" if employee_id in previous_friday_ids else "saturday"
+        new_group = "friday" if employee_id in next_friday_ids else "saturday"
+        if old_group != new_group:
+            raise HTTPException(409, "A legacy paid employee cannot be moved to another payment group")
+    await db.salary_weekly_payment_plans.update_one(
+        {"id": period["payroll_key"]},
+        {"$set": {
+            "friday_employee_ids": sorted(next_friday_ids),
+            "period_start": body.period_start,
+            "period_end": body.period_end,
+            "updated_at": now_iso(),
+            "updated_by": user.get("id"),
+        }, "$setOnInsert": {
+            "id": period["payroll_key"],
+            "created_at": now_iso(),
+            "created_by": user.get("id"),
+        }},
+        upsert=True,
+    )
+    updated_summary, _employees, _plan = await superiqfoam_weekly_salary_data(
+        body.period_start, body.period_end,
+    )
+    await log_audit(
+        "salary_weekly_plan", period["payroll_key"], "updated", user,
+        before=current_plan,
+        after={
+            "id": period["payroll_key"],
+            "friday_employee_ids": sorted(next_friday_ids),
+            "period_start": body.period_start,
+            "period_end": body.period_end,
+        },
+    )
+    return {**updated_summary, "plan_saved": True}
+
+
+@api.post("/salaries/weekly-payments")
+async def record_weekly_salary_payment(
+    body: WeeklySalaryPaymentIn, user=Depends(get_current_user),
+):
+    require_superiqfoam_weekly_salary_access(user)
+    period = superiqfoam_weekly_salary_period(body.period_start, body.period_end)
+    plan = await db.salary_weekly_payment_plans.find_one(
+        {"id": period["payroll_key"]}, {"_id": 0, "friday_employee_ids": 1},
+    ) or {}
+    friday_ids = set(plan.get("friday_employee_ids", []))
+    payment_group = "friday" if body.employee_id in friday_ids else "saturday"
+    expected_date = period[f"{payment_group}_date"]
+    if body.payment_date != expected_date:
+        raise HTTPException(400, f"This employee is scheduled for {payment_group.title()} payment on {expected_date}")
+    report = await salary_report(body.period_start, body.period_end, include_monthly_salaries=True)
+    employee = next(
+        (item for item in report["employees"] if item["employee_id"] == body.employee_id),
+        None,
+    )
+    if not employee or employee.get("pay_frequency") == "monthly_fixed":
+        raise HTTPException(404, "Weekly-paid employee not found in this payroll period")
+    if employee.get("salary_rate_missing"):
+        raise HTTPException(400, "This employee has no configured salary and cannot be paid")
+    due_cents = max(0, salary_amount_to_cents(employee.get("net_salary", 0)))
+    if due_cents <= 0:
+        raise HTTPException(400, "This employee has no positive net salary due")
+    amount_cents = salary_amount_to_cents(body.amount)
+    if amount_cents <= 0:
+        raise HTTPException(400, "Payment must be at least one cent")
+
+    legacy_payment = await db.salary_payments.find_one(
+        {"employee_id": body.employee_id, "payroll_key": period["payroll_key"]},
+        {"_id": 0},
+    )
+    if legacy_payment:
+        raise HTTPException(409, "A full legacy salary payment already exists for this employee and week")
+
+    account_id = f"{period['payroll_key']}:{body.employee_id}"
+    await db.salary_weekly_payment_accounts.update_one(
+        {"id": account_id},
+        {"$setOnInsert": {
+            "id": account_id,
+            "employee_id": body.employee_id,
+            "employee_name": employee.get("name", ""),
+            "department": employee.get("department", ""),
+            "payroll_key": period["payroll_key"],
+            "period_start": body.period_start,
+            "period_end": body.period_end,
+            "due_amount_cents": due_cents,
+            "paid_amount_cents": 0,
+            "payments": [],
+            "created_at": now_iso(),
+        }},
+        upsert=True,
+    )
+    account = await db.salary_weekly_payment_accounts.find_one(
+        {"id": account_id}, {"_id": 0},
+    )
+    due_cents = int((account or {}).get("due_amount_cents") or due_cents)
+    duplicate = next((
+        payment for payment in (account or {}).get("payments", [])
+        if payment.get("idempotency_key") == body.idempotency_key
+    ), None)
+    if duplicate:
+        if (
+            duplicate.get("employee_id") != body.employee_id
+            or duplicate.get("payroll_key") != period["payroll_key"]
+            or duplicate.get("payment_group") != payment_group
+            or duplicate.get("payment_date") != body.payment_date
+            or int(duplicate.get("amount_cents") or 0) != amount_cents
+        ):
+            raise HTTPException(409, "Idempotency key was already used for a different payment")
+        return duplicate
+
+    existing_paid_cents = int((account or {}).get("paid_amount_cents") or 0)
+    if existing_paid_cents + amount_cents > due_cents:
+        raise HTTPException(400, "Payment cannot exceed the remaining salary balance")
+    payment_id = new_id()
+    payment_record = {
+        "id": payment_id,
+        "idempotency_key": body.idempotency_key,
+        "employee_id": body.employee_id,
+        "employee_name": employee.get("name", ""),
+        "payroll_key": period["payroll_key"],
+        "period_start": body.period_start,
+        "period_end": body.period_end,
+        "payment_group": payment_group,
+        "payment_date": body.payment_date,
+        "amount_cents": amount_cents,
+        "amount": r2(D(amount_cents) / D(100)),
+        "notes": body.notes or "",
+        "paid_at": now_iso(),
+        "paid_by": user.get("id"),
+    }
+    update_result = await db.salary_weekly_payment_accounts.update_one(
+        {
+            "id": account_id,
+            "payments.idempotency_key": {"$ne": body.idempotency_key},
+            "$expr": {
+                "$lte": [
+                    {"$add": [{"$ifNull": ["$paid_amount_cents", 0]}, amount_cents]},
+                    due_cents,
+                ],
+            },
+        },
+        {
+            "$set": {
+                "payment_group": payment_group,
+                "employee_name": employee.get("name", ""),
+                "department": employee.get("department", ""),
+                "updated_at": now_iso(),
+            },
+            "$inc": {"paid_amount_cents": amount_cents},
+            "$push": {"payments": payment_record},
+        },
+    )
+    if update_result.modified_count != 1:
+        account = await db.salary_weekly_payment_accounts.find_one({"id": account_id}, {"_id": 0})
+        duplicate = next((
+            payment for payment in (account or {}).get("payments", [])
+            if payment.get("idempotency_key") == body.idempotency_key
+        ), None)
+        if duplicate:
+            return duplicate
+        raise HTTPException(409, "Salary payment changed concurrently; refresh and try again")
+
+    await log_audit(
+        "salary_payment", payment_id, "weekly_partial_payment_recorded", user,
+        before=None, after=payment_record,
+    )
+    return payment_record
+
+
 @api.get("/salaries/payments")
 async def get_salary_payments(
     period_type: Literal["weekly", "monthly"],
@@ -10526,6 +10912,11 @@ async def get_salary_payment_history(user=Depends(get_current_user)):
 @api.post("/salaries/payments")
 async def record_salary_payment(body: SalaryPaymentIn, user=Depends(get_current_user)):
     require_admin(user)
+    if (
+        body.period_type == "weekly"
+        and (active_company_id.get() or user.get("_active_company_id") or DEFAULT_COMPANY_ID) == DEFAULT_COMPANY_ID
+    ):
+        raise HTTPException(409, "Use the weekly Friday/Saturday salary payment workflow for SuperIQFoam")
     payroll_key = salary_payroll_key(
         body.period_type, body.period_start, body.period_end
     )
@@ -20032,6 +20423,23 @@ async def initialize_empty_company(company_id):
         [("payment_date", -1)],
         name="salary_payment_date",
     )
+    if company_id == DEFAULT_COMPANY_ID:
+        await create_company_unique_index(
+            company_db.salary_weekly_payment_plans,
+            "id",
+            unique=True,
+            name="salary_weekly_plan_once",
+        )
+        await create_company_unique_index(
+            company_db.salary_weekly_payment_accounts,
+            "id",
+            unique=True,
+            name="salary_weekly_account_once",
+        )
+        await company_db.salary_weekly_payment_accounts.create_index(
+            [("payroll_key", 1), ("employee_id", 1)],
+            name="salary_weekly_account_employee",
+        )
     try:
         await ensure_performance_indexes(company_db)
     except OperationFailure as error:

@@ -293,11 +293,15 @@ function PayrollEmployeeCard({
 
 export default function SalariesManagement() {
   const { user } = useAuth();
+  const isSuperIqFoam = user?.company_id === "superiqfoam";
   const [periodType, setPeriodType] = useState("weekly");
   const [weekStart, setWeekStart] = useState(() => mondayOf(today()));
   const [monthValue, setMonthValue] = useState(() => today().slice(0, 7));
   const [report, setReport] = useState(null);
   const [payments, setPayments] = useState([]);
+  const [weeklyPlan, setWeeklyPlan] = useState(null);
+  const [weeklyPlanSaving, setWeeklyPlanSaving] = useState(false);
+  const [weeklyPaymentModal, setWeeklyPaymentModal] = useState(null);
   const [history, setHistory] = useState([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const [historyCompanyId, setHistoryCompanyId] = useState(user?.company_id || "");
@@ -325,6 +329,7 @@ export default function SalariesManagement() {
     [periodType, monthValue, weekStart],
   );
   const payrollKey = period ? periodKey(periodType, period.start) : "";
+  const weeklySplitView = isSuperIqFoam && periodType === "weekly";
   const calendarGrid = useMemo(() => calendarDays(calendarMonth), [calendarMonth]);
   const selectedSunday = addDays(weekStart, 6);
   const selectedWeekNumber = isoWeek(weekStart);
@@ -352,12 +357,19 @@ export default function SalariesManagement() {
         end_date: period.end,
         include_monthly_salaries: true,
       };
-      const [nextReport, nextPayments] = await Promise.all([
+      const [nextReport, nextPayments, nextWeeklyPlan] = await Promise.all([
         api.getUncached("/salaries", params),
         fetchPeriodPayments(period, periodType),
+        isSuperIqFoam && periodType === "weekly"
+          ? api.getUncached("/salaries/weekly-plan", {
+            period_start: period.start,
+            period_end: period.end,
+          })
+          : Promise.resolve(null),
       ]);
       setReport(nextReport);
       setPayments(nextPayments || []);
+      setWeeklyPlan(nextWeeklyPlan);
       const paidByEmployee = Object.fromEntries((nextPayments || []).map((payment) => [payment.employee_id, payment]));
       setCutDrafts(Object.fromEntries((nextReport.employees || []).map((employee) => [
         employee.employee_id, String(paidByEmployee[employee.employee_id]?.deduction_amount ?? employee.cut ?? 0),
@@ -389,11 +401,13 @@ export default function SalariesManagement() {
     if (!period) {
       setReport(null);
       setPayments([]);
+      setWeeklyPlan(null);
       setLoading(false);
       return () => { active = false; };
     }
     setReport(null);
     setPayments([]);
+    setWeeklyPlan(null);
     setMonthlyIncluded({});
     setCutDrafts({});
     setRateDrafts({});
@@ -409,10 +423,17 @@ export default function SalariesManagement() {
     Promise.all([
       api.getUncached("/salaries", params),
       fetchPeriodPayments(period, periodType),
-    ]).then(([nextReport, nextPayments]) => {
+      isSuperIqFoam && periodType === "weekly"
+        ? api.getUncached("/salaries/weekly-plan", {
+          period_start: period.start,
+          period_end: period.end,
+        })
+        : Promise.resolve(null),
+    ]).then(([nextReport, nextPayments, nextWeeklyPlan]) => {
       if (!active) return;
       setReport(nextReport);
       setPayments(nextPayments || []);
+      setWeeklyPlan(nextWeeklyPlan);
       const paidByEmployee = Object.fromEntries((nextPayments || []).map((payment) => [payment.employee_id, payment]));
       setCutDrafts(Object.fromEntries((nextReport.employees || []).map((employee) => [
         employee.employee_id, String(paidByEmployee[employee.employee_id]?.deduction_amount ?? employee.cut ?? 0),
@@ -436,7 +457,7 @@ export default function SalariesManagement() {
       if (active) setLoading(false);
     });
     return () => { active = false; };
-  }, [period?.start, period?.end, periodType, user?.company_id]);
+  }, [period?.start, period?.end, periodType, user?.company_id, isSuperIqFoam]);
 
   useEffect(() => {
     if (view !== "history" || (historyLoaded && historyCompanyId === user?.company_id)) return;
@@ -654,6 +675,67 @@ export default function SalariesManagement() {
     }
   };
 
+  const updateWeeklyFridaySelection = async (employeeId, assignFriday) => {
+    if (!isSuperIqFoam || !period || periodType !== "weekly" || weeklyPlanSaving) return;
+    const fridayIds = new Set(weeklyPlan?.friday_employee_ids || []);
+    if (assignFriday) fridayIds.add(employeeId);
+    else fridayIds.delete(employeeId);
+    setWeeklyPlanSaving(true);
+    try {
+      const updatedPlan = await api.put("/salaries/weekly-plan", {
+        period_start: period.start,
+        period_end: period.end,
+        friday_employee_ids: [...fridayIds],
+      });
+      setWeeklyPlan(updatedPlan);
+      toast.success(assignFriday ? "Assigned to Friday payment group" : "Assigned to Saturday payment group");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setWeeklyPlanSaving(false);
+    }
+  };
+
+  const recordWeeklySalaryPayment = async () => {
+    if (!weeklyPaymentModal || !period) return;
+    const amountText = String(weeklyPaymentModal.amount || "").trim();
+    if (!/^\d+(?:\.\d{1,2})?$/.test(amountText)) {
+      return toast.error("Enter an amount with no more than two decimal places.");
+    }
+    const amount = Number(amountText);
+    const amountCents = cents(amount);
+    if (!Number.isSafeInteger(amountCents) || amountCents <= 0) {
+      return toast.error("Enter an amount greater than zero.");
+    }
+    if (amountCents > weeklyPaymentModal.employee.remaining_cents) {
+      return toast.error("Payment cannot exceed the remaining salary balance.");
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(weeklyPaymentModal.paymentDate)) {
+      return toast.error("Choose a valid payment date.");
+    }
+    const employeeId = weeklyPaymentModal.employee.employee_id;
+    setSavingIds((current) => ({ ...current, [employeeId]: true }));
+    try {
+      await api.post("/salaries/weekly-payments", {
+        employee_id: employeeId,
+        period_start: period.start,
+        period_end: period.end,
+        payment_date: weeklyPaymentModal.paymentDate,
+        amount: amountCents / 100,
+        idempotency_key: globalThis.crypto?.randomUUID?.() || `${employeeId}-${Date.now()}-${Math.random()}`,
+        notes: weeklyPaymentModal.notes || "",
+      });
+      toast.success(`Payment recorded for ${weeklyPaymentModal.employee.employee_name}`);
+      setWeeklyPaymentModal(null);
+      setHistoryLoaded(false);
+      await reload({ showLoading: false, resetExpanded: false });
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setSavingIds((current) => ({ ...current, [employeeId]: false }));
+    }
+  };
+
   const downloadReport = async () => {
     if (!period || !report) return toast.error("Load a valid payroll period first.");
     try {
@@ -856,7 +938,30 @@ export default function SalariesManagement() {
           </div>}
         </section>
 
-        <section className="overflow-hidden rounded-3xl bg-[#111312] p-5 text-white shadow-[0_16px_40px_rgba(15,23,42,0.16)] sm:p-7" aria-label="Payroll summary">
+        {weeklySplitView ? weeklyPlan ? <section className="space-y-4" aria-label="Weekly salary payment summary" data-testid="weekly-salary-payment-summary">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#39806b]">WEEKLY SALARY PAYMENT SUMMARY</p>
+            <p className="mt-1 text-xs text-slate-500">Cycle {weeklyPlan.period_start} – {weeklyPlan.period_end} · Friday {weeklyPlan.friday_date} · Saturday {weeklyPlan.saturday_date}</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {[
+              ["Total Friday salaries", weeklyPlan.friday.due_cents],
+              ["Total Saturday salaries", weeklyPlan.saturday.due_cents],
+              ["Total weekly salaries", weeklyPlan.total_salaries_cents],
+              ["Cash required Friday", weeklyPlan.friday.cash_required_cents],
+              ["Cash required Saturday", weeklyPlan.saturday.cash_required_cents],
+              ["Actually paid Friday", weeklyPlan.friday.actually_paid_cents],
+              ["Actually paid Saturday", weeklyPlan.saturday.actually_paid_cents],
+              ["Total actually paid", weeklyPlan.total_paid_cents],
+              ["Outstanding balance", weeklyPlan.outstanding_cents],
+            ].map(([label, amount]) => <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4" data-testid={`weekly-summary-${label.toLowerCase().replaceAll(" ", "-")}`}>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+              <p className="mt-2 font-mono text-xl font-bold tabular-nums text-slate-950">{fmtMoney(Number(amount || 0) / 100)}</p>
+            </div>)}
+          </div>
+        </section> : <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="alert">
+          Weekly payment assignments are unavailable. Reload the payroll before recording a payment.
+        </div> : <section className="overflow-hidden rounded-3xl bg-[#111312] p-5 text-white shadow-[0_16px_40px_rgba(15,23,42,0.16)] sm:p-7" aria-label="Payroll summary">
           <div className="grid gap-5 sm:grid-cols-3 sm:gap-0">
             <div className="sm:px-5 sm:first:pl-0">
               <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/55">Total salaries</p>
@@ -874,13 +979,99 @@ export default function SalariesManagement() {
               <p className="mt-1 text-xs text-white/45">{fmtMoney(paidGrossCents / 100)} salary · {fmtMoney(paidCents / 100)} net paid</p>
             </div>
           </div>
-        </section>
+        </section>}
 
         {totalWasRecalculated && <p role="status" className="text-xs text-amber-800" data-testid="salary-total-recalculated">
           Please recalculate salaries. The total shown before payment was incorrect and has been updated.
         </p>}
 
-        <section className="space-y-4" aria-label="Employee payroll">
+        {weeklySplitView ? <section className="space-y-5" aria-label="Friday and Saturday salary groups">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h3 className="font-display text-xl font-semibold text-slate-950">Friday &amp; Saturday payments</h3>
+              <p className="mt-1 text-xs text-slate-500">PAY assigns a worker to Friday. All others are scheduled for Saturday. Assignment never marks a salary as paid.</p>
+            </div>
+            <Input type="search" label="Search employee" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name or employee ID" data-testid="salary-search" />
+          </div>
+          {weeklyPlan ? <div className="grid gap-4 xl:grid-cols-2">
+            {[
+              { key: "friday", title: "FRIDAY", group: weeklyPlan.friday, date: weeklyPlan.friday_date },
+              { key: "saturday", title: "SATURDAY", group: weeklyPlan.saturday, date: weeklyPlan.saturday_date },
+            ].map(({ key, title, group, date }) => {
+              const dateCaption = date === today()
+                ? `${title} – TODAY`
+                : date === addDays(today(), 1)
+                  ? `${title} – TOMORROW`
+                  : `${title} – ${displayDate(date, { weekday: "long", day: "2-digit", month: "short" })}`;
+              const visibleEmployees = group.employees.filter((employee) =>
+                (department === "" || salaryDepartment(employee) === department)
+                && (`${employee.employee_name} ${employee.employee_id} ${employee.department || ""}`)
+                  .toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()),
+              );
+              return <Card key={key} className="overflow-hidden p-0" data-testid={`salary-group-${key}`}>
+                <header className="flex flex-wrap items-end justify-between gap-3 border-b border-slate-200 bg-slate-50 p-5">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#39806b]">{dateCaption}</p>
+                    <p className="mt-1 text-xs text-slate-500">{group.employee_count} employees · Salary total {fmtMoney(group.due_cents / 100)}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Cash required</p>
+                    <p className="font-mono text-2xl font-bold tabular-nums text-slate-950">{fmtMoney(group.cash_required_cents / 100)}</p>
+                  </div>
+                </header>
+                {visibleEmployees.length === 0
+                  ? <p className="p-5 text-sm text-slate-500">No employees in this group match the search.</p>
+                  : <div className="divide-y divide-slate-100">
+                    {visibleEmployees.map((employee) => {
+                      const paymentsForEmployee = employee.payment_history || [];
+                      const hasPayment = employee.paid_cents > 0;
+                      const statusClass = employee.payment_status === "Paid"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                        : employee.payment_status === "Partially Paid"
+                          ? "border-orange-200 bg-orange-50 text-orange-800"
+                          : employee.payment_status === "Scheduled"
+                            ? "border-sky-200 bg-sky-50 text-sky-800"
+                            : "border-amber-200 bg-amber-50 text-amber-900";
+                      return <article key={employee.employee_id} className="space-y-3 p-4 sm:p-5" data-testid={`weekly-salary-row-${employee.employee_id}`}>
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h4 className="font-semibold text-slate-950">{employee.employee_name}</h4>
+                              <Badge cls={statusClass}>{employee.payment_status}</Badge>
+                              {employee.salary_rate_missing && <Badge cls="border-amber-200 bg-amber-50 text-amber-900">Rate missing</Badge>}
+                            </div>
+                            <p className="mt-1 text-xs text-slate-500">{employee.department || "Other"} · {key === "friday" ? weeklyPlan.friday_date : weeklyPlan.saturday_date}</p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {!hasPayment && <Btn variant="outline" className="h-9 px-3 text-xs" onClick={() => updateWeeklyFridaySelection(employee.employee_id, key === "saturday")} disabled={weeklyPlanSaving} data-testid={`salary-assign-${key === "saturday" ? "friday" : "saturday"}-${employee.employee_id}`}>
+                              {key === "saturday" ? "PAY · Friday" : "Move to Saturday"}
+                            </Btn>}
+                            {employee.remaining_cents > 0 && !employee.salary_rate_missing && <Btn className="h-9 px-3 text-xs" onClick={() => setWeeklyPaymentModal({
+                              employee,
+                              paymentDate: key === "friday" ? weeklyPlan.friday_date : weeklyPlan.saturday_date,
+                              amount: String(employee.remaining_cents / 100),
+                              notes: "",
+                            })} disabled={!!savingIds[employee.employee_id]} data-testid={`salary-record-payment-${employee.employee_id}`}>
+                              Record payment
+                            </Btn>}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3 border-y border-slate-100 py-3 sm:grid-cols-4">
+                          <div><p className="text-[10px] font-semibold uppercase text-slate-500">Salary due</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.due_cents / 100)}</p></div>
+                          <div><p className="text-[10px] font-semibold uppercase text-slate-500">Actually paid</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.paid_cents / 100)}</p></div>
+                          <div><p className="text-[10px] font-semibold uppercase text-slate-500">Outstanding</p><p className="mt-1 font-mono font-semibold">{fmtMoney(employee.remaining_cents / 100)}</p></div>
+                          <div><p className="text-[10px] font-semibold uppercase text-slate-500">Payment date</p><p className="mt-1 text-sm font-medium">{paymentsForEmployee.length ? paymentsForEmployee.map((payment) => payment.payment_date).join(", ") : "Not paid"}</p></div>
+                        </div>
+                        {paymentsForEmployee.length > 0 && <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500" aria-label={`Payment history for ${employee.employee_name}`}>
+                          {paymentsForEmployee.map((payment) => <span key={payment.id}>{payment.payment_date}: {fmtMoney(Number(payment.amount_cents || 0) / 100)}{payment.legacy ? " · legacy payment" : ""}</span>)}
+                        </div>}
+                      </article>;
+                    })}
+                  </div>}
+              </Card>;
+            })}
+          </div> : <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500" role="status">Loading Friday and Saturday groups…</div>}
+        </section> : <section className="space-y-4" aria-label="Employee payroll">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div>
               <h3 className="font-display text-xl font-semibold text-slate-950">Employee payroll</h3>
@@ -957,7 +1148,7 @@ export default function SalariesManagement() {
             <span>{reportRows.length} employees included · {includedPaidRows.length} settled</span>
             <span>Attendance and cuts update current payroll; recorded payments stay unchanged.</span>
           </div>
-        </section>
+        </section>}
 
       </> : <Card className="overflow-hidden">
         <div className="border-b border-border p-4">
@@ -993,6 +1184,26 @@ export default function SalariesManagement() {
           <div className="flex justify-end gap-2">
             <Btn variant="outline" onClick={() => setAdvanceModal(null)}>Cancel</Btn>
             <Btn onClick={saveAdvance}>Save borrowed balance</Btn>
+          </div>
+        </div>}
+      </Modal>
+      <Modal open={!!weeklyPaymentModal} onClose={() => !savingIds[weeklyPaymentModal?.employee?.employee_id] && setWeeklyPaymentModal(null)} title={"Record salary payment — " + (weeklyPaymentModal?.employee?.employee_name || "")}>
+        {weeklyPaymentModal && <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3 rounded-xl bg-slate-50 p-4 text-sm">
+            <div><p className="text-xs text-slate-500">Salary due</p><p className="mt-1 font-mono font-semibold">{fmtMoney(weeklyPaymentModal.employee.due_cents / 100)}</p></div>
+            <div><p className="text-xs text-slate-500">Outstanding before payment</p><p className="mt-1 font-mono font-semibold">{fmtMoney(weeklyPaymentModal.employee.remaining_cents / 100)}</p></div>
+          </div>
+          <Input label="Amount actually paid (R)" type="number" min="0.01" max={weeklyPaymentModal.employee.remaining_cents / 100} step="0.01" value={weeklyPaymentModal.amount}
+            onChange={(event) => setWeeklyPaymentModal((current) => ({ ...current, amount: event.target.value }))} data-testid="weekly-salary-payment-amount" />
+          <Input label="Actual payment date" type="date" min={weeklyPlan?.friday_date} max={weeklyPlan?.saturday_date} value={weeklyPaymentModal.paymentDate}
+            onChange={(event) => setWeeklyPaymentModal((current) => ({ ...current, paymentDate: event.target.value }))} data-testid="weekly-salary-payment-date" />
+          <Input label="Notes (optional)" value={weeklyPaymentModal.notes}
+            onChange={(event) => setWeeklyPaymentModal((current) => ({ ...current, notes: event.target.value }))} data-testid="weekly-salary-payment-notes" />
+          <div className="flex justify-end gap-2">
+            <Btn variant="outline" onClick={() => setWeeklyPaymentModal(null)} disabled={!!savingIds[weeklyPaymentModal.employee.employee_id]}>Cancel</Btn>
+            <Btn onClick={recordWeeklySalaryPayment} disabled={!!savingIds[weeklyPaymentModal.employee.employee_id]} data-testid="weekly-salary-payment-confirm">
+              {savingIds[weeklyPaymentModal.employee.employee_id] ? "Recording..." : "Confirm payment"}
+            </Btn>
           </div>
         </div>}
       </Modal>
