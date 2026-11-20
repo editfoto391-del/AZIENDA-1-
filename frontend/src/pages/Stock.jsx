@@ -13,6 +13,7 @@ import { drawStockRangeReportPdf } from "@/lib/stockRangeReportPdf.mjs";
 import { canonicalStockProduct, deduplicateStockRows, normalizeStockLabel, uniqueStockCategories } from "@/lib/stockCatalog.mjs";
 
 const ProductIdentificationManager = lazy(() => import("@/components/ProductIdentificationManager"));
+const LOW_STOCKS_CATEGORY = "__low_stocks__";
 
 const MOVE_TYPES = [
   { v: "adjustment_in", l: "Manual Adjustment In (+)" },
@@ -75,10 +76,13 @@ export default function Stock() {
   const canonicalStock = deduplicateStockRows(list || [], STOCK_CATEGORY);
   const stockCategories = uniqueStockCategories(list || [], STOCK_CATEGORY);
   const getCanonicalStock = () => canonicalStock;
-  const filteredList = canonicalStock.filter((item) =>
-    (!category || normalizeStockLabel(canonicalStockProduct(item.product)) === normalizeStockLabel(canonicalStockProduct(category)))
-    && (!stockSearch.trim() || `${item.product} ${item.size}`.toLowerCase().includes(stockSearch.trim().toLowerCase()))
-  );
+  const filteredList = canonicalStock.filter((item) => {
+    const categoryMatches = category === LOW_STOCKS_CATEGORY
+      ? item.low_stock
+      : !category || normalizeStockLabel(canonicalStockProduct(item.product)) === normalizeStockLabel(canonicalStockProduct(category));
+    return categoryMatches
+      && (!stockSearch.trim() || `${item.product} ${item.size}`.toLowerCase().includes(stockSearch.trim().toLowerCase()));
+  });
   const getRangeReportQuantity = (group, size) => {
     const names = REPORT_PRODUCT_NAMES[group];
     const matches = canonicalStock.filter((item) =>
@@ -374,6 +378,7 @@ export default function Stock() {
           )}
           <Select label="Filter by category" value={category} onChange={(event) => setCategory(event.target.value)} data-testid="stock-category-filter">
             <option value="">All categories</option>
+            <option value={LOW_STOCKS_CATEGORY}>Low Stocks</option>
             {stockCategories.map((item) => <option key={item} value={item}>{item}</option>)}
           </Select>
         </div>
@@ -602,7 +607,7 @@ export default function Stock() {
                   <td className="px-4 font-semibold text-slate-800">{s.product}</td>
                   <td className="px-4 text-right font-mono text-slate-500">{s.adjustments || 0}</td>
                   <td className="px-4 text-right font-mono text-red-500">{s.invoiced ? `-${s.invoiced}` : 0}</td>
-                  <td className="px-4 text-right"><span className={`font-mono font-bold ${s.current < s.threshold ? "text-red-600" : "text-slate-800"}`} data-testid={`stock-current-${s.id}`}>{s.current}</span>{s.current < s.threshold && <Badge cls="bg-red-50 text-red-700 border-red-200 ml-2">Low</Badge>}</td>
+                  <td className="px-4 text-right"><span className={`font-mono font-bold ${s.low_stock ? "text-red-600" : "text-slate-800"}`} data-testid={`stock-current-${s.id}`}>{s.current}</span>{s.low_stock && <Badge cls="bg-red-50 text-red-700 border-red-200 ml-2">Low</Badge>}</td>
                   {canViewStockCosts && <td className="px-4">
                     <div className="flex items-center justify-end gap-2">
                       <Input aria-label={`Cost for ${s.product} ${s.size}`} type="number" min="0" step="0.01" value={costDrafts[s.id] ?? (s.unit_cost ?? "")} onChange={(e) => setCostDrafts((current) => ({ ...current, [s.id]: e.target.value }))} className="w-32 min-w-[8rem] max-w-none shrink-0 px-2 py-1.5 text-right tabular-nums" data-testid={`stock-cost-${s.id}`} />

@@ -14,6 +14,37 @@ def test_company_inventory_low_stock_threshold_uses_highest_recorded_quantity():
     assert server.company_inventory_low_stock_threshold(item, 50) == 10
 
 
+def test_product_stock_warning_thresholds_are_scoped_to_requested_products_and_sizes():
+    assert server.stock_warning_threshold({"product": "Simple", "size": "910x100"}) == 150
+    assert server.stock_warning_threshold({"product": "simple", "size": "760 × 100"}) == 150
+    assert server.stock_warning_threshold({"product": "SIMPLE", "size": "1070x100"}) == 100
+    assert server.stock_warning_threshold({"product": "Ribbon Black", "size": "760x50"}) == 150
+    assert server.stock_warning_threshold({"product": "Ribbon Pink", "size": "1370x150"}) == 150
+    assert server.stock_warning_threshold({"product": "Candy", "size": "910x100"}) is None
+
+
+def test_product_stock_warnings_trigger_strictly_below_threshold():
+    for product, size, threshold in (
+        ("Simple", "910x100", 150),
+        ("Simple", "1070x100", 100),
+        ("Ribbon Black", "760x50", 150),
+        ("Ribbon Pink", "910x150", 150),
+    ):
+        assert server.stock_warning_is_active({
+            "product": product, "size": size, "current": threshold - 1,
+        })
+        assert not server.stock_warning_is_active({
+            "product": product, "size": size, "current": threshold,
+        })
+
+
+def test_product_stock_warning_keeps_existing_threshold_behavior_for_other_products():
+    item = {"product": "Candy", "size": "910x100", "current": 10, "threshold": 10}
+
+    assert not server.stock_warning_is_active(item)
+    assert server.stock_warning_is_active(item, include_equal_for_existing_threshold=True)
+
+
 def test_chemical_low_stock_threshold_uses_three_days_of_recent_usage_or_twenty_percent():
     logs = [
         {

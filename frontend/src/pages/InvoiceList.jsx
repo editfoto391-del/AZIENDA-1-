@@ -709,6 +709,7 @@ export default function InvoiceList({ express = false }) {
           aria-selected={section === "receiving"}
           onClick={() => {
             setSection("receiving");
+            setReceivedReload((current) => current + 1);
             setNewReceivedInvoiceIds([]);
             markReceivedInvoicesSeen(receivedInvoices.map((receipt) => receipt.id));
           }}

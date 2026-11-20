@@ -8189,6 +8189,26 @@ def stock_for_user(stock, user):
         return redact_stock_costs(stock)
     return stock
 
+
+def stock_warning_threshold(stock):
+    product = re.sub(r"\s+", " ", str(stock.get("product") or "").strip()).casefold()
+    size = re.sub(r"\s+", "", str(stock.get("size") or "")).casefold().replace("×", "x")
+    if product == "simple":
+        return 150 if size in {"910x100", "760x100"} else 100
+    if product in {"ribbon black", "ribbon pink"}:
+        return 150
+    return None
+
+
+def stock_warning_is_active(stock, *, include_equal_for_existing_threshold=False):
+    threshold = stock_warning_threshold(stock)
+    if threshold is not None:
+        return float(stock.get("current") or 0) < threshold
+    threshold = float(stock.get("threshold") or 0)
+    current = float(stock.get("current") or 0)
+    return current <= threshold if include_equal_for_existing_threshold else current < threshold
+
+
 async def post_movement(stock, mtype, qty, user, reason="", reference="", notes="", dedupe_key=None, direction=None, allow_negative=False, extra=None, session=None):
     sign = direction or (1 if mtype in INC_TYPES else -1)
     if sign < 0 and not allow_negative:
@@ -8623,6 +8643,12 @@ async def get_stock(user=Depends(get_current_user)):
     movements_by_stock = await stock_movements_for_stock_ids([item["id"] for item in items])
     for s in items:
         apply_stock_movements(s, movements_by_stock.get(s["id"], []))
+        configured_threshold = stock_warning_threshold(s)
+        s["low_stock_threshold"] = (
+            configured_threshold if configured_threshold is not None
+            else s.get("threshold", 0)
+        )
+        s["low_stock"] = stock_warning_is_active(s)
     return [stock_for_user(item, user) for item in items]
 
 
@@ -13526,8 +13552,16 @@ async def dashboard(
             D(item.get("opening", 0))
             + D(stock_movement_totals.get(item["id"], 0))
         )
+        configured_threshold = stock_warning_threshold(item)
+        item["low_stock_threshold"] = (
+            configured_threshold if configured_threshold is not None
+            else item.get("threshold", 0)
+        )
     finished_stock = r2(sum((D(item["current"]) for item in stock), Decimal("0")))
-    low_stock = [s for s in stock if s.get("current", 0) <= s.get("threshold", 0)]
+    low_stock = [
+        s for s in stock
+        if stock_warning_is_active(s, include_equal_for_existing_threshold=True)
+    ]
 
     hours = await resting_hours()
     for p in prod:
