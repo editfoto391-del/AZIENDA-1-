@@ -9401,10 +9401,21 @@ async def get_production(include_archived: bool = False, user=Depends(get_curren
 class BlockCuttingIn(BaseModel):
     block: str
     size: Optional[str] = None
+    date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     pieces_recovered: int = Field(gt=0, le=1_000_000_000)
     has_sheet: bool = False
     sheet_mm: Optional[int] = Field(default=None, gt=0, le=1_000_000_000)
     sheet_pieces_recovered: Optional[int] = Field(default=None, gt=0, le=1_000_000_000)
+
+    @field_validator("date")
+    @classmethod
+    def block_cutting_date_valid(cls, value):
+        if value is not None:
+            try:
+                date.fromisoformat(value)
+            except ValueError as error:
+                raise ValueError("Enter a valid block cutting date") from error
+        return value
 
 def normalize_block_name(block):
     value = str(block or "").strip()
@@ -9434,6 +9445,7 @@ async def add_block_cutting(body: BlockCuttingIn, user=Depends(get_current_user)
     record = await insert("block_cuttings", {
         "block": block,
         "size": size or None,
+        "date": body.date or today_str(),
         "pieces_recovered": body.pieces_recovered,
         "has_sheet": body.has_sheet,
         "sheet_mm": body.sheet_mm if body.has_sheet else None,
@@ -9460,6 +9472,7 @@ async def edit_block_cutting(record_id: str, body: BlockCuttingIn, user=Depends(
     record = await update_doc("block_cuttings", record_id, {
         "block": block,
         "size": size or None,
+        "date": body.date or before.get("date") or str(before.get("created_at", today_str()))[:10],
         "pieces_recovered": body.pieces_recovered,
         "has_sheet": body.has_sheet,
         "sheet_mm": body.sheet_mm if body.has_sheet else None,
@@ -18941,6 +18954,52 @@ def daily_production_blocks(record):
         if int(record.get(field, 0) or 0) > 0
     ]
 
+MONTHLY_PRODUCTION_BLOCK_LABELS = {
+    "big_block": "BIG BLOCK 2750",
+    "big_blue_block": "BIG BLUE BLOCK",
+    "medium_block": "MEDIUM BLOCK",
+    "small_block": "SMALL BLOCK",
+    "small_blue_block": "SMALL BLUE BLOCK",
+}
+
+
+def merge_monthly_sheet_production(daily_records, monthly_sheets):
+    rows_by_date = {}
+    for record in daily_records:
+        rows_by_date[record.get("date", "")] = record
+
+    for sheet in monthly_sheets:
+        for day in sheet.get("production_days", []):
+            day_date = day.get("date", "")
+            quantities = {
+                key: (day.get(key) or {}).get("quantity")
+                for key in MONTHLY_PRODUCTION_BLOCK_LABELS
+            }
+            if not day_date or all(quantity is None for quantity in quantities.values()):
+                continue
+            blocks = [
+                {"block": MONTHLY_PRODUCTION_BLOCK_LABELS[key], "quantity": int(quantity or 0)}
+                for key, quantity in quantities.items()
+                if quantity is not None and int(quantity or 0) > 0
+            ]
+            rows_by_date[day_date] = {
+                "id": f"monthly-sheet-production:{sheet.get('month')}:{day_date}",
+                "date": day_date,
+                "blocks": blocks,
+                "total_blocks": sum(block["quantity"] for block in blocks),
+                "notes": "",
+                "source": "monthly_chemical_sheet",
+            }
+
+    rows = []
+    for record in rows_by_date.values():
+        row = dict(record)
+        row["blocks"] = daily_production_blocks(row)
+        row["total_blocks"] = sum(item["quantity"] for item in row["blocks"])
+        rows.append(row)
+    return sorted(rows, key=lambda row: (row.get("date") or "", row.get("id") or ""), reverse=True)
+
+
 @api.get("/production/daily")
 async def get_daily_prod(
     include_archived: bool = False,
@@ -18949,30 +19008,37 @@ async def get_daily_prod(
     user=Depends(get_current_user),
 ):
     flt = {} if include_archived else {"archived": {"$ne": True}}
-    if page is None:
-        rows = await listall("production_daily", flt, sort=("date", -1))
-        total = len(rows)
-    else:
-        cursor = (
-            db.production_daily.find(flt, {"_id": 0})
-            .sort([("date", -1), ("id", 1)])
-            .skip((page - 1) * page_size)
-            .limit(page_size)
+    daily_records = await listall("production_daily", flt, sort=("date", -1))
+    monthly_sheets = []
+    company_id = user.get("_active_company_id")
+    if company_id in CHEMICAL_COMPANY_IDS and (
+        not worker_restrictions_apply(user)
+        or (
+            {"warehouse-a", "warehouses", "superiqfoam-monthly-sheet", "chemicals-quantity", "chemical-usage-log"}
+            .intersection(user.get("worker_allowed_sections", []))
         )
-        rows, total = await asyncio.gather(
-            cursor.to_list(length=page_size),
-            db.production_daily.count_documents(flt),
+    ):
+        id_pattern = (
+            r"^monthly-chemical-sheet:\d{4}-\d{2}$"
+            if company_id == DEFAULT_COMPANY_ID
+            else f"^{re.escape(f'monthly-chemical-sheet:{company_id}:')}"
         )
+        monthly_sheets = await listall(
+            "monthly_chemical_sheets", {"id": {"$regex": id_pattern}},
+        )
+    merged_rows = merge_monthly_sheet_production(daily_records, monthly_sheets)
+    total = len(merged_rows)
+    rows = merged_rows if page is None else merged_rows[(page - 1) * page_size:page * page_size]
     week, month = period_starts()
     summary_start = min(week, month)
-    active_rows = await listall(
-        "production_daily",
-        {"archived": {"$ne": True}, "date": {"$gte": summary_start}},
-        sort=("date", -1),
+    active_rows = merge_monthly_sheet_production(
+        await listall(
+            "production_daily",
+            {"archived": {"$ne": True}, "date": {"$gte": summary_start}},
+            sort=("date", -1),
+        ),
+        monthly_sheets,
     )
-    for row in rows:
-        row["blocks"] = daily_production_blocks(row)
-        row["total_blocks"] = sum(item["quantity"] for item in row["blocks"])
     def tot(since):
         totals = {}
         for record in active_rows:

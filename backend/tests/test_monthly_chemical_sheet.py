@@ -70,6 +70,95 @@ def test_monthly_chemical_sheet_accepts_daily_production_for_selected_month():
     assert sheet.production_days[0].small_block.quantity is None
 
 
+def test_production_view_uses_monthly_managed_block_counts_for_same_date():
+    rows = server.merge_monthly_sheet_production(
+        [
+            {"id": "legacy-production", "date": "2026-11-16", "blocks": [{"block": "White", "quantity": 99}]},
+            {"id": "older-production", "date": "2026-11-15", "blocks": [{"block": "Black", "quantity": 2}]},
+        ],
+        [{
+            "month": "2026-11",
+            "production_days": [{
+                "date": "2026-11-16",
+                "big_block": {"quantity": 6},
+                "medium_block": {"quantity": 3},
+            }],
+        }],
+    )
+
+    assert rows[0]["date"] == "2026-11-16"
+    assert rows[0]["source"] == "monthly_chemical_sheet"
+    assert rows[0]["total_blocks"] == 9
+    assert rows[0]["blocks"] == [
+        {"block": "BIG BLOCK 2750", "quantity": 6},
+        {"block": "MEDIUM BLOCK", "quantity": 3},
+    ]
+    assert rows[1]["id"] == "older-production"
+
+
+def test_daily_production_endpoint_returns_monthly_management_blocks(monkeypatch):
+    async def listall(collection, filters=None, sort=None):
+        if collection == "production_daily":
+            return [{
+                "id": "legacy-production",
+                "date": "2026-11-16",
+                "blocks": [{"block": "White", "quantity": 99}],
+            }]
+        if collection == "monthly_chemical_sheets":
+            return [{
+                "month": "2026-11",
+                "production_days": [{
+                    "date": "2026-11-16",
+                    "big_block": {"quantity": 6},
+                    "medium_block": {"quantity": 3},
+                }],
+            }]
+        raise AssertionError(f"Unexpected collection: {collection}")
+
+    monkeypatch.setattr(server, "listall", listall)
+    monkeypatch.setattr(server, "period_starts", lambda: ("2026-11-16", "2026-11-01"))
+
+    result = asyncio.run(server.get_daily_prod(
+        page=1,
+        page_size=50,
+        user={"_active_company_id": server.MANUFACTURING_COMPANY_ID},
+    ))
+
+    assert result["total"] == 1
+    assert result["rows"][0]["total_blocks"] == 9
+    assert result["week"]["total_blocks"] == 9
+    assert result["month"]["total_blocks"] == 9
+
+
+def test_blank_monthly_sheet_day_does_not_hide_legacy_production():
+    rows = server.merge_monthly_sheet_production(
+        [{"id": "legacy-production", "date": "2026-11-16", "blocks": [{"block": "White", "quantity": 4}]}],
+        [{"month": "2026-11", "production_days": [{"date": "2026-11-16", "big_block": {"quantity": None}}]}],
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == "legacy-production"
+    assert rows[0]["total_blocks"] == 4
+
+
+def test_block_cutting_accepts_an_explicit_cut_date():
+    record = server.BlockCuttingIn(
+        block="White",
+        size="50mm",
+        date="2026-11-12",
+        pieces_recovered=5,
+    )
+
+    assert record.date == "2026-11-12"
+    with pytest.raises(ValueError):
+        server.BlockCuttingIn(
+            block="White",
+            size="50mm",
+            date="2026-11-31",
+            pieces_recovered=5,
+        )
+
+
 def test_monthly_chemical_sheet_rejects_duplicate_or_out_of_month_production_days():
     day = {"date": "2026-11-16"}
     with pytest.raises(ValueError, match="only be saved once"):
