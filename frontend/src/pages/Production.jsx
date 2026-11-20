@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
-import { fmtDate, today } from "@/lib/format";
+import { fmtDate, fmtMoney, today } from "@/lib/format";
 import { Card, Btn, Input, Select, Modal, PageHeader, Empty, Badge } from "@/components/common";
 import { Factory, Plus, Save, Trash2, Pencil, RotateCcw } from "lucide-react";
 import BarcodeScanner from "@/components/BarcodeScanner";
 import { useAuth } from "@/context/AuthContext";
+import { usesUnifiedPriceList } from "@/lib/company";
+import { assessBlockYield, expectedWhiteBlockYield } from "@/lib/blockYield.mjs";
 
 const unitFactor = (unit = "") => {
   const normalized = unit.trim().toLowerCase();
@@ -17,6 +19,7 @@ const unitFactor = (unit = "") => {
 };
 export default function Production() {
   const { user } = useAuth();
+  const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const canPermanentlyDelete = user?.is_admin || user?.role === "admin" || user?.is_owner;
   const canRecordBlockProduction = user?.company_id === "iqfoam-manufactoring"
     && (!user?.is_worker || (user?.is_supervisor && user?.allowed_sections?.includes("production")));
@@ -24,6 +27,7 @@ export default function Production() {
   const [data, setData] = useState(null);
   const [productionPage, setProductionPage] = useState(1);
   const [stock, setStock] = useState([]);
+  const [prices, setPrices] = useState([]);
   const [blockCuttings, setBlockCuttings] = useState([]);
   const [showArchivedCuttings, setShowArchivedCuttings] = useState(false);
   const [cutOpen, setCutOpen] = useState(false);
@@ -57,6 +61,7 @@ export default function Production() {
     api.get(showArchivedCuttings ? "/production/block-cutting?include_archived=true" : "/production/block-cutting")
       .then(setBlockCuttings).catch((e) => toast.error(apiError(e)));
     api.get("/stock").then(setStock).catch((e) => toast.error(apiError(e)));
+    api.get("/prices").then(setPrices).catch(() => setPrices([]));
     if (canRecordBlockProduction) {
       api.getUncached("/production/block-recipes").then(setBlockRecipes).catch((e) => toast.error(apiError(e)));
       api.getUncached("/production/block-productions?limit=20").then(setBlockProductions).catch((e) => toast.error(apiError(e)));
@@ -66,6 +71,36 @@ export default function Production() {
   useEffect(() => { load(); }, [showArchivedCuttings, canRecordBlockProduction, productionPage, user?.company_id]);
 
   const availableSizes = [...new Set(stock.map((item) => item.size).filter(Boolean))].sort();
+  const simplePriceCategory = unifiedPriceList ? "Simple" : "Standard";
+  const getYieldPiecePrice = (size) => prices.find((price) =>
+    price.active
+    && price.confirmed
+    && price.price != null
+    && price.zone === 1
+    && String(price.category || "").trim().toLowerCase() === simplePriceCategory.toLowerCase()
+    && String(price.size || "").trim().replace(/\s+/g, "").toLowerCase()
+      .replace("×", "x") === String(size || "").trim().replace(/\s+/g, "").toLowerCase().replace("×", "x")
+  )?.price;
+  const getBlockYield = (record) => assessBlockYield(
+    record.block,
+    record.size,
+    record.pieces_recovered,
+  );
+  const cutExpectedYield = expectedWhiteBlockYield(
+    cutForm.block,
+    cutForm.has_sheet ? "" : cutForm.size,
+  );
+  const cutActualPieces = Number(cutForm.pieces_recovered);
+  const cutHasValidActual = Number.isInteger(cutActualPieces) && cutActualPieces > 0;
+  const cutYieldAssessment = assessBlockYield(
+    cutForm.block,
+    cutForm.has_sheet ? "" : cutForm.size,
+    cutActualPieces,
+  );
+  const cutUnitPrice = getYieldPiecePrice(cutForm.size);
+  const cutEstimatedLoss = cutUnitPrice == null
+    ? null
+    : cutYieldAssessment.missingPieces * Number(cutUnitPrice);
   const selectedRecipe = blockRecipes.find((recipe) => recipe.id === blockProduction.recipe_id);
   const availableChemicalNames = [...new Set(chemicalInventory.map((item) => item.chemical))].sort();
   const remainingChemicalBase = new Map();
@@ -277,7 +312,16 @@ export default function Production() {
       };
       if (cutForm.id) await api.put(`/production/block-cutting/${cutForm.id}`, payload);
       else await api.post("/production/block-cutting", payload);
-      toast.success(cutForm.id ? "Block cutting updated" : "Block cutting recorded");
+      const yieldAssessment = assessBlockYield(payload.block, payload.size, piecesRecovered);
+      if (yieldAssessment.lossAlert) {
+        const unitPrice = getYieldPiecePrice(payload.size);
+        const estimatedLoss = unitPrice == null
+          ? "estimated value unavailable: no confirmed Simple price"
+          : `estimated loss ${fmtMoney(yieldAssessment.missingPieces * Number(unitPrice))}`;
+        toast.error(`LOSS ALERT: ${yieldAssessment.missingPieces} pieces missing; ${estimatedLoss}.`);
+      } else {
+        toast.success(cutForm.id ? "Block cutting updated" : "Block cutting recorded");
+      }
       setCutOpen(false);
       setCutForm({ block: "", size: "", date: today(), pieces_recovered: "", has_sheet: false });
       api.get(showArchivedCuttings ? "/production/block-cutting?include_archived=true" : "/production/block-cutting")
@@ -460,7 +504,7 @@ export default function Production() {
       </Card>}
       <Card className="p-5">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div><h2 className="font-semibold text-slate-800">Block Cutting</h2><p className="text-sm text-slate-500">Record cut block type and size without changing stock quantities.</p></div>
+          <div><h2 className="font-semibold text-slate-800">Block Cutting</h2><p className="text-sm text-slate-500">Record output yield for Big Block White and review cutting losses.</p></div>
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex items-center gap-2 text-sm text-slate-600">
               <input type="checkbox" checked={showArchivedCuttings} onChange={(event) => setShowArchivedCuttings(event.target.checked)} data-testid="show-archived-block-cuttings" />
@@ -471,12 +515,21 @@ export default function Production() {
         </div>
         {blockCuttings.length === 0 ? <p className="text-sm text-slate-400">{showArchivedCuttings ? "No archived block cutting records." : "No block cutting records yet."}</p> : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[800px] text-sm">
-              <thead><tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500"><th className="px-3 py-2">Block</th><th className="px-3 py-2">Size</th><th className="px-3 py-2">Pieces recovered</th><th className="px-3 py-2">Sheet</th><th className="px-3 py-2">Block cut date</th><th className="px-3 py-2 text-right">Actions</th></tr></thead>
-              <tbody>{blockCuttings.map((record) => <tr key={record.id} className="border-b border-border/70" data-testid={`block-cutting-row-${record.id}`}>
+            <table className="w-full min-w-[1180px] text-sm">
+              <thead><tr className="border-b border-border bg-slate-50 text-left text-xs text-slate-500"><th className="px-3 py-2">Block</th><th className="px-3 py-2">Block size</th><th className="px-3 py-2 text-right">Expected pcs</th><th className="px-3 py-2 text-right">Actual pcs</th><th className="px-3 py-2 text-right">Missing pcs</th><th className="px-3 py-2 text-right">Estimated loss</th><th className="px-3 py-2">Sheet</th><th className="px-3 py-2">Block cut date</th><th className="px-3 py-2 text-right">Actions</th></tr></thead>
+              <tbody>{blockCuttings.map((record) => {
+                const yieldAssessment = getBlockYield(record);
+                const unitPrice = getYieldPiecePrice(record.size);
+                const estimatedLoss = yieldAssessment.missingPieces == null || unitPrice == null
+                  ? null
+                  : yieldAssessment.missingPieces * Number(unitPrice);
+                return <tr key={record.id} className="border-b border-border/70" data-testid={`block-cutting-row-${record.id}`}>
                 <td className="px-3 py-2 font-semibold">{record.block}{record.archived && <Badge cls="ml-2 bg-amber-50 text-amber-700 border-amber-200">Archived</Badge>}</td>
                 <td className="px-3 py-2">{record.size || (record.has_sheet ? "Sheet" : "—")}</td>
-                <td className="px-3 py-2">{record.pieces_recovered ?? "—"}</td>
+                <td className="px-3 py-2 text-right">{yieldAssessment.expectedPieces ?? "—"}</td>
+                <td className="px-3 py-2 text-right">{record.pieces_recovered ?? "—"}</td>
+                <td className="px-3 py-2 text-right">{yieldAssessment.missingPieces == null ? "—" : <>{yieldAssessment.missingPieces}{yieldAssessment.lossAlert && <Badge cls="ml-2 bg-red-50 text-red-700 border-red-200">LOSS ALERT</Badge>}</>}</td>
+                <td className="px-3 py-2 text-right">{estimatedLoss == null ? "—" : fmtMoney(estimatedLoss)}</td>
                 <td className="px-3 py-2">{record.has_sheet ? (record.sheet_mm && record.sheet_pieces_recovered
                   ? `${record.sheet_mm} mm · ${record.sheet_pieces_recovered} pcs`
                   : "Yes") : "—"}</td>
@@ -495,7 +548,7 @@ export default function Production() {
                     <button onClick={() => deleteBlockCutting(record)} className="text-slate-400 hover:text-red-600" aria-label={`Archive ${record.block} ${record.size}`} data-testid={`delete-block-cutting-${record.id}`}><Trash2 size={15} /></button>
                   </>}
                 </td>
-              </tr>)}</tbody>
+              </tr>})}</tbody>
             </table>
           </div>
         )}
@@ -546,6 +599,21 @@ export default function Production() {
             {availableSizes.map((size) => <option key={size} value={size}>{size}</option>)}
           </Select>}
           <Input label={cutForm.has_sheet ? "Pieces recovered from sheet" : "Pieces recovered from this block"} type="number" min="1" step="1" value={cutForm.pieces_recovered} onChange={(event) => setCutForm({ ...cutForm, pieces_recovered: event.target.value })} required data-testid="block-cutting-pieces-recovered" />
+          {cutExpectedYield != null && <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm" data-testid="block-yield-assessment">
+            <p className="font-semibold text-slate-800">Big Block White · {cutForm.size}</p>
+            <p className="mt-1 text-slate-600">Expected: {cutExpectedYield} pieces · Actual: {cutHasValidActual ? cutYieldAssessment.actualPieces : "Enter actual pieces"}</p>
+            {cutHasValidActual && cutYieldAssessment.lossAlert
+              ? <div className="mt-2 rounded border border-red-300 bg-red-50 p-2 text-red-800" role="alert" data-testid="block-loss-alert">
+                <p className="font-bold">LOSS ALERT</p>
+                <p>{cutYieldAssessment.missingPieces} pieces missing.</p>
+                <p>Estimated loss: {cutEstimatedLoss == null
+                  ? `${cutYieldAssessment.missingPieces} pieces; no confirmed price for this size`
+                  : fmtMoney(cutEstimatedLoss)}</p>
+              </div>
+              : cutHasValidActual && <p className="mt-2 font-semibold text-emerald-700" role="status" data-testid="block-yield-ok">
+                No production loss · {cutYieldAssessment.missingPieces} pieces missing
+              </p>}
+          </div>}
           <div className="flex justify-end gap-2"><Btn variant="outline" onClick={() => setCutOpen(false)}>Cancel</Btn><Btn disabled={cutBusy || !cutForm.block || (!cutForm.has_sheet && !cutForm.size)} onClick={saveBlockCutting} data-testid="save-block-cutting-btn">Confirm</Btn></div>
         </div>
       </Modal>
