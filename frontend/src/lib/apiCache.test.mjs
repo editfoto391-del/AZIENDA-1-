@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GET_CACHE_MS, isCacheEntryFresh, pruneExpiredCache } from "./apiCache.mjs";
+import {
+  GET_CACHE_MS,
+  INVOICE_GET_CACHE_MS,
+  getCacheDuration,
+  isCacheEntryFresh,
+  pruneExpiredCache,
+} from "./apiCache.mjs";
+
+test("invoice lists and details use a short dedicated cache window", () => {
+  assert.equal(getCacheDuration("/invoices"), INVOICE_GET_CACHE_MS);
+  assert.equal(getCacheDuration("/invoices/abc123?include=items"), INVOICE_GET_CACHE_MS);
+  assert.equal(getCacheDuration("/invoices/next-number?year=2026"), GET_CACHE_MS);
+  assert.equal(getCacheDuration("/invoices/customer-prices/customer-1"), GET_CACHE_MS);
+  assert.equal(getCacheDuration("/dashboard"), GET_CACHE_MS);
+});
 
 test("cached GET data stays fresh until the configured expiry boundary", () => {
   const cachedAt = 50_000;

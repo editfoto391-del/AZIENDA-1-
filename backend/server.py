@@ -16028,6 +16028,21 @@ async def receive_purchase_order(order_id: str, user=Depends(get_current_user)):
         "Direct purchase-order receiving is disabled. Create and confirm a GRV instead.",
     )
 
+def correct_expense_description(value):
+    corrections = {"veichle": "vehicle", "deisel": "diesel", "commision": "commission"}
+
+    def correct_word(match):
+        word = match.group(0)
+        corrected = corrections[word.lower()]
+        if word.isupper():
+            return corrected.upper()
+        if word[0].isupper():
+            return corrected.capitalize()
+        return corrected
+
+    return re.sub(r"\b(?:veichle|deisel|commision)\b", correct_word, str(value), flags=re.IGNORECASE)
+
+
 class ExpenseIn(BaseModel):
     description: str
     amount: float
@@ -16040,6 +16055,11 @@ class ExpenseIn(BaseModel):
     notes: Optional[str] = ""
     edit_reason: Optional[str] = ""
     supervisor_authorization: Optional[str] = None
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value):
+        return correct_expense_description(value)
 
 class ExpenseAuthorizationIn(BaseModel):
     password: str
@@ -17245,24 +17265,30 @@ async def cost_ledger(since=None, until=None):
 
 def cost_ledger_from_records(expenses, vehicles, vehicle_records, since=None, until=None):
     rows = []
-    for x in expenses:
+    for x in unique_financial_records(expenses):
         source_key = x.get("source_key", "")
         source = (
             "spare_part" if source_key.startswith("sparepart:")
             else "monthly_purchase" if source_key.startswith("monthly_business_purchase:")
             else "expense"
         )
-        rows.append({"id": x["id"], "date": x.get("date"), "description": x.get("description"), "category": x.get("category", "General"),
+        record_date = financial_record_date(x)
+        rows.append({"id": x["id"], "date": record_date.isoformat() if record_date else x.get("date"), "description": x.get("description"), "category": x.get("category", "General"),
                      "amount": x.get("amount", 0), "vehicle_id": x.get("vehicle_id", ""), "source": source})
     vnames = {v["id"]: v["name"] for v in vehicles}
-    for x in vehicle_records:
+    for x in unique_financial_records(vehicle_records):
         if x.get("status") in VEHICLE_COST_DONE and (x.get("amount") or 0) > 0:
-            rows.append({"id": x["id"], "date": x.get("date"), "description": f"{vnames.get(x.get('vehicle_id'), '')}: {x.get('description', '')}",
+            record_date = financial_record_date(x)
+            rows.append({"id": x["id"], "date": record_date.isoformat() if record_date else x.get("date"), "description": f"{vnames.get(x.get('vehicle_id'), '')}: {x.get('description', '')}",
                          "category": f"Vehicle {x.get('type', 'expense').title()}", "amount": x.get("amount", 0),
                          "vehicle_id": x.get("vehicle_id"), "source": "fleet"})
     for r in rows:
         r["vehicle_name"] = vnames.get(r.get("vehicle_id"), "")
-    return [r for r in rows if (not since or (r["date"] or "") >= since) and (not until or (r["date"] or "") <= until)]
+    return [
+        r for r in rows
+        if (not since or (r["date"] or "")[:10] >= str(since)[:10])
+        and (not until or (r["date"] or "")[:10] <= str(until)[:10])
+    ]
 
 def unique_financial_records(records):
     seen = set()
@@ -17775,7 +17801,8 @@ async def profit_report(user=Depends(get_current_user)):
         "total_expenses": dsum(
             row["amount"] for row in cost_ledger_from_records(expenses, vehicles, vehicle_records)
         ),
-        "week_start": week, "month_start": month, "timezone": "Africa/Johannesburg",
+        "week_start": week, "week_end": t, "month_start": month, "month_end": t,
+        "timezone": "Africa/Johannesburg",
     }
 
 @api.get("/reports/costs")

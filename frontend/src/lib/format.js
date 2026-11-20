@@ -25,6 +25,20 @@ export function fmtDateTime(s) {
   return d.toLocaleString("en-ZA", { timeZone: TZ, day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
+export function fmtDataUpdateDateTime(s) {
+  if (!s) return "-";
+  const d = new Date(s);
+  if (isNaN(d)) return s;
+  return d.toLocaleString("en-ZA", {
+    timeZone: TZ,
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function nowLocalInput() {
   const p = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date());
   const g = (t) => p.find((x) => x.type === t).value;

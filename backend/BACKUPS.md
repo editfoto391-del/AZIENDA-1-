@@ -2,6 +2,8 @@
 
 The Backups tab in Settings is available to the primary owner. Automated snapshots are written to a private S3-compatible bucket (Cloudflare R2 is the recommended option), not to the live application database.
 
+Production backups remain disabled until all required S3-compatible settings are configured and the MongoDB dump/restore runtime tools are installed. Until then, startup does not start the backup scheduler and manual/restore/status APIs report the missing configuration or unavailable tools.
+
 ## Retention and restore behavior
 
 - A daily snapshot runs at 02:00 in `Africa/Johannesburg` and is retained for 30 days.
@@ -18,16 +20,20 @@ The Backups tab in Settings is available to the primary owner. Automated snapsho
 
 | Variable | Value |
 |---|---|
-| `BACKUP_S3_BUCKET` | The bucket name |
-| `BACKUP_S3_ENDPOINT_URL` | `https://<account-id>.r2.cloudflarestorage.com` |
-| `BACKUP_S3_ACCESS_KEY_ID` | The access key from the R2 token |
-| `BACKUP_S3_SECRET_ACCESS_KEY` | The secret key from the R2 token |
-| `BACKUP_S3_REGION` | `auto` (default) |
+| `BACKUP_S3_BUCKET` | Required bucket name |
+| `BACKUP_S3_ENDPOINT_URL` | Required S3-compatible endpoint, such as `https://<account-id>.r2.cloudflarestorage.com` |
+| `BACKUP_S3_ACCESS_KEY_ID` | Required credential ID for a token restricted to this bucket |
+| `BACKUP_S3_SECRET_ACCESS_KEY` | Required matching secret credential |
+| `BACKUP_S3_REGION` | Optional region; use `auto` for R2 (default) |
 | `BACKUP_S3_PREFIX` | Optional object prefix; defaults to `erp-backups` |
 
-The backend runtime must include MongoDB Database Tools (`mongodump` and `mongorestore`). Restart the backend after configuring the variables. Settings > Backups shows whether storage and tools are ready.
+The backend deployment/runtime must include MongoDB Database Tools and expose both `mongodump` and `mongorestore` on `PATH`. Store credentials only as protected backend environment variables; never in the frontend, source, chat, or public configuration.
 
-Keep the bucket private and enable the provider's at-rest encryption. The backup archive includes company records and account data, so only the primary owner can create, list, or restore snapshots.
+Keep the bucket private and restrict the API token to the smallest required bucket scope. The token should permit object read, write, and delete for backup operations; the bucket should block public access and enable provider-managed at-rest encryption. The backup archive includes company records and account data, so only the primary owner can create, list, verify, or restore snapshots.
+
+The adapter does not add an application-level or S3 encryption header. Existing provider-at-rest encryption is therefore required; no client-side encryption key or per-upload encryption header is configured by the current implementation.
+
+Restart the backend after configuring the variables and installing the MongoDB tools. Settings > Backups shows whether storage and tools are ready. In the current infrastructure, backups remain inactive until the required configuration and tools are present.
 
 ## Restoring a snapshot
 

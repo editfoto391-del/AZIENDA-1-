@@ -7,7 +7,8 @@ import {
   Moon, Smartphone, Sun,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
-import { api, apiError } from "@/lib/api";
+import { api, apiError, getLastDataUpdatedAt } from "@/lib/api";
+import { fmtDataUpdateDateTime } from "@/lib/format";
 import { preloadPage } from "@/lib/pageLoaders";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { companyBrandName, companyProfileName, dedicatedCompanyDomain } from "@/lib/company";
@@ -172,12 +173,21 @@ export default function Layout() {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [dismissingNotificationIds, setDismissingNotificationIds] = useState([]);
   const [dismissingAllNotifications, setDismissingAllNotifications] = useState(false);
+  const [lastDataUpdatedAt, setLastDataUpdatedAt] = useState(getLastDataUpdatedAt());
   const mainScrollRef = useRef(null);
   const nav = useNavigate();
   const dedicatedDomain = dedicatedCompanyDomain();
   const canTogglePhoneView = user?.is_primary_owner
     && user?.is_owner
     && !user?.is_worker;
+
+  useEffect(() => {
+    const updateLastDataTimestamp = (event) => {
+      setLastDataUpdatedAt(event.detail?.updatedAt || getLastDataUpdatedAt());
+    };
+    window.addEventListener("erp:data-loaded", updateLastDataTimestamp);
+    return () => window.removeEventListener("erp:data-loaded", updateLastDataTimestamp);
+  }, []);
 
   const findHorizontalScrollRegion = (target) => {
     if (!(target instanceof Element)) return null;
@@ -464,6 +474,9 @@ export default function Layout() {
           onWheelCapture={handleHorizontalWheel}
           className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-y-contain p-3 sm:p-5 lg:p-6 2xl:p-8 w-full max-w-none print:h-auto print:flex-none print:overflow-visible"
         >
+          <p className="mb-3 text-right text-[11px] text-slate-400" data-testid="last-data-update" aria-live="polite">
+            Last data refresh: {lastDataUpdatedAt ? fmtDataUpdateDateTime(lastDataUpdatedAt) : "Waiting for data"}
+          </p>
           <Suspense fallback={<div className="text-slate-400">Loading...</div>}>
             <AnimatedOutlet scrollContainerRef={mainScrollRef} />
           </Suspense>

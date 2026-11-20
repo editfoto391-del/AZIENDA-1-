@@ -50,8 +50,16 @@ def test_snapshot_keys_are_categorized_and_validated():
     assert snapshot_kind_from_key("daily/2026-13-29.zip") is None
 
 
-def test_monthly_retention_keeps_the_current_month_and_previous_twelve():
-    assert monthly_retention_cutoff(date(2026, 10, 29)) == date(2025, 10, 1)
+@pytest.mark.parametrize(
+    ("today", "expected"),
+    [
+        (date(2026, 10, 29), date(2025, 10, 1)),
+        (date(2026, 1, 15), date(2025, 1, 1)),
+        (date(2024, 3, 1), date(2023, 3, 1)),
+    ],
+)
+def test_monthly_retention_keeps_the_current_month_and_previous_twelve(today, expected):
+    assert monthly_retention_cutoff(today) == expected
 
 
 def test_mongo_tool_config_keeps_full_uri_out_of_process_arguments(tmp_path):

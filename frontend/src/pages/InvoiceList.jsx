@@ -441,7 +441,7 @@ export default function InvoiceList({ express = false }) {
     setPdfBusyId(invoiceRow.id);
     try {
       const [invoice, settings, printTemplate] = await Promise.all([
-        api.getUncached(`/invoices/${invoiceRow.id}`),
+        api.get(`/invoices/${invoiceRow.id}`),
         api.get("/settings"),
         api.getUncached("/print-templates"),
       ]);
@@ -502,7 +502,7 @@ export default function InvoiceList({ express = false }) {
       ]);
       const results = await Promise.all(printSel.map(async (invoiceId) => {
         try {
-          const invoice = await api.getUncached(`/invoices/${invoiceId}`);
+          const invoice = await api.get(`/invoices/${invoiceId}`);
           let customer = {
             phone: invoice.customer_phone || "",
             city: invoice.customer_city || "",

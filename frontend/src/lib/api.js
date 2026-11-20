@@ -1,5 +1,5 @@
 import axios from "axios";
-import { GET_CACHE_MS, isCacheEntryFresh, pruneExpiredCache } from "./apiCache.mjs";
+import { getCacheDuration, isCacheEntryFresh, pruneExpiredCache } from "./apiCache.mjs";
 import { activeAuthToken } from "./activeAuthToken.mjs";
 
 export const API_BASE_URL = import.meta.env.DEV
@@ -11,6 +11,18 @@ const pendingGets = new Map();
 const cachedGets = new Map();
 let supervisorPromptQueue = Promise.resolve();
 let getCacheGeneration = 0;
+let lastDataUpdatedAt = null;
+
+function recordDataUpdated() {
+  lastDataUpdatedAt = new Date().toISOString();
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("erp:data-loaded", { detail: { updatedAt: lastDataUpdatedAt } }));
+  }
+}
+
+export function getLastDataUpdatedAt() {
+  return lastDataUpdatedAt;
+}
 
 function activeToken() {
   return activeAuthToken(localStorage, sessionStorage);
@@ -99,6 +111,7 @@ export function invalidateGetCache() {
   cachedGets.clear();
   pendingGets.clear();
   dispatchDataRefresh();
+  recordDataUpdated();
 }
 
 client.interceptors.request.use((cfg) => {
@@ -166,11 +179,11 @@ export const api = {
     const requestGeneration = getCacheGeneration;
     let request;
     request = client.get(u, { params }).then((r) => {
-      if (requestGeneration === getCacheGeneration) {
-        const cachedAt = Date.now();
-        pruneExpiredCache(cachedGets, cachedAt);
-        cachedGets.set(key, { data: r.data, expiresAt: cachedAt + GET_CACHE_MS });
-      }
+      if (requestGeneration !== getCacheGeneration) return api.get(u, params);
+      const cachedAt = Date.now();
+      pruneExpiredCache(cachedGets, cachedAt);
+      cachedGets.set(key, { data: r.data, expiresAt: cachedAt + getCacheDuration(u) });
+      recordDataUpdated();
       return r.data;
     }).finally(() => {
       if (pendingGets.get(key) === request) pendingGets.delete(key);
@@ -178,7 +191,10 @@ export const api = {
     pendingGets.set(key, request);
     return request;
   },
-  getUncached: (u, params, config = {}) => client.get(u, { ...config, params }).then((r) => r.data),
+  getUncached: (u, params, config = {}) => client.get(u, { ...config, params }).then((r) => {
+    recordDataUpdated();
+    return r.data;
+  }),
   getBlob: (u) => client.get(u, { responseType: "blob" }).then((r) => r.data),
   post: (u, d) => client.post(u, d).then((r) => { invalidateGetCache(); return r.data; }),
   logout: () => {

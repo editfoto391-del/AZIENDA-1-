@@ -66,7 +66,7 @@ def snapshot_key(kind, snapshot_date):
 
 
 def monthly_retention_cutoff(today):
-    month_index = today.year * 12 + today.month - MONTHLY_RETENTION_MONTHS + 1
+    month_index = today.year * 12 + today.month - 1 - MONTHLY_RETENTION_MONTHS
     year, month_offset = divmod(month_index, 12)
     return date(year, month_offset + 1, 1)
 

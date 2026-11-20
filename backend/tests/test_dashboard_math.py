@@ -7,6 +7,7 @@ import server
 from server import (
     apply_stock_movements,
     dashboard_financial_totals,
+    cost_ledger_from_records,
     invoice_outstanding_amount,
     profit_from_records,
 )
@@ -215,6 +216,33 @@ def test_dashboard_profit_filters_timestamp_records_by_local_company_date():
     assert result["revenue"] == 100
     assert result["expenses"] == 25
     assert result["profit"] == 75
+
+
+def test_cost_ledger_matches_profit_period_deduplication_and_local_dates():
+    expenses = [
+        {"id": "expense-1", "date": "2026-10-15", "amount": 100},
+        {"id": "expense-1", "date": "2026-10-15", "amount": 100},
+        {"id": "expense-next-month", "date": "2026-10-31T22:30:00+00:00", "amount": 2800},
+    ]
+    vehicle_records = [
+        {"id": "fleet-1", "date": "2026-10-20", "status": "Done", "amount": 40},
+        {"id": "fleet-1", "date": "2026-10-20", "status": "Done", "amount": 40},
+    ]
+    ledger_total = sum(
+        row["amount"]
+        for row in cost_ledger_from_records(expenses, [], vehicle_records, "2026-10-01", "2026-10-31")
+    )
+    profit = profit_from_records(
+        "2026-10-01",
+        "2026-10-31",
+        payments=[],
+        expenses=expenses,
+        vehicle_records=vehicle_records,
+        buyings=[],
+        grvs=[],
+    )
+
+    assert ledger_total == profit["expenses"] == 140
 
 
 def test_salary_cost_for_period_prorates_monthly_fixed_pay(monkeypatch):

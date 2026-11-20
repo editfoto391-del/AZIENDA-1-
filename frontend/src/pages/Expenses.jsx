@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { api, apiError } from "@/lib/api";
 import { fmtMoney, fmtDate, fmtDateTime, today } from "@/lib/format";
+import { correctCommonExpenseTypos, filterExpenseRows, sumExpenseRows } from "@/lib/expensesMath.mjs";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Btn, Input, Select, Badge, Modal, PageHeader, Empty } from "@/components/common";
 import { Banknote, Eye, Plus, TrendingUp, TrendingDown, Wallet, Trash2, Pencil } from "lucide-react";
@@ -49,6 +50,7 @@ export default function Expenses() {
   const [registeredCities, setRegisteredCities] = useState([]);
   const [report, setReport] = useState(null);
   const [costs, setCosts] = useState(null);
+  const [costsError, setCostsError] = useState("");
   const [vehicles, setVehicles] = useState([]);
   const [modal, setModal] = useState(null);
   const [viewExpense, setViewExpense] = useState(null);
@@ -60,8 +62,10 @@ export default function Expenses() {
   const [busy, setBusy] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
   const [supervisorPassword, setSupervisorPassword] = useState("");
+  const filterCategories = [...new Set([...categories, ...(costs?.rows || []).map((row) => row.category).filter(Boolean)])];
 
   const load = () => {
+    setCostsError("");
     api.get("/expenses", isSuperIqFoam ? { include_voided: true } : undefined)
       .then((expenses) => {
         setList(isSuperIqFoam ? expenses.filter((expense) => !expense.voided) : expenses);
@@ -75,17 +79,22 @@ export default function Expenses() {
         }
       })
       .catch((e) => { toast.error(apiError(e)); setList([]); });
-    api.get("/reports/profit").then(setReport); api.get("/reports/costs").then(setCosts);
+    api.get("/reports/profit").then(setReport).catch((e) => toast.error(apiError(e)));
+    api.get("/reports/costs")
+      .then(setCosts)
+      .catch((e) => {
+        setCostsError(apiError(e));
+        toast.error(`Could not load fleet and cost totals: ${apiError(e)}`);
+      });
   };
   useEffect(() => { load(); api.get("/vehicles").then(setVehicles); }, []);
 
-  const filtered = useMemo(() => (list || []).filter((e) => (
-    (!cat || e.category === cat)
-    && (!destinationCity || e.destination_city?.trim().toLocaleLowerCase() === destinationCity.toLocaleLowerCase())
-    && (!month || (e.date || "").startsWith(month))
-    && (!dateFilter || (e.date || "").startsWith(dateFilter))
-    && (!q || `${e.description} ${e.reference || ""} ${e.destination_city || ""}`.toLowerCase().includes(q.toLowerCase()))
-  )), [list, cat, destinationCity, month, dateFilter, q]);
+  const filtered = useMemo(() => filterExpenseRows(
+    list,
+    costs?.rows,
+    { category: cat, destinationCity, month, date: dateFilter, search: q },
+    today(),
+  ), [list, costs, cat, destinationCity, month, dateFilter, q]);
   const dieselExpensesByCity = useMemo(() => {
     const groups = new Map();
     (list || []).forEach((expense) => {
@@ -99,7 +108,16 @@ export default function Expenses() {
     });
     return [...groups.values()].sort((a, b) => a.city.localeCompare(b.city));
   }, [list]);
-  const filteredTotal = filtered.reduce((s, e) => s + (e.amount || 0), 0);
+  const filteredTotal = sumExpenseRows(filtered);
+  const currentDate = today();
+  const filteredPeriod = dateFilter
+    ? fmtDate(dateFilter)
+    : month
+      ? `${fmtDate(`${month}-01`)} – ${fmtDate(month === currentDate.slice(0, 7)
+        ? currentDate
+        : `${month}-${String(new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate()).padStart(2, "0")}`)}`
+      : "all dates";
+  const descriptionHasUnverifiedMall = /\bchinba\s+mall\b/i.test(modal?.description || "");
 
   const save = async () => {
     if (!modal.description.trim()) return toast.error("Description required");
@@ -192,12 +210,12 @@ export default function Expenses() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Stat label="Expenses Today" value={fmtMoney(report?.today?.expenses)} icon={TrendingDown} tone="bg-orange-50 text-orange-600" testid="stat-today-expenses" />
         <Stat label="Expenses This Week" value={fmtMoney(report?.week.expenses)} icon={Wallet} tone="bg-orange-50 text-orange-600" testid="stat-week-expenses" />
-        <Stat label="Expenses This Month" value={fmtMoney(report?.month.expenses)} icon={TrendingUp} tone="bg-orange-50 text-orange-600" testid="stat-month-expenses" />
+        <Stat label={`Expenses This Month (${fmtDate(report?.month_start)} – ${fmtDate(report?.month_end)})`} value={fmtMoney(report?.month.expenses)} icon={TrendingUp} tone="bg-orange-50 text-orange-600" testid="stat-month-expenses" />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <ProfitPanel title={`This week (from ${fmtDate(report?.week_start)})`} p={report?.week} testid="profit-week" />
-        <ProfitPanel title={`This month (from ${fmtDate(report?.month_start)})`} p={report?.month} testid="profit-month" />
+        <ProfitPanel title={`This week (${fmtDate(report?.week_start)} – ${fmtDate(report?.week_end)})`} p={report?.week} testid="profit-week" />
+        <ProfitPanel title={`This month (${fmtDate(report?.month_start)} – ${fmtDate(report?.month_end)})`} p={report?.month} testid="profit-month" />
       </div>
       <p className="text-xs text-slate-400 -mt-3">Estimated result = payments received − recorded expenses − Buyings − calculated gross salaries − accepted GRV costs. Expenses include completed fleet costs; salary is calculated from payroll records.</p>
 
@@ -212,12 +230,16 @@ export default function Expenses() {
 
       <Card className="overflow-hidden">
         <div className="flex flex-wrap items-end gap-3 p-4 border-b border-border">
-          <div className="w-44"><Select label="Category" value={cat} onChange={(e) => setCat(e.target.value)} data-testid="expense-filter-category"><option value="">All</option>{categories.map((c) => <option key={c}>{c}</option>)}</Select></div>
+          <div className="w-44"><Select label="Category" value={cat} onChange={(e) => setCat(e.target.value)} data-testid="expense-filter-category"><option value="">All</option>{filterCategories.map((c) => <option key={c}>{c}</option>)}</Select></div>
           {isSuperIqFoam && <div className="w-44"><Select label="Destination city" value={destinationCity} onChange={(e) => setDestinationCity(e.target.value)} data-testid="expense-filter-city"><option value="">All cities</option>{registeredCities.map((city) => <option key={city.toLocaleLowerCase()} value={city}>{city}</option>)}</Select></div>}
           <div className="w-44"><Input label="Date" type="date" value={dateFilter} onChange={(e) => { setDateFilter(e.target.value); if (e.target.value) setMonth(""); }} data-testid="expense-filter-date" /></div>
           <div className="w-44"><Input label="Month" type="month" value={month} onChange={(e) => { setMonth(e.target.value); if (e.target.value) setDateFilter(""); }} data-testid="expense-filter-month" /></div>
           <div className="w-56"><Input label="Search" placeholder="Description or reference" value={q} onChange={(e) => setQ(e.target.value)} data-testid="expense-search-input" /></div>
-          <div className="ml-auto text-sm text-slate-500">Filtered total: <span className="font-mono font-bold text-slate-800" data-testid="expense-filtered-total">{fmtMoney(filteredTotal)}</span></div>
+          <div className="ml-auto text-right text-sm text-slate-500">
+            <div>Filtered total (expenses + completed fleet costs): <span className="font-mono font-bold text-slate-800" data-testid="expense-filtered-total">{costsError ? "Unavailable" : costs ? fmtMoney(filteredTotal) : "Loading..."}</span></div>
+            {costsError && <p className="text-xs text-red-600" role="alert">Could not load the complete cost ledger.</p>}
+            <div className="text-[11px]">Period: {filteredPeriod}</div>
+          </div>
         </div>
         {list === null ? <p className="p-6 text-sm text-slate-400">Loading...</p> : filtered.length === 0 ? <Empty icon={Banknote} title="No expenses recorded" hint="Add your first daily expense." /> : (
           <div className="overflow-x-auto">
@@ -228,13 +250,13 @@ export default function Expenses() {
               <tbody>{filtered.map((e) => (
                 <tr key={e.id} className="border-b border-border/60 hover:bg-slate-50" data-testid={`expense-row-${e.id}`}>
                   <td className="px-4 py-3 text-slate-500">{fmtDate(e.date)}</td>
-                  <td className="px-4 font-semibold text-slate-800">{e.description}{e.source_key && <span className="ml-2 text-[10px] text-blue-600 font-semibold">{e.source_key.startsWith("monthly_business_purchase:") ? "MONTHLY PURCHASE" : "FLEET PART"}</span>}</td>
+                  <td className="px-4 font-semibold text-slate-800">{e.description}{(e.source_key || e.source_label) && <span className="ml-2 text-[10px] text-blue-600 font-semibold">{e.source_label || (e.source_key.startsWith("monthly_business_purchase:") ? "MONTHLY PURCHASE" : "FLEET PART")}</span>}</td>
                   <td className="px-4"><Badge>{e.category}</Badge></td>
                   {isSuperIqFoam && <td className="px-4 text-slate-600">{e.destination_city || "—"}</td>}
                   <td className="px-4 text-right font-mono text-slate-800">{fmtMoney(e.amount)}</td>
                   <td className="px-4 text-right whitespace-nowrap">
                     <button onClick={() => setViewExpense(e)} className="text-slate-400 hover:text-primary mr-3" title="View expense" aria-label={`View ${e.description}`} data-testid={`view-expense-${e.id}`}><Eye size={15} /></button>
-                    {!e.source_key && <>
+                    {!e.source_key && e.source !== "vehicle_record" && <>
                       <button onClick={() => setModal({ ...e })} className="text-slate-400 hover:text-primary mr-3" data-testid={`edit-expense-${e.id}`}><Pencil size={15} /></button>
                       <button onClick={() => remove(e)} className="text-slate-400 hover:text-red-600" data-testid={`delete-expense-${e.id}`}><Trash2 size={15} /></button>
                     </>}
@@ -261,6 +283,7 @@ export default function Expenses() {
             ["Destination city", viewExpense.destination_city],
             ["Notes", viewExpense.notes],
             ["Source", viewExpense.source_key?.startsWith("monthly_business_purchase:") ? "Automatic monthly purchase" : viewExpense.source_key ? "Fleet part purchase" : ""],
+            ["Record type", viewExpense.source_label || ""],
             ["Source Reference", viewExpense.source_key],
             ["Created", viewExpense.created_at ? fmtDateTime(viewExpense.created_at) : ""],
             ["Voided", viewExpense.voided ? "Yes" : ""],
@@ -274,7 +297,16 @@ export default function Expenses() {
 
       <Modal open={!!modal} onClose={() => setModal(null)} title={modal?.id ? "Edit Expense" : "Add Expense"}>
         {modal && <div className="space-y-4">
-          <Input label="Description *" value={modal.description} onChange={(e) => setModal({ ...modal, description: e.target.value })} data-testid="expense-description-input" />
+          <div>
+            <Input
+              label="Description *"
+              value={modal.description}
+              onChange={(e) => setModal({ ...modal, description: e.target.value })}
+              onBlur={() => setModal((current) => current && ({ ...current, description: correctCommonExpenseTypos(current.description) }))}
+              data-testid="expense-description-input"
+            />
+            {descriptionHasUnverifiedMall && <p className="mt-1 text-xs text-amber-700">“Chinba Mall” could refer to “China Mall”, but the official name is unverified. Confirm it before saving; it will not be changed automatically.</p>}
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <Input label="Amount (R) *" type="number" step="0.01" value={modal.amount} onChange={(e) => setModal({ ...modal, amount: e.target.value })} data-testid="expense-amount-input" />
             <Input label="Date" type="date" value={modal.date} onChange={(e) => setModal({ ...modal, date: e.target.value })} data-testid="expense-date-input" />

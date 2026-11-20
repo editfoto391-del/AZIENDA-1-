@@ -42,6 +42,14 @@ def test_global_owner_can_create_expense_without_supervisor_password(monkeypatch
     assert created == [expense]
 
 
+def test_new_expense_description_corrects_known_typos_but_preserves_unverified_names():
+    expense = server.ExpenseIn(
+        description="VEICHLE DEISEL COMMISION at Chinba Mall",
+        amount=100,
+    )
+    assert expense.description == "VEHICLE DIESEL COMMISSION at Chinba Mall"
+
+
 def test_supervisor_exempt_authorizations_keep_required_audit_identity():
     global_owner = {
         "id": "global-owner",
