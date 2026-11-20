@@ -21,7 +21,9 @@ const Toaster = ({
             "group-[.toast]:bg-muted group-[.toast]:text-muted-foreground",
         },
       }}
-      {...props} />
+      {...props}
+      closeButton
+    />
   );
 }
 

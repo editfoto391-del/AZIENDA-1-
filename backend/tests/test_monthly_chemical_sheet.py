@@ -96,6 +96,59 @@ def test_production_view_uses_monthly_managed_block_counts_for_same_date():
     assert rows[1]["id"] == "older-production"
 
 
+def test_production_view_syncs_legacy_weekly_management_counts_without_inventing_a_day():
+    rows = server.merge_monthly_sheet_production(
+        [
+            {"id": "legacy-production-a", "date": "2026-11-03", "blocks": [{"block": "White", "quantity": 2}]},
+            {"id": "legacy-production-b", "date": "2026-11-06", "blocks": [{"block": "Blue", "quantity": 1}]},
+        ],
+        [{
+            "month": "2026-11",
+            "weeks": [
+                {},
+                {
+                    "big_block": {"quantity": 6, "weight_kg": 3000},
+                    "medium_block": {"quantity": 3, "weight_kg": 1200},
+                },
+            ],
+        }],
+    )
+
+    assert rows == [{
+        "id": "monthly-sheet-production:2026-11:week:1",
+        "date": "2026-11-08",
+        "period_start": "2026-11-02",
+        "period_end": "2026-11-08",
+        "week_number": 2,
+        "blocks": [
+            {"block": "BIG BLOCK 2750", "quantity": 6},
+            {"block": "MEDIUM BLOCK", "quantity": 3},
+        ],
+        "total_blocks": 9,
+        "notes": "",
+        "source": "monthly_chemical_sheet_weekly",
+    }]
+
+
+def test_daily_management_entries_replace_legacy_weekly_totals_in_production():
+    rows = server.merge_monthly_sheet_production(
+        [{"id": "legacy-production", "date": "2026-11-03", "blocks": [{"block": "White", "quantity": 99}]}],
+        [{
+            "month": "2026-11",
+            "weeks": [{}, {"big_block": {"quantity": 6, "weight_kg": 3000}}],
+            "production_days": [{
+                "date": "2026-11-03",
+                "week_index": 1,
+                "big_block": {"quantity": 2, "weight_kg": 1000},
+            }],
+        }],
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["source"] == "monthly_chemical_sheet"
+    assert rows[0]["blocks"] == [{"block": "BIG BLOCK 2750", "quantity": 2}]
+
+
 def test_daily_production_endpoint_returns_monthly_management_blocks(monkeypatch):
     async def listall(collection, filters=None, sort=None):
         if collection == "production_daily":
@@ -128,6 +181,32 @@ def test_daily_production_endpoint_returns_monthly_management_blocks(monkeypatch
     assert result["rows"][0]["total_blocks"] == 9
     assert result["week"]["total_blocks"] == 9
     assert result["month"]["total_blocks"] == 9
+
+
+def test_daily_production_endpoint_includes_legacy_weekly_totals_in_period_summaries(monkeypatch):
+    async def listall(collection, filters=None, sort=None):
+        if collection == "production_daily":
+            return []
+        if collection == "monthly_chemical_sheets":
+            return [{
+                "month": "2026-11",
+                "weeks": [{}, {}, {}, {"big_block": {"quantity": 6, "weight_kg": 3000}}],
+            }]
+        raise AssertionError(f"Unexpected collection: {collection}")
+
+    monkeypatch.setattr(server, "listall", listall)
+    monkeypatch.setattr(server, "period_starts", lambda: ("2026-11-16", "2026-11-01"))
+    monkeypatch.setattr(server, "today_str", lambda: "2026-11-20")
+
+    result = asyncio.run(server.get_daily_prod(
+        page=1,
+        page_size=50,
+        user={"_active_company_id": server.MANUFACTURING_COMPANY_ID},
+    ))
+
+    assert result["today"]["total_blocks"] == 0
+    assert result["week"]["total_blocks"] == 6
+    assert result["month"]["total_blocks"] == 6
 
 
 def test_blank_monthly_sheet_day_does_not_hide_legacy_production():

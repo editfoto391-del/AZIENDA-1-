@@ -532,3 +532,73 @@ def test_profile_admin_password_creates_a_real_admin_login(monkeypatch):
         assert admin_counts.documents[0]["count"] == 1
 
     asyncio.run(verify())
+
+
+def test_global_owner_password_change_verifies_current_password_and_revokes_other_sessions(monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAIL", "owner@example.com")
+    monkeypatch.setattr(server, "hash_pw", lambda password: f"hashed:{password}")
+    monkeypatch.setattr(server, "verify_pw", lambda password, hashed: hashed == f"hashed:{password}")
+    users = Collection([{
+        "id": "global-owner",
+        "email": "owner@example.com",
+        "role": "owner",
+        "password_hash": "hashed:old-password",
+    }])
+    sessions = Collection([
+        {"id": "current-session", "user_id": "global-owner"},
+        {"id": "other-session", "user_id": "global-owner"},
+    ])
+    monkeypatch.setattr(server, "base_db", Database(users=users, user_sessions=sessions))
+
+    async def audit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server, "log_audit", audit)
+    user = {
+        "id": "global-owner",
+        "email": "owner@example.com",
+        "role": "owner",
+        "_active_company_id": server.DEFAULT_COMPANY_ID,
+        "_session_id": "current-session",
+    }
+
+    async def verify():
+        with pytest.raises(HTTPException) as error:
+            await server.update_global_owner_password(
+                server.GlobalOwnerPasswordIn(
+                    current_password="incorrect-password",
+                    new_password="replacement-password",
+                ),
+                user,
+            )
+        assert error.value.status_code == 403
+        assert users.documents[0]["password_hash"] == "hashed:old-password"
+
+        result = await server.update_global_owner_password(
+            server.GlobalOwnerPasswordIn(
+                current_password="old-password",
+                new_password="replacement-password",
+            ),
+            user,
+        )
+
+        assert result["updated"] is True
+        assert users.documents[0]["password_hash"] == "hashed:replacement-password"
+        assert [session["id"] for session in sessions.documents] == ["current-session"]
+
+    asyncio.run(verify())
+
+
+def test_global_owner_password_change_rejects_non_owner(monkeypatch):
+    monkeypatch.setattr(server, "base_db", Database(users=Collection()))
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(server.update_global_owner_password(
+            server.GlobalOwnerPasswordIn(
+                current_password="current-password",
+                new_password="replacement-password",
+            ),
+            {"id": "other-user", "role": "admin", "_active_company_id": server.DEFAULT_COMPANY_ID},
+        ))
+
+    assert error.value.status_code == 403

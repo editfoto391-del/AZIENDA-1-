@@ -505,13 +505,15 @@ export default function Production() {
         {!data ? <p className="p-6 text-sm text-slate-400">Loading...</p> : data.rows.length === 0 ? <Empty icon={Factory} title="No production recorded yet" /> : (
           <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border"><th className="px-4 py-3">Date</th><th className="px-4">Blocks</th><th className="px-4 text-right">Total</th><th className="px-4">Notes</th><th className="px-4" /></tr></thead>
+            <thead><tr className="text-left text-xs text-slate-400 bg-slate-50 border-b border-border"><th className="px-4 py-3">Date / period</th><th className="px-4">Blocks</th><th className="px-4 text-right">Total</th><th className="px-4">Notes</th><th className="px-4" /></tr></thead>
             <tbody>{data.rows.map((r) => (
               <tr key={r.id} className="border-b border-border/60" data-testid={`prod-row-${r.id}`}>
-                <td className="px-4 py-3">{fmtDate(r.date)}{r.archived && <Badge cls="ml-2 bg-amber-50 text-amber-700 border-amber-200">Archived</Badge>}</td>
+                <td className="px-4 py-3">{r.period_start
+                  ? `Week ${r.week_number}: ${fmtDate(r.period_start)} - ${fmtDate(r.period_end)}`
+                  : fmtDate(r.date)}{r.archived && <Badge cls="ml-2 bg-amber-50 text-amber-700 border-amber-200">Archived</Badge>}</td>
                 <td className="px-4 font-mono">{(r.blocks || []).map((item) => `${item.block}: ${item.quantity}`).join(" · ") || "—"}</td>
                 <td className="px-4 text-right font-mono font-bold">{r.total_blocks ?? ((r.white_blocks || 0) + (r.blue_blocks || 0))}</td><td className="px-4 text-slate-500">{r.notes}</td>
-                <td className="px-4 text-right">{r.source === "monthly_chemical_sheet" ? <span className="text-xs text-slate-400">From Production Management</span> : r.archived ? <button onClick={() => restoreDaily(r)} className="text-emerald-700" aria-label="Restore production record"><RotateCcw size={15} /></button> : <button onClick={() => del(r)} className="text-slate-400 hover:text-red-600" aria-label="Archive production record"><Trash2 size={15} /></button>}</td>
+                <td className="px-4 text-right">{["monthly_chemical_sheet", "monthly_chemical_sheet_weekly"].includes(r.source) ? <span className="text-xs text-slate-400">From Production Management</span> : r.archived ? <button onClick={() => restoreDaily(r)} className="text-emerald-700" aria-label="Restore production record"><RotateCcw size={15} /></button> : <button onClick={() => del(r)} className="text-slate-400 hover:text-red-600" aria-label="Archive production record"><Trash2 size={15} /></button>}</td>
               </tr>))}</tbody>
           </table>
           </div>)}

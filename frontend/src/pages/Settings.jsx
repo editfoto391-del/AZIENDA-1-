@@ -209,6 +209,8 @@ function BackupSummary({ status, info }) {
 export default function Settings() {
   const { user } = useAuth();
   const canManageCompanySettings = Boolean(user?.is_owner || user?.is_company_owner);
+  const isGlobalOwner = Boolean(user?.is_owner && user?.is_primary_owner && !user?.is_worker);
+  const showGlobalOwnerPassword = user?.company_id === "superiqfoam" && isGlobalOwner;
   const unifiedPriceList = usesUnifiedPriceList(user?.company_id);
   const freeformInvoiceItems = usesFreeformInvoiceItems(user?.company_id);
   const [tab, setTab] = useState("company");
@@ -229,6 +231,10 @@ export default function Settings() {
   const [supervisorConfigured, setSupervisorConfigured] = useState(false);
   const [supervisorStatusLoading, setSupervisorStatusLoading] = useState(false);
   const [supervisorSaving, setSupervisorSaving] = useState(false);
+  const [globalOwnerCurrentPassword, setGlobalOwnerCurrentPassword] = useState("");
+  const [globalOwnerNewPassword, setGlobalOwnerNewPassword] = useState("");
+  const [globalOwnerConfirmPassword, setGlobalOwnerConfirmPassword] = useState("");
+  const [globalOwnerPasswordSaving, setGlobalOwnerPasswordSaving] = useState(false);
   const [removeUser, setRemoveUser] = useState(null);
   const [removingUser, setRemovingUser] = useState(false);
   const [pModal, setPModal] = useState(null);
@@ -392,6 +398,29 @@ export default function Settings() {
       toast.error(apiError(error));
     } finally {
       setSupervisorSaving(false);
+    }
+  };
+
+  const saveGlobalOwnerPassword = async () => {
+    if (!showGlobalOwnerPassword || globalOwnerNewPassword.length < 8 || globalOwnerPasswordSaving) return;
+    if (globalOwnerNewPassword !== globalOwnerConfirmPassword) {
+      toast.error("The new passwords do not match");
+      return;
+    }
+    setGlobalOwnerPasswordSaving(true);
+    try {
+      await api.put("/settings/global-owner-password", {
+        current_password: globalOwnerCurrentPassword,
+        new_password: globalOwnerNewPassword,
+      });
+      setGlobalOwnerCurrentPassword("");
+      setGlobalOwnerNewPassword("");
+      setGlobalOwnerConfirmPassword("");
+      toast.success("Global Owner password updated. Other sessions were signed out.");
+    } catch (error) {
+      toast.error(apiError(error));
+    } finally {
+      setGlobalOwnerPasswordSaving(false);
     }
   };
 
@@ -767,6 +796,23 @@ export default function Settings() {
 
       {tab === "profiles" && canManageCompanySettings && (
         <div className="space-y-4 max-w-3xl" data-testid="profile-credentials-tab">
+          {showGlobalOwnerPassword && <Card className="p-5 space-y-4" data-testid="global-owner-password-settings">
+            <div>
+              <h3 className="font-bold text-slate-800 font-display">Global Owner password</h3>
+              <p className="mt-1 text-sm text-slate-500">Change the SuperIQFoam Global Owner sign-in password. Other active sessions will be signed out.</p>
+            </div>
+            <Input label="Current password" type="password" autoComplete="current-password" value={globalOwnerCurrentPassword}
+              onChange={(event) => setGlobalOwnerCurrentPassword(event.target.value)} data-testid="global-owner-current-password" />
+            <Input label="New password (at least 8 characters)" type="password" minLength={8} autoComplete="new-password" value={globalOwnerNewPassword}
+              onChange={(event) => setGlobalOwnerNewPassword(event.target.value)} data-testid="global-owner-new-password" />
+            <Input label="Confirm new password" type="password" minLength={8} autoComplete="new-password" value={globalOwnerConfirmPassword}
+              onChange={(event) => setGlobalOwnerConfirmPassword(event.target.value)} data-testid="global-owner-confirm-password" />
+            <Btn onClick={saveGlobalOwnerPassword}
+              disabled={globalOwnerPasswordSaving || !globalOwnerCurrentPassword || globalOwnerNewPassword.length < 8 || !globalOwnerConfirmPassword}
+              data-testid="save-global-owner-password">
+              <Save size={16} /> {globalOwnerPasswordSaving ? "Saving..." : "Change Global Owner password"}
+            </Btn>
+          </Card>}
           <p className="text-sm text-slate-500">Passwords are stored securely and cannot be viewed. Check whether a supervisor password is configured and replace it here when needed.</p>
           <Card className="p-5 space-y-4" data-testid="supervisor-password-settings">
             <div>

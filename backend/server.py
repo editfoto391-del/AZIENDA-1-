@@ -1118,6 +1118,12 @@ class OwnerPromotionIn(BaseModel):
 class SupervisorPasswordIn(BaseModel):
     password: str
 
+class GlobalOwnerPasswordIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
 class SupervisorWriteAuthorizationIn(BaseModel):
     password: str
     action: Optional[str] = None
@@ -13395,6 +13401,40 @@ async def update_supervisor_password(body: SupervisorPasswordIn, user=Depends(ge
     await log_audit("settings", "singleton", "supervisor_password_updated", user)
     return {"configured": True}
 
+@api.put("/settings/global-owner-password")
+async def update_global_owner_password(
+    body: GlobalOwnerPasswordIn, user=Depends(get_current_user),
+):
+    require_global_owner(user)
+    if user.get("_active_company_id") != DEFAULT_COMPANY_ID:
+        raise HTTPException(403, "Switch to SuperIQFoam to change the Global Owner password")
+    account = await base_db.users.find_one(
+        {"id": user["id"], "role": "owner"},
+        {"_id": 0, "id": 1, "email": 1, "password_hash": 1},
+    )
+    if not account or not is_global_owner_account(account):
+        raise HTTPException(403, "Global Owner access required")
+    if not verify_pw(body.current_password, account.get("password_hash", "")):
+        raise HTTPException(403, "Current password is incorrect")
+    if body.current_password == body.new_password:
+        raise HTTPException(400, "Choose a new password different from the current password")
+
+    result = await base_db.users.update_one(
+        {"id": account["id"], "password_hash": account["password_hash"]},
+        {"$set": {
+            "password_hash": hash_pw(body.new_password),
+            "password_updated_at": now_iso(),
+        }},
+    )
+    if result.matched_count != 1:
+        raise HTTPException(409, "Global Owner credentials changed; reload and try again")
+    session_query = {"user_id": account["id"]}
+    if user.get("_session_id"):
+        session_query["id"] = {"$ne": user["_session_id"]}
+    await base_db.user_sessions.delete_many(session_query)
+    await log_audit("auth", account["id"], "global_owner_password_updated", user)
+    return {"updated": True, "other_sessions_invalidated": True}
+
 @api.put("/settings")
 async def update_settings(body: dict, user=Depends(get_current_user)):
     require_settings_owner(user)
@@ -19003,6 +19043,60 @@ def merge_monthly_sheet_production(daily_records, monthly_sheets):
         rows_by_date[record.get("date", "")] = record
 
     for sheet in monthly_sheets:
+        year, month_number = map(int, sheet.get("month", "0000-00").split("-"))
+        days_in_month = calendar.monthrange(year, month_number)[1]
+        monday_offset = (
+            date(year, month_number, 1).weekday()
+        )
+        daily_entries_by_week = set()
+        for day in sheet.get("production_days", []):
+            day_date = day.get("date", "")
+            if not day_date:
+                continue
+            week_index = day.get("week_index")
+            if week_index is None:
+                week_index = (monday_offset + int(day_date[-2:]) - 1) // 7
+            if any(
+                (day.get(key) or {}).get("quantity") is not None
+                or (day.get(key) or {}).get("weight_kg") is not None
+                for key in MONTHLY_PRODUCTION_BLOCK_LABELS
+            ):
+                daily_entries_by_week.add(week_index)
+
+        for week_index, week in enumerate(sheet.get("weeks", [])):
+            if week_index in daily_entries_by_week:
+                continue
+            has_weekly_entry = any(
+                (week.get(key) or {}).get("quantity") is not None
+                or (week.get(key) or {}).get("weight_kg") is not None
+                for key in MONTHLY_PRODUCTION_BLOCK_LABELS
+            )
+            if not has_weekly_entry:
+                continue
+            first_day = max(1, week_index * 7 - monday_offset + 1)
+            last_day = min(days_in_month, (week_index + 1) * 7 - monday_offset)
+            period_start = f"{year:04d}-{month_number:02d}-{first_day:02d}"
+            period_end = f"{year:04d}-{month_number:02d}-{last_day:02d}"
+            for existing_date in list(rows_by_date):
+                if period_start <= existing_date <= period_end:
+                    rows_by_date.pop(existing_date)
+            blocks = [
+                {"block": label, "quantity": int((week.get(key) or {}).get("quantity") or 0)}
+                for key, label in MONTHLY_PRODUCTION_BLOCK_LABELS.items()
+                if int((week.get(key) or {}).get("quantity") or 0) > 0
+            ]
+            rows_by_date[f"monthly-sheet-production:{sheet.get('month')}:week:{week_index}"] = {
+                "id": f"monthly-sheet-production:{sheet.get('month')}:week:{week_index}",
+                "date": period_end,
+                "period_start": period_start,
+                "period_end": period_end,
+                "week_number": week_index + 1,
+                "blocks": blocks,
+                "total_blocks": sum(block["quantity"] for block in blocks),
+                "notes": "",
+                "source": "monthly_chemical_sheet_weekly",
+            }
+
         for day in sheet.get("production_days", []):
             day_date = day.get("date", "")
             quantities = {
@@ -19073,10 +19167,13 @@ async def get_daily_prod(
         ),
         monthly_sheets,
     )
-    def tot(since):
+    def tot(since, *, daily_only=False):
         totals = {}
         for record in active_rows:
-            if record["date"] < since:
+            if record.get("period_start"):
+                if daily_only or record.get("period_end", record["date"]) < since:
+                    continue
+            elif record["date"] < since:
                 continue
             for item in daily_production_blocks(record):
                 block = item["block"]
@@ -19088,7 +19185,7 @@ async def get_daily_prod(
             "blue_blocks": totals.get("Blue", 0),
         }
     return {
-        "rows": rows, "today": tot(today_str()), "week": tot(week), "month": tot(month),
+        "rows": rows, "today": tot(today_str(), daily_only=True), "week": tot(week), "month": tot(month),
         "total": total, "page": page, "page_size": page_size if page is not None else None,
     }
 
