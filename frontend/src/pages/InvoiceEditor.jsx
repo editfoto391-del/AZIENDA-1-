@@ -819,6 +819,20 @@ export default function InvoiceEditor({ express = false }) {
     ])).values()];
   };
 
+  const sendIntercompanyInvoice = async (invoiceId) => {
+    if (!intercompanyRecipientId) return true;
+    try {
+      await api.post("/intercompany/invoices/send", {
+        invoice_id: invoiceId,
+        recipient_company_id: intercompanyRecipientId,
+      });
+      return true;
+    } catch (error) {
+      toast.error(`Invoice was issued, but it could not be sent to the selected company: ${apiError(error)}`);
+      return false;
+    }
+  };
+
   const save = async (
     status,
     saveNewEntries = null,
@@ -924,22 +938,12 @@ export default function InvoiceEditor({ express = false }) {
       }
       const submitted = !id && status !== "draft";
       const triggeredPrint = submitted && printTemplate?.print_trigger === "on_issue";
-      let deliveryFailed = false;
-      if (submitted && intercompanyRecipientId) {
-        try {
-          await api.post("/intercompany/invoices/send", {
-            invoice_id: res.id,
-            recipient_company_id: intercompanyRecipientId,
-          });
-        } catch (deliveryError) {
-          deliveryFailed = true;
-          toast.error(`Invoice saved, but it could not be sent to the selected company: ${apiError(deliveryError)}`);
-        }
-      }
+      const sendToIntercompany = status !== "draft" && Boolean(intercompanyRecipientId);
+      const deliveryFailed = sendToIntercompany && !(await sendIntercompanyInvoice(res.id));
       if (!deliveryFailed && !triggeredPrint) {
         toast.success(
-          submitted && intercompanyRecipientId
-            ? "Invoice submitted and sent to the selected company."
+          sendToIntercompany
+            ? submitted ? "Invoice submitted and sent to the selected company." : "Invoice saved and sent to the selected company."
             : submitted ? "INVOICE SUBMITTED" : status === "draft" ? "Saved as draft" : "Invoice saved",
         );
       }
@@ -1015,12 +1019,14 @@ export default function InvoiceEditor({ express = false }) {
         await reloadInv();
         return;
       }
+      const deliveryFailed = targetStatus !== "draft"
+        && !(await sendIntercompanyInvoice(res.id));
       setInv(res); setPayRecords(res.payment_records || []); setEditing(false); setEditAuthorization("");
       refreshInvoiceAudit();
       const triggeredPrint = targetStatus !== "draft" && snapshot?.status === "draft" && printTemplate?.print_trigger === "on_issue";
       if (triggeredPrint) {
         setPendingPrintConfirmation(res);
-      } else {
+      } else if (!deliveryFailed) {
         toast.success(targetStatus === "draft" ? "Invoice updated" : "Invoice issued");
       }
     } catch (e) {
@@ -1051,6 +1057,7 @@ export default function InvoiceEditor({ express = false }) {
         await reloadInv();
         return;
       }
+      const deliveryFailed = !(await sendIntercompanyInvoice(res.id));
       setInv(res);
       const triggeredPrint = inv.status === "draft" && printTemplate?.print_trigger === "on_issue";
       if (triggeredPrint) {
@@ -1058,9 +1065,9 @@ export default function InvoiceEditor({ express = false }) {
       } else if (action === "download") {
         setPdfAutoDownload(true);
         setDownloadIssuedDraft(true);
-        toast.success("Invoice issued");
+        if (!deliveryFailed) toast.success("Invoice issued");
       } else {
-        toast.success("Invoice issued");
+        if (!deliveryFailed) toast.success("Invoice issued");
         nav(invoicesPath);
       }
     } catch (e) {
