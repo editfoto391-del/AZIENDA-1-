@@ -23,11 +23,13 @@ test("money conversion rounds decimal values without binary floating-point drift
   assert.equal(moneyToCents("invalid"), 0);
 });
 
-test("piece counts are shown only for Asive Tailor and Ayanda Tailor", () => {
+test("piecework display respects explicit pay mode and preserves legacy tailor defaults", () => {
   assert.equal(isPieceworkTailor({ name: "ASIVE TAILOR" }), true);
   assert.equal(isPieceworkTailor({ name: "  Ayanda   Tailor " }), true);
   assert.equal(isPieceworkTailor({ name: "Anele Fabric" }), false);
   assert.equal(isPieceworkTailor({ name: "AYANDA BHAI" }), false);
+  assert.equal(isPieceworkTailor({ name: "Ayanda Tailor", pay_mode: "standard" }), false);
+  assert.equal(isPieceworkTailor({ name: "Anele Fabric", pay_mode: "piecework" }), true);
 });
 
 test("a report's totals equal exactly the rows selected for that report", () => {

@@ -8,8 +8,9 @@ export const moneyToCents = (value) => {
 };
 
 export const isPieceworkTailor = (employee) => {
+  if (employee?.pay_mode) return employee.pay_mode === "piecework";
   const name = String(employee?.name ?? "").trim().replace(/\s+/g, " ").toUpperCase();
-  return name === "AYANDA TAILOR" || name === "ASIVE TAILOR";
+  return employee?.pay_type === "piece" || name === "AYANDA TAILOR" || name === "ASIVE TAILOR";
 };
 
 export const sumPayrollRows = (rows) => rows.reduce((totals, row) => ({

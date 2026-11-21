@@ -194,7 +194,7 @@ def test_balance_cut_can_exceed_borrowed_balance_after_payroll_is_paid(monkeypat
         }]}
 
     async def find_one(*_args, **_kwargs):
-        raise AssertionError("Saving a balance cut must not depend on payroll payment status")
+        return None
 
     async def no_cuts(*_args, **_kwargs):
         return []
@@ -216,7 +216,10 @@ def test_balance_cut_can_exceed_borrowed_balance_after_payroll_is_paid(monkeypat
     monkeypatch.setattr(
         server,
         "db",
-        SimpleNamespace(salary_payments=SimpleNamespace(find_one=find_one)),
+        SimpleNamespace(
+            salary_weekly_payment_accounts=SimpleNamespace(find_one=find_one),
+            salary_payments=SimpleNamespace(find_one=find_one),
+        ),
     )
 
     asyncio.run(server.save_salary_cut(

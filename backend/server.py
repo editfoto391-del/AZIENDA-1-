@@ -34,6 +34,7 @@ from salary_math import (
     STANDARD_PAID_DAYS_PER_WEEK,
     STANDARD_WEEKLY_HOURS,
     calculate_salary_hours,
+    calculate_piecework_formula,
 )
 from grv_math import (
     aggregate_accepted_stock_lines,
@@ -9715,7 +9716,14 @@ async def add_department(body: DepartmentIn, user=Depends(get_current_user)):
 async def get_employees(user=Depends(get_current_user)):
     employees = await listall("employees", sort=("name", 1))
     return [
-        {**employee, "pay_type": "piece" if is_piece_paid_employee(employee) else employee.get("pay_type", "hourly")}
+        {
+            **employee,
+            "pay_type": (
+                "piece" if is_piece_paid_employee(employee) else "hourly"
+            ) if employee.get("pay_mode") in {"standard", "piecework", "monthly"}
+            else "piece" if is_piece_paid_employee(employee)
+            else employee.get("pay_type", "hourly"),
+        }
         for employee in employees
     ]
 
@@ -9749,6 +9757,10 @@ def payroll_employee_name_key(name):
 
 def is_piece_paid_employee(employee):
     normalized_name = " ".join((employee.get("name") or "").split()).upper()
+    if employee.get("pay_mode") in {"standard", "monthly"}:
+        return False
+    if employee.get("pay_mode") == "piecework":
+        return True
     return (
         employee.get("pay_type") == "piece"
         or normalized_name in seed_data.PIECEWORK_EMPLOYEE_NAMES
@@ -9756,6 +9768,8 @@ def is_piece_paid_employee(employee):
 
 
 def is_monthly_fixed_salary_employee(employee):
+    if employee.get("pay_mode") is not None:
+        return employee.get("pay_mode") == "monthly"
     normalized_name = " ".join(
         "".join(character if character.isalnum() else " " for character in (employee.get("name") or "")).split()
     ).upper()
@@ -10097,6 +10111,23 @@ class SalaryRateIn(BaseModel):
     weekly_salary: Optional[float] = Field(default=None, gt=0)
     monthly_salary: Optional[float] = Field(default=None, gt=0)
     work_days_per_week: Optional[int] = Field(default=None, ge=6, le=6)
+    overtime_rate: Optional[float] = Field(default=None, ge=0)
+    pay_divisor: Optional[float] = Field(default=None, ge=1)
+    half_day_hours: Optional[float] = Field(default=None, ge=1, le=8)
+    piecework_formula: Optional[str] = Field(default=None)
+    pay_mode: Optional[Literal["standard", "piecework", "monthly"]] = None
+
+class WeeklyOvertimeIn(BaseModel):
+    employee_id: str = Field(min_length=1, max_length=120)
+    period_start: str
+    period_end: str
+    overtime_hours: float = Field(ge=0, le=168, allow_inf_nan=False)
+    overtime_rate: float = Field(ge=0, allow_inf_nan=False)
+
+    @field_validator("period_start", "period_end")
+    @classmethod
+    def weekly_overtime_dates_valid(cls, value):
+        return validate_iso_date(value)
 
 class SalaryPaymentIn(BaseModel):
     employee_id: str
@@ -10331,21 +10362,65 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
             start_date=start_date, end_date=end_date) if is_piece_paid else {
                 "days": [], "total_pieces": 0, "piece_rate": 0, "piece_pay": 0, "weeks": [],
             }
-        days = [] if is_piece_paid else calculate_salary_hours(rows)
+        days = calculate_salary_hours(
+            rows,
+            half_day_hours=float(employee.get("half_day_hours", 5)),
+        )
         worked_hours = sum(day["worked_hours"] for day in days)
         regular_hours = sum(day["regular_hours"] for day in days)
         overtime_hours = sum(day["overtime_hours"] for day in days)
         present_days = sum(day["status"] == "Present" for day in days)
         half_days = sum(day["status"] == "Half Day" for day in days)
         for day in days:
-            day["regular_pay"] = r2(
-                D(weekly_salary or 0) * D(day["attendance_fraction"]) / D(STANDARD_PAID_DAYS_PER_WEEK)
-            ) if not is_monthly_fixed else 0
-            day["overtime_pay"] = r2((
-                D(day["overtime_hours"] - day["overtime_after_17_hours"]) * D(OVERTIME_HOURLY_RATE)
-                + D(day["overtime_after_17_hours"]) * D(OVERTIME_AFTER_17_HOURLY_RATE)
-            )) if not is_monthly_fixed else 0
+            if is_monthly_fixed:
+                day["regular_pay"] = 0
+                day["overtime_pay"] = 0
+            else:
+                pay_divisor = D(employee.get("pay_divisor", 48))
+                day["regular_pay"] = r2(D(weekly_salary or 0) * D(day["worked_hours"]) / pay_divisor)
+                configured_overtime_rate = employee.get("overtime_rate")
+                if configured_overtime_rate is not None:
+                    day["overtime_pay"] = r2(D(day["overtime_hours"]) * D(configured_overtime_rate))
+                else:
+                    day["overtime_pay"] = r2((
+                        D(day["overtime_hours"] - day["overtime_after_17_hours"]) * D(OVERTIME_HOURLY_RATE)
+                        + D(day["overtime_after_17_hours"]) * D(OVERTIME_AFTER_17_HOURLY_RATE)
+                    ))
             day["pay"] = r2(D(day["regular_pay"]) + D(day["overtime_pay"]))
+        override_weeks = {}
+        effective_overtime_rate = employee.get("overtime_rate")
+        for day in days:
+            if day.get("salary_overtime_override") is None:
+                continue
+            work_date = date.fromisoformat(day["date"])
+            week_start = work_date - timedelta(days=work_date.weekday())
+            override_weeks[week_start] = (
+                D(day["salary_overtime_override"]),
+                D(day.get("salary_overtime_rate_override", employee.get(
+                    "overtime_rate", OVERTIME_HOURLY_RATE,
+                ))),
+            )
+        if override_weeks and not is_monthly_fixed:
+            for week_start, (override_hours, overtime_rate) in override_weeks.items():
+                week_days = [
+                    day for day in days
+                    if date.fromisoformat(day["date"]) - timedelta(
+                        days=date.fromisoformat(day["date"]).weekday()
+                    ) == week_start
+                ]
+                if not week_days:
+                    continue
+                override_pay = r2(override_hours * overtime_rate)
+                effective_overtime_rate = float(overtime_rate)
+                for day in week_days:
+                    day["overtime_hours"] = 0
+                    day["overtime_after_17_hours"] = 0
+                    day["overtime_pay"] = 0
+                    day["pay"] = day["regular_pay"]
+                week_days[-1]["overtime_hours"] = float(override_hours)
+                week_days[-1]["overtime_pay"] = override_pay
+                week_days[-1]["pay"] = r2(D(week_days[-1]["regular_pay"]) + D(override_pay))
+            overtime_hours = sum(day["overtime_hours"] for day in days)
         employee_advances = [item for item in advances if item.get("employee_id") == employee["id"]]
         employee_cuts = [item for item in cuts if item.get("employee_id") == employee["id"]]
         all_advance_total = sum((D(item.get("amount", 0)) for item in employee_advances), Decimal("0"))
@@ -10364,7 +10439,7 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
         ))
         regular_pay = r2(sum(
             (
-                D(weekly_salary) * D(day["attendance_fraction"]) / D(STANDARD_PAID_DAYS_PER_WEEK)
+                D(weekly_salary) * D(day["worked_hours"]) / D(employee.get("pay_divisor", 48))
                 for day in days
             ),
             Decimal("0"),
@@ -10377,9 +10452,51 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
             is_monthly_fixed and monthly_salary is not None
             and (full_month_period or include_monthly_salaries)
         ) else 0
-        gross = employee_piecework["piece_pay"] if is_piece_paid else (
-            monthly_pay if is_monthly_fixed else r2(regular_pay + overtime_pay)
-        )
+        piece_formula = employee.get("piecework_formula")
+        piece_formula_details = []
+        if is_piece_paid and piece_formula:
+            piecework_by_week = {}
+            for record in piece_records:
+                if record.get("employee_id") != employee["id"]:
+                    continue
+                work_date = date.fromisoformat(record["date"])
+                week_start = work_date - timedelta(days=work_date.weekday())
+                quantities = piecework_by_week.setdefault(week_start, [0] * 6)
+                quantities[work_date.weekday()] += int(record.get("pieces", 0))
+            overtime_by_week = {}
+            for day in days:
+                if day.get("overtime_hours"):
+                    work_date = date.fromisoformat(day["date"])
+                    week_start = work_date - timedelta(days=work_date.weekday())
+                    overtime_by_week[week_start] = overtime_by_week.get(week_start, Decimal("0")) + D(day["overtime_pay"])
+            week_starts = set(piecework_by_week) | set(overtime_by_week)
+            week_start = date.fromisoformat(start_date)
+            week_start -= timedelta(days=week_start.weekday())
+            period_end = date.fromisoformat(end_date)
+            while week_start <= period_end:
+                week_starts.add(week_start)
+                week_start += timedelta(days=7)
+            for week_start in sorted(week_starts):
+                formula_result = calculate_piecework_formula(
+                    piecework_by_week.get(week_start, [0] * 6),
+                    piece_formula,
+                    overtime_amount=overtime_by_week.get(week_start, 0),
+                )
+                piece_formula_details.append({
+                    "week_start": week_start.isoformat(),
+                    "formula": piece_formula,
+                    "quantities": piecework_by_week.get(week_start, [0] * 6),
+                    **formula_result,
+                })
+            formula_piece_pay = sum((D(item["piece_pay"]) for item in piece_formula_details), Decimal("0"))
+            formula_overtime_pay = sum((D(item["overtime_amount"]) for item in piece_formula_details), Decimal("0"))
+            employee_piecework["piece_pay"] = r2(formula_piece_pay)
+            employee_piecework["overtime_pay"] = r2(formula_overtime_pay)
+            gross = r2(sum((D(item["gross"]) for item in piece_formula_details), Decimal("0")))
+        else:
+            gross = r2(D(employee_piecework["piece_pay"]) + D(overtime_pay)) if is_piece_paid else (
+                monthly_pay if is_monthly_fixed else r2(regular_pay + overtime_pay)
+            )
         cut = period_cut
         balance = all_advance_total - all_cut_total
         balance_period_start = (
@@ -10443,9 +10560,15 @@ async def salary_report(start_date, end_date, *, include_monthly_salaries=False)
             "is_full_month_period": full_month_period,
             "hours_per_week": hours_per_week, "work_days_per_week": work_days_per_week,
             "pay_type": "piece" if is_piece_paid else "hourly",
+            "pay_mode": "piecework" if is_piece_paid else ("monthly" if is_monthly_fixed else "standard"),
+            "pay_divisor": float(employee.get("pay_divisor", 48)),
+            "half_day_hours": float(employee.get("half_day_hours", 5)),
+            "overtime_rate": float(effective_overtime_rate) if effective_overtime_rate is not None else None,
+            "piecework_formula": employee.get("piecework_formula"),
             "total_pieces": employee_piecework["total_pieces"],
             "piece_rate": employee_piecework["piece_rate"],
             "piece_pay": employee_piecework["piece_pay"],
+            "piece_formula_details": piece_formula_details,
             "piece_days": employee_piecework["days"],
             "piece_weeks": employee_piecework["weeks"],
             "days": days, "present_days": present_days, "half_days": half_days,
@@ -10560,6 +10683,22 @@ def salary_amount_to_cents(value):
     return int((D(value or 0) * D(100)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+def salary_calculation_snapshot(employee):
+    fields = (
+        "pay_mode", "pay_frequency", "weekly_salary", "monthly_salary",
+        "hourly_rate", "pay_divisor", "half_day_hours", "overtime_rate",
+        "piecework_formula", "worked_hours", "worked_days", "regular_hours",
+        "overtime_hours", "regular_pay", "overtime_pay", "piece_pay",
+        "piece_formula_details", "piece_days", "days", "gross_salary",
+        "cut", "net_salary", "balance_before_period", "balance_after_period",
+    )
+    return {
+        "version": 1,
+        "calculated_at": now_iso(),
+        **{field: employee.get(field) for field in fields},
+    }
+
+
 def weekly_salary_payment_summary(
     employees, friday_employee_ids, payment_accounts, legacy_payments,
     period_start, period_end,
@@ -10575,6 +10714,9 @@ def weekly_salary_payment_summary(
         employee_id = employee["employee_id"]
         account = accounts_by_employee.get(employee_id) or {}
         legacy = legacy_by_employee.get(employee_id)
+        snapshot = account.get("calculation_snapshot") or (
+            legacy.get("calculation_snapshot") if legacy else None
+        ) or {}
         legacy_group = (
             "friday" if legacy and legacy.get("payment_date") == period["friday_date"]
             else "saturday" if legacy and legacy.get("payment_date") == period["saturday_date"]
@@ -10612,7 +10754,18 @@ def weekly_salary_payment_summary(
             "employee_id": employee_id,
             "employee_name": employee.get("name", ""),
             "department": employee.get("department", ""),
+            "pay_frequency": employee.get("pay_frequency", "weekly_fixed"),
             "salary_rate_missing": bool(employee.get("salary_rate_missing")),
+            "weekly_salary": snapshot.get("weekly_salary", employee.get("weekly_salary", 0)),
+            "overtime_hours": snapshot.get("overtime_hours", employee.get("overtime_hours", 0)),
+            "overtime_rate": snapshot.get("overtime_rate", employee.get("overtime_rate")),
+            "balance_before_period": employee.get("balance_before_period", 0),
+            "balance_after_period": employee.get("balance_after_period", 0),
+            "balance": employee.get("balance", 0),
+            "balance_history": employee.get("balance_history", []),
+            "gross_salary": snapshot.get("gross_salary", employee.get("gross_salary", 0)),
+            "balance_cut": snapshot.get("cut", employee.get("cut", 0)),
+            "net_salary": snapshot.get("net_salary", employee.get("net_salary", 0)),
             "due_cents": due_cents,
             "paid_cents": paid_cents,
             "remaining_cents": remaining_cents,
@@ -10756,6 +10909,59 @@ async def save_weekly_salary_plan(
     return {**updated_summary, "plan_saved": True}
 
 
+@api.put("/salaries/weekly-overtime")
+async def save_weekly_salary_overtime(
+    body: WeeklyOvertimeIn, user=Depends(get_current_user),
+):
+    require_admin(user)
+    period = superiqfoam_weekly_salary_period(body.period_start, body.period_end)
+    employee = await db.employees.find_one({"id": body.employee_id}, {"_id": 0})
+    if not employee:
+        raise HTTPException(404, "Employee not found")
+    account_id = f"{period['payroll_key']}:{body.employee_id}"
+    account = await db.salary_weekly_payment_accounts.find_one(
+        {"id": account_id}, {"_id": 0},
+    )
+    legacy_payment = await db.salary_payments.find_one(
+        {"employee_id": body.employee_id, "payroll_key": period["payroll_key"]},
+        {"_id": 0},
+    )
+    if int((account or {}).get("paid_amount_cents") or 0) > 0 or legacy_payment:
+        raise HTTPException(409, "Overtime cannot be changed after a salary payment has been recorded")
+
+    overtime_date = period["period_end"]
+    existing = await db.attendance.find_one(
+        {"employee_id": body.employee_id, "date": overtime_date},
+        {"_id": 0},
+    )
+    attendance_data = {
+        "status": (existing or {}).get("status", "Absent"),
+        "start_time": (existing or {}).get("start_time"),
+        "end_time": (existing or {}).get("end_time"),
+        "overtime_hours": (existing or {}).get("overtime_hours", 0),
+        "salary_overtime_override": float(body.overtime_hours),
+        "salary_overtime_rate_override": float(body.overtime_rate),
+        "employee_name": employee.get("name", ""),
+        "department": employee.get("department", ""),
+    }
+    _, saved = await _save_employee_day_record(
+        "attendance", body.employee_id, overtime_date, attendance_data,
+    )
+    await log_audit(
+        "salary_overtime", f"{period['payroll_key']}:{body.employee_id}",
+        "weekly_override_saved", user,
+        before={"salary_overtime_override": (existing or {}).get("salary_overtime_override")},
+        after={
+            "employee_id": body.employee_id,
+            "period_start": body.period_start,
+            "period_end": body.period_end,
+            "salary_overtime_override": saved.get("salary_overtime_override"),
+            "salary_overtime_rate_override": saved.get("salary_overtime_rate_override"),
+        },
+    )
+    return {"ok": True, "overtime_hours": saved["salary_overtime_override"]}
+
+
 @api.post("/salaries/weekly-payments")
 async def record_weekly_salary_payment(
     body: WeeklySalaryPaymentIn, user=Depends(get_current_user),
@@ -10782,6 +10988,7 @@ async def record_weekly_salary_payment(
     due_cents = max(0, salary_amount_to_cents(employee.get("net_salary", 0)))
     if due_cents <= 0:
         raise HTTPException(400, "This employee has no positive net salary due")
+    calculation_snapshot = salary_calculation_snapshot(employee)
     amount_cents = salary_amount_to_cents(body.amount)
     if amount_cents <= 0:
         raise HTTPException(400, "Payment must be at least one cent")
@@ -10807,6 +11014,7 @@ async def record_weekly_salary_payment(
             "due_amount_cents": due_cents,
             "paid_amount_cents": 0,
             "payments": [],
+            "calculation_snapshot": calculation_snapshot,
             "created_at": now_iso(),
         }},
         upsert=True,
@@ -10847,6 +11055,7 @@ async def record_weekly_salary_payment(
         "amount_cents": amount_cents,
         "amount": r2(D(amount_cents) / D(100)),
         "notes": body.notes or "",
+        "calculation_snapshot": calculation_snapshot,
         "paid_at": now_iso(),
         "paid_by": user.get("id"),
     }
@@ -10939,6 +11148,7 @@ async def record_salary_payment(body: SalaryPaymentIn, user=Depends(get_current_
     gross_amount = r2(D(employee.get("gross_salary", 0)))
     deduction_amount = r2(D(employee.get("cut", 0)))
     net_amount = r2(gross_amount - deduction_amount)
+    calculation_snapshot = salary_calculation_snapshot(employee)
     if gross_amount <= 0 or net_amount <= 0:
         raise HTTPException(400, "This employee has no positive net amount payable in the selected payroll")
     existing = await db.salary_payments.find_one(
@@ -10958,6 +11168,7 @@ async def record_salary_payment(body: SalaryPaymentIn, user=Depends(get_current_
         "gross_amount": gross_amount,
         "deduction_amount": deduction_amount,
         "net_amount": net_amount,
+        "calculation_snapshot": calculation_snapshot,
         "payment_date": body.payment_date,
         "notes": body.notes or "",
         "status": "paid",
@@ -10981,16 +11192,42 @@ async def save_salary_rate(eid: str, body: SalaryRateIn, user=Depends(get_curren
     employee = await db.employees.find_one({"id": eid}, {"_id": 0})
     if not employee:
         raise HTTPException(404, "Employee not found")
+    config_changes = {}
+    if "overtime_rate" in body.model_fields_set:
+        config_changes["overtime_rate"] = (
+            r2(D(body.overtime_rate)) if body.overtime_rate is not None else None
+        )
+    if body.pay_divisor is not None:
+        config_changes["pay_divisor"] = float(body.pay_divisor)
+    if body.half_day_hours is not None:
+        config_changes["half_day_hours"] = float(body.half_day_hours)
+    if "piecework_formula" in body.model_fields_set:
+        if body.piecework_formula is None or not body.piecework_formula.strip():
+            config_changes["piecework_formula"] = None
+        else:
+            formula = body.piecework_formula.strip().upper()
+            if formula not in set("ABCDEFGHIJKLMN"):
+                raise HTTPException(422, "Invalid piecework formula")
+            config_changes["piecework_formula"] = formula
+    if body.pay_mode is not None:
+        config_changes["pay_mode"] = body.pay_mode
     if body.monthly_salary is not None:
-        if not is_monthly_fixed_salary_employee(employee):
+        if not is_monthly_fixed_salary_employee(employee) and body.pay_mode != "monthly":
             raise HTTPException(422, "Monthly fixed pay is only available for the monthly payroll employees")
-        updated = await update_doc("employees", eid, {"monthly_salary": r2(D(body.monthly_salary))})
-        await log_audit("employee", eid, "monthly_salary_updated", user,
-                        before={"monthly_salary": employee.get("monthly_salary")},
-                        after={"monthly_salary": updated["monthly_salary"]})
+        config_changes["monthly_salary"] = r2(D(body.monthly_salary))
+        updated = await update_doc("employees", eid, config_changes)
+        await log_audit("employee", eid, "salary_configuration_updated", user,
+                        before={key: employee.get(key) for key in config_changes},
+                        after={key: updated.get(key) for key in config_changes})
         return updated
     if body.weekly_salary is None and body.hourly_rate is None:
-        raise HTTPException(422, "Provide a weekly salary or an hourly rate")
+        if not config_changes:
+            raise HTTPException(422, "Provide a salary, hourly, or payroll configuration")
+        updated = await update_doc("employees", eid, config_changes)
+        await log_audit("employee", eid, "salary_configuration_updated", user,
+                        before={key: employee.get(key) for key in config_changes},
+                        after={key: updated.get(key) for key in config_changes})
+        return updated
     work_days_per_week = 6
     hours_per_week = STANDARD_WEEKLY_HOURS
     weekly_salary = r2(D(body.weekly_salary)) if body.weekly_salary is not None else None
@@ -11009,6 +11246,7 @@ async def save_salary_rate(eid: str, body: SalaryRateIn, user=Depends(get_curren
         "weekly_salary": weekly_salary,
         "hours_per_week": hours_per_week,
         "work_days_per_week": work_days_per_week,
+        **config_changes,
     })
     await log_audit("employee", eid, "salary_rate_updated", user,
                     before={
@@ -11067,6 +11305,20 @@ async def save_salary_cut(body: SalaryCutIn, user=Depends(get_current_user)):
     employee = next((item for item in report["employees"] if item["employee_id"] == body.employee_id), None)
     if not employee:
         raise HTTPException(404, "Employee not found")
+    payroll_key = salary_payroll_key(
+        "monthly" if employee.get("pay_frequency") == "monthly_fixed" else "weekly",
+        body.start_date,
+        body.end_date,
+    )
+    if employee.get("pay_frequency") != "monthly_fixed":
+        account = await db.salary_weekly_payment_accounts.find_one(
+            {"id": f"{payroll_key}:{body.employee_id}"}, {"_id": 0},
+        )
+        legacy_payment = await db.salary_payments.find_one(
+            {"employee_id": body.employee_id, "payroll_key": payroll_key}, {"_id": 0},
+        )
+        if int((account or {}).get("paid_amount_cents") or 0) > 0 or legacy_payment:
+            raise HTTPException(409, "Balance cut cannot be changed after salary payment has started")
     if employee["pay_frequency"] == "monthly_fixed" and not employee["is_full_month_period"]:
         raise HTTPException(400, "Select a complete calendar month before saving a salary cut")
     employee_cuts = await listall("salary_cuts", {

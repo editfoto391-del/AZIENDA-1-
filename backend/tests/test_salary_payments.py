@@ -51,6 +51,10 @@ def test_monthly_payment_records_exact_amount_and_owner_selected_date(monkeypatc
         "pay_frequency": "monthly_fixed",
         "gross_salary": 6500,
         "cut": 1200,
+        "pay_mode": "monthly",
+        "monthly_salary": 6500,
+        "monthly_pay": 6500,
+        "net_salary": 5300,
     }
     _, inserted = install_payment_mocks(monkeypatch, employee)
 
@@ -70,6 +74,9 @@ def test_monthly_payment_records_exact_amount_and_owner_selected_date(monkeypatc
     assert inserted["gross_amount"] == 6500
     assert inserted["deduction_amount"] == 1200
     assert inserted["net_amount"] == 5300
+    assert inserted["calculation_snapshot"]["version"] == 1
+    assert inserted["calculation_snapshot"]["monthly_salary"] == 6500
+    assert inserted["calculation_snapshot"]["gross_salary"] == 6500
 
 
 def test_duplicate_payment_is_rejected_without_inserting_another_record(monkeypatch):

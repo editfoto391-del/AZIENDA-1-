@@ -83,6 +83,98 @@ def test_weekly_salary_summary_calculates_partial_payment_and_outstanding_cents(
     assert result["outstanding_cents"] == 695000
 
 
+def test_weekly_salary_summary_exposes_fixed_salary_balance_cuts_and_net_pay():
+    employee = {
+        "employee_id": "worker-a",
+        "name": "Worker A",
+        "department": "Plastic",
+        "pay_frequency": "weekly_fixed",
+        "weekly_salary": 1000,
+        "overtime_hours": 3,
+        "overtime_rate": 15,
+        "balance_before_period": 250,
+        "balance_after_period": 150,
+        "balance": 150,
+        "balance_history": [],
+        "gross_salary": 900,
+        "cut": 100,
+        "net_salary": 800,
+    }
+
+    result = server.weekly_salary_payment_summary(
+        [employee], [], [], [], "2026-11-16", "2026-11-21",
+    )
+    row = result["saturday"]["employees"][0]
+
+    assert row["weekly_salary"] == 1000
+    assert row["overtime_hours"] == 3
+    assert row["overtime_rate"] == 15
+    assert row["balance_before_period"] == 250
+    assert row["balance_cut"] == 100
+    assert row["balance_after_period"] == 150
+    assert row["gross_salary"] == 900
+    assert row["net_salary"] == 800
+    assert row["due_cents"] == 80000
+
+
+def test_weekly_overtime_override_saves_values_without_replacing_attendance(monkeypatch):
+    existing = {
+        "status": "Present",
+        "start_time": "08:00",
+        "end_time": "17:00",
+        "overtime_hours": 1,
+        "notes": "Existing attendance note",
+    }
+
+    async def find_employee(_query, _projection=None):
+        return {"id": "worker-a", "name": "Worker A", "department": "Plastic"}
+
+    async def no_payment(*_args, **_kwargs):
+        return None
+
+    async def find_attendance(*_args, **_kwargs):
+        return existing
+
+    async def save_day(_collection, _employee_id, _date, data):
+        assert data["status"] == "Present"
+        assert data["start_time"] == "08:00"
+        assert data["end_time"] == "17:00"
+        assert data["overtime_hours"] == 1
+        assert data["salary_overtime_override"] == 4
+        assert data["salary_overtime_rate_override"] == 15
+        return existing, {**existing, **data}
+
+    async def no_audit(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(server, "require_admin", lambda _user: None)
+    monkeypatch.setattr(server, "_save_employee_day_record", save_day)
+    monkeypatch.setattr(server, "log_audit", no_audit)
+    monkeypatch.setattr(
+        server,
+        "db",
+        SimpleNamespace(
+            employees=SimpleNamespace(find_one=find_employee),
+            salary_weekly_payment_accounts=SimpleNamespace(find_one=no_payment),
+            salary_payments=SimpleNamespace(find_one=no_payment),
+            attendance=SimpleNamespace(find_one=find_attendance),
+        ),
+    )
+
+    result = asyncio.run(server.save_weekly_salary_overtime(
+        server.WeeklyOvertimeIn(
+            employee_id="worker-a",
+            period_start="2026-11-16",
+            period_end="2026-11-21",
+            overtime_hours=4,
+            overtime_rate=15,
+        ),
+        user={"role": "admin"},
+    ))
+
+    assert result == {"ok": True, "overtime_hours": 4}
+
+
 def test_weekly_salary_summary_includes_legacy_full_payments_without_double_counting():
     result = server.weekly_salary_payment_summary(
         example_weekly_employees()[:5],
