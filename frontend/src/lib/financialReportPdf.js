@@ -69,6 +69,7 @@ export function buildFinancialReportPdfData(report) {
     chart: [
       { label: "Total Sales", value: sales, color: [38, 76, 125] },
       { label: "Total Expenses", value: Number(summary.expenses) || 0, color: [208, 170, 83] },
+      { label: "GRV Expenses", value: Number(summary.grv) || 0, color: [155, 101, 74] },
       { label: "Estimated Profit", value: profit || 0, color: [105, 151, 79] },
     ],
     notes: report.accounting_notes || [],

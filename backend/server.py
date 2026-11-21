@@ -17044,7 +17044,8 @@ def grv_accepted_value(grv):
 def build_financial_report(start, end, mode, *, invoices, payments, linked_payments,
                            expenses, vehicle_records, buyings, grvs, invoice_movements,
                            payment_invoices=None, salary_rows=(), vehicles_by_id=None,
-                           all_outstanding_invoices=None, all_outstanding_payments=None):
+                           all_outstanding_invoices=None, all_outstanding_payments=None,
+                           all_outstanding_customer_balances=None):
     invoices = unique_financial_records(invoices)
     payments = unique_financial_records(payments)
     linked_payments = unique_financial_records(linked_payments)
@@ -17401,7 +17402,6 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
     for invoice in outstanding_invoices:
         if (
             invoice.get("archived")
-            or invoice.get("invoice_type") == "express"
             or invoice.get("status") in ("draft", "void")
             or not invoice.get("number")
         ):
@@ -17421,6 +17421,20 @@ def build_financial_report(start, end, mode, *, invoices, payments, linked_payme
             "customer_name": invoice.get("customer_name", ""),
             "due_date": invoice.get("due_date"),
             "amount": r2(outstanding),
+        })
+    for customer in unique_financial_records(all_outstanding_customer_balances or []):
+        outstanding = r2(customer.get("other_balance", 0))
+        if outstanding <= 0:
+            continue
+        pending_values.append(outstanding)
+        pending_rows.append({
+            "id": customer.get("id"),
+            "date": "",
+            "number": "Other balance",
+            "customer_name": customer.get("name", ""),
+            "due_date": None,
+            "amount": outstanding,
+            "balance_type": "express" if customer.get("other_balance_express") else "standard",
         })
     pending_total = dsum(pending_values)
     expense_total = dsum(row["amount"] for row in expense_rows)
@@ -17539,7 +17553,6 @@ async def get_financial_report(
             all_outstanding_invoices = await db.invoices.find(
                 {
                     "archived": {"$ne": True},
-                    "invoice_type": {"$ne": "express"},
                     "status": {"$nin": ["draft", "void"]},
                     "number": {"$exists": True, "$nin": [None, ""]},
                 },
@@ -17555,6 +17568,12 @@ async def get_financial_report(
                 },
                 {"_id": 0},
             ).to_list(None) if all_invoice_ids else []
+            all_outstanding_customer_balances = await db.customers.find(
+                {"other_balance": {"$gt": 0}},
+                {"_id": 0, "id": 1, "name": 1, "other_balance": 1, "other_balance_express": 1},
+            ).to_list(None)
+        else:
+            all_outstanding_customer_balances = None
         invoice_ids = [invoice["id"] for invoice in invoices if invoice.get("id")]
         payment_invoice_ids = list({
             payment["invoice_id"]
@@ -17584,6 +17603,7 @@ async def get_financial_report(
             vehicles_by_id=vehicles_by_id,
             all_outstanding_invoices=all_outstanding_invoices,
             all_outstanding_payments=all_outstanding_payments,
+            all_outstanding_customer_balances=all_outstanding_customer_balances,
         )
 
     try:

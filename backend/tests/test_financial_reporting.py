@@ -291,6 +291,38 @@ def test_financial_report_outstanding_balances_include_invoices_from_every_perio
     } == {"OCT-1": 75, "NOV-1": 150}
 
 
+def test_financial_report_outstanding_includes_express_invoices_and_customer_balances():
+    report = server.build_financial_report(
+        date(2026, 11, 1),
+        date(2026, 11, 30),
+        "expenses_only",
+        invoices=[], payments=[], linked_payments=[], expenses=[],
+        vehicle_records=[], buyings=[], grvs=[], invoice_movements=[],
+        all_outstanding_invoices=[
+            {
+                "id": "standard-invoice", "number": "INV-1",
+                "invoice_type": "standard", "status": "issued", "total": 100,
+            },
+            {
+                "id": "express-invoice", "number": "EW-1",
+                "invoice_type": "express", "status": "issued", "total": 250,
+            },
+        ],
+        all_outstanding_payments=[
+            {"id": "standard-payment", "invoice_id": "standard-invoice", "amount": 20},
+            {"id": "express-payment", "invoice_id": "express-invoice", "amount": 50},
+        ],
+        all_outstanding_customer_balances=[
+            {"id": "standard-customer", "name": "Standard", "other_balance": 30,
+             "other_balance_express": False},
+            {"id": "express-customer", "name": "Express", "other_balance": 40,
+             "other_balance_express": True},
+        ],
+    )
+
+    assert report["summary"]["pending_payments"] == 350
+
+
 def test_financial_report_excludes_opening_balances_from_sales_but_keeps_them_outstanding():
     report = server.build_financial_report(
         date(2026, 11, 1),
